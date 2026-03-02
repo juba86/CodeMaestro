@@ -1,0 +1,73 @@
+"use client";
+
+import { useState } from "react";
+import { useBuilderStore } from "@/stores/builder-store";
+import { ProjectInfoForm } from "./project-info-form";
+import { CotSectionEditor } from "./cot-section-editor";
+import { PromptPreview } from "./prompt-preview";
+import { RefinementChat } from "./refinement-chat";
+import { SavePromptDialog } from "./save-prompt-dialog";
+import { cn } from "@/lib/utils";
+import { Save, RotateCcw } from "lucide-react";
+
+const steps = [
+  { id: "form" as const, label: "Project Info" },
+  { id: "edit" as const, label: "Edit Sections" },
+  { id: "preview" as const, label: "Preview" },
+  { id: "refine" as const, label: "Refine" },
+];
+
+export function BuilderWorkflow() {
+  const { step, setStep, reset, xmlContent } = useBuilderStore();
+  const [saveOpen, setSaveOpen] = useState(false);
+
+  return (
+    <div className="max-w-6xl mx-auto space-y-6">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-1">
+          {steps.map((s, i) => (
+            <div key={s.id} className="flex items-center">
+              <button
+                onClick={() => setStep(s.id)}
+                className={cn(
+                  "px-3 py-1.5 text-sm rounded-md transition-colors",
+                  step === s.id
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:text-foreground hover:bg-accent"
+                )}
+              >
+                {i + 1}. {s.label}
+              </button>
+              {i < steps.length - 1 && (
+                <span className="mx-1 text-muted-foreground">/</span>
+              )}
+            </div>
+          ))}
+        </div>
+        <div className="flex gap-2">
+          {xmlContent && (
+            <button
+              onClick={() => setSaveOpen(true)}
+              className="flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-primary text-primary-foreground hover:bg-primary/90"
+            >
+              <Save size={14} /> Save
+            </button>
+          )}
+          <button
+            onClick={reset}
+            className="flex items-center gap-1 px-3 py-1.5 text-sm rounded-md border border-input hover:bg-accent text-muted-foreground"
+          >
+            <RotateCcw size={14} /> Reset
+          </button>
+        </div>
+      </div>
+
+      {step === "form" && <ProjectInfoForm />}
+      {step === "edit" && <CotSectionEditor />}
+      {step === "preview" && <PromptPreview />}
+      {step === "refine" && <RefinementChat />}
+
+      <SavePromptDialog open={saveOpen} onClose={() => setSaveOpen(false)} />
+    </div>
+  );
+}

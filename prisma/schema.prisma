@@ -1,0 +1,89 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Prompt {
+  id          String          @id @default(cuid())
+  title       String
+  description String          @default("")
+  content     String          // XML string
+  structured  String          @default("{}") // JSON string of structured data
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  versions    PromptVersion[]
+  tags        PromptTag[]
+  testResults TestResult[]
+
+  @@index([title])
+}
+
+model PromptVersion {
+  id        String   @id @default(cuid())
+  promptId  String
+  version   Int
+  content   String
+  structured String  @default("{}")
+  changelog String   @default("")
+  createdAt DateTime @default(now())
+
+  prompt    Prompt   @relation(fields: [promptId], references: [id], onDelete: Cascade)
+
+  @@unique([promptId, version])
+  @@index([promptId])
+}
+
+model PromptTag {
+  id       String @id @default(cuid())
+  promptId String
+  tag      String
+
+  prompt   Prompt @relation(fields: [promptId], references: [id], onDelete: Cascade)
+
+  @@unique([promptId, tag])
+  @@index([tag])
+}
+
+model TestResult {
+  id        String   @id @default(cuid())
+  promptId  String
+  provider  String   // "claude" | "gemini"
+  model     String
+  input     String
+  output    String
+  latencyMs Int
+  createdAt DateTime @default(now())
+
+  prompt    Prompt   @relation(fields: [promptId], references: [id], onDelete: Cascade)
+
+  @@index([promptId])
+}
+
+model Template {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  name        String
+  description String   @default("")
+  category    String   @default("general")
+  content     String   // XML template with {{PLACEHOLDERS}}
+  structured  String   @default("{}") // JSON of structured template data
+  isBuiltIn   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([category])
+  @@index([slug])
+}
+
+model Setting {
+  id    String @id @default(cuid())
+  key   String @unique
+  value String // JSON string
+
+  @@index([key])
+}

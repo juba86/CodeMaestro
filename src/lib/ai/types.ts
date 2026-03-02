@@ -1,0 +1,83 @@
+export type ProviderName = "claude" | "gemini";
+
+export interface ModelInfo {
+  id: string;
+  name: string;
+  provider: ProviderName;
+  maxTokens: number;
+}
+
+export interface ChatMessage {
+  role: "user" | "assistant" | "system";
+  content: string;
+}
+
+export interface StreamChunk {
+  type: "text" | "done" | "error";
+  content: string;
+}
+
+export interface SendMessageParams {
+  messages: ChatMessage[];
+  model?: string;
+  maxTokens?: number;
+  temperature?: number;
+  systemPrompt?: string;
+}
+
+export interface AIProvider {
+  name: ProviderName;
+  sendMessage(params: SendMessageParams): Promise<string>;
+  streamMessage(params: SendMessageParams): AsyncGenerator<StreamChunk>;
+  getModels(): ModelInfo[];
+  validateCredentials(apiKey: string): Promise<boolean>;
+}
+
+export interface SwarmConfig {
+  topology: "hierarchical" | "mesh" | "ring" | "star";
+  agentCount: number;
+  agentRoles: SwarmAgentRole[];
+  coordinationStrategy: "majority" | "weighted" | "byzantine";
+  memoryScope: "project" | "local" | "user";
+}
+
+export interface SwarmAgentRole {
+  type: "researcher" | "coder" | "analyst" | "tester" | "architect" | "reviewer" | "optimizer" | "documenter" | "custom";
+  name: string;
+  description: string;
+}
+
+export type PromptTechnique =
+  | "chain-of-thought"
+  | "zero-shot-cot"
+  | "few-shot-cot"
+  | "self-consistency"
+  | "tree-of-thoughts"
+  | "react"
+  | "self-refine"
+  | "role-prompting"
+  | "structured-output"
+  | "meta-prompting"
+  | "constitutional"
+  | "step-back"
+  | "analogical"
+  | "decomposition";
+
+export interface PromptStructured {
+  instructions: string;
+  context: string;
+  constraints: string;
+  examples: PromptExample[];
+  task: string;
+  targetAudience: string;
+  outputFormat: string;
+  technique?: PromptTechnique;
+  swarmConfig?: SwarmConfig;
+}
+
+export interface PromptExample {
+  id: string;
+  input: string;
+  thinking: string;
+  answer: string;
+}
