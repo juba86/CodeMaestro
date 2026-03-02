@@ -54,7 +54,7 @@ export function PlaygroundView() {
     const data = await res.json();
     const latencyMs = Math.round(performance.now() - start);
 
-    return { provider, model, output: data.content, latencyMs, timestamp: new Date() };
+    return { provider, model, output: data.content || "", latencyMs, timestamp: new Date() };
   }
 
   async function handleRun() {
@@ -65,29 +65,32 @@ export function PlaygroundView() {
 
     setRunning(true);
     try {
+      let newResults: TestRun[];
+
       if (compareMode) {
         const [claudeResult, geminiResult] = await Promise.allSettled([
           runTest("claude", "claude-sonnet-4-20250514"),
           runTest("gemini", "gemini-2.5-flash"),
         ]);
 
-        const newResults: TestRun[] = [];
+        newResults = [];
         if (claudeResult.status === "fulfilled") newResults.push(claudeResult.value);
         if (geminiResult.status === "fulfilled") newResults.push(geminiResult.value);
 
         if (newResults.length === 0) {
           toast.error("Both providers failed. Check API keys in Settings.");
-        } else {
-          setResults(newResults);
+          return;
         }
       } else {
         const result = await runTest(selectedProvider, selectedModel);
-        setResults([result]);
+        newResults = [result];
       }
 
-      // Save test result to DB if we have a promptId
-      if (currentPromptId && results.length > 0) {
-        for (const r of results) {
+      setResults(newResults);
+
+      // Save test results to DB using the fresh results (not stale closure)
+      if (currentPromptId) {
+        for (const r of newResults) {
           fetch("/api/test-results", {
             method: "POST",
             headers: { "Content-Type": "application/json" },

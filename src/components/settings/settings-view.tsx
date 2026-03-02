@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useSettingsStore } from "@/stores/settings-store";
 import { encryptApiKey, decryptApiKey } from "@/lib/ai/crypto";
 import type { ProviderName, ModelInfo } from "@/lib/ai/types";
@@ -29,6 +29,7 @@ export function SettingsView() {
     gemini: null,
   });
   const [models, setModels] = useState<ModelInfo[]>([]);
+  const modelAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     // Load encrypted keys from localStorage
@@ -46,7 +47,12 @@ export function SettingsView() {
   }, []);
 
   useEffect(() => {
-    fetch(`/api/ai/models?provider=${activeProvider}`)
+    // Cancel previous model fetch
+    modelAbortRef.current?.abort();
+    const controller = new AbortController();
+    modelAbortRef.current = controller;
+
+    fetch(`/api/ai/models?provider=${activeProvider}`, { signal: controller.signal })
       .then((r) => r.json())
       .then((d) => {
         const m = d.models || [];
@@ -55,8 +61,18 @@ export function SettingsView() {
           setActiveModel(m[0].id);
         }
       })
-      .catch(() => {});
+      .catch((err) => {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+      });
+
+    return () => controller.abort();
   }, [activeProvider]);
+
+  function handleKeyChange(provider: ProviderName, value: string) {
+    setApiKeys((prev) => ({ ...prev, [provider]: value }));
+    // Reset validation status when key changes
+    setValidationResults((prev) => ({ ...prev, [provider]: null }));
+  }
 
   async function saveKey(provider: ProviderName) {
     const key = apiKeys[provider];
@@ -130,10 +146,11 @@ export function SettingsView() {
                   className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm pr-10 focus:outline-none focus:ring-2 focus:ring-ring"
                   placeholder={`Enter ${p.label} API key (or set ${p.envHint} in .env)`}
                   value={apiKeys[p.id]}
-                  onChange={(e) => setApiKeys((prev) => ({ ...prev, [p.id]: e.target.value }))}
+                  onChange={(e) => handleKeyChange(p.id, e.target.value)}
                 />
                 <button
                   onClick={() => setShowKeys((prev) => ({ ...prev, [p.id]: !prev[p.id] }))}
+                  aria-label={showKeys[p.id] ? `Hide ${p.label} API key` : `Show ${p.label} API key`}
                   className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground"
                 >
                   {showKeys[p.id] ? <EyeOff size={14} /> : <Eye size={14} />}

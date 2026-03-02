@@ -1,6 +1,17 @@
 import type { PromptStructured, PromptExample, SwarmConfig, SwarmAgentRole, PromptTechnique } from "@/lib/ai/types";
 import { techniques } from "./techniques";
 
+/**
+ * Lightweight regex-based XML parser for prompt XML format.
+ *
+ * Limitations:
+ * - Uses regex, not a full XML parser — nested same-name tags may not parse correctly
+ * - Attributes are only extracted from swarm-config tags
+ * - CDATA sections are not supported
+ *
+ * This is sufficient for the PromptBuilder XML schema where tags are well-structured.
+ */
+
 function extractTag(xml: string, tagName: string): string {
   const regex = new RegExp(`<${tagName}[^>]*>([\\s\\S]*?)</${tagName}>`, "i");
   const match = xml.match(regex);
@@ -22,6 +33,19 @@ function unescapeXml(s: string): string {
 }
 
 export function parseXml(xml: string): PromptStructured {
+  // Fallback: return empty structure if input is empty/invalid
+  if (!xml || typeof xml !== "string") {
+    return {
+      instructions: "",
+      context: "",
+      constraints: "",
+      examples: [],
+      task: "",
+      targetAudience: "",
+      outputFormat: "",
+    };
+  }
+
   const examples: PromptExample[] = [];
   const examplesBlock = extractTag(xml, "examples");
   if (examplesBlock) {

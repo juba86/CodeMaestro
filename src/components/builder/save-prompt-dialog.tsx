@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useBuilderStore } from "@/stores/builder-store";
 import { toast } from "sonner";
 import { X } from "lucide-react";
@@ -16,6 +16,14 @@ export function SavePromptDialog({ open, onClose }: SavePromptDialogProps) {
   const [description, setDescription] = useState("");
   const [tagsInput, setTagsInput] = useState("");
   const [saving, setSaving] = useState(false);
+  const titleRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (open) {
+      // Auto-focus title input when dialog opens
+      setTimeout(() => titleRef.current?.focus(), 0);
+    }
+  }, [open]);
 
   if (!open) return null;
 
@@ -73,12 +81,17 @@ export function SavePromptDialog({ open, onClose }: SavePromptDialogProps) {
 
   return (
     <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center">
-      <div className="bg-background border border-border rounded-lg p-6 w-full max-w-md space-y-4">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="save-dialog-title"
+        className="bg-background border border-border rounded-lg p-6 w-full max-w-md space-y-4"
+      >
         <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold">
+          <h2 id="save-dialog-title" className="text-lg font-semibold">
             {currentPromptId ? "Update Prompt" : "Save Prompt"}
           </h2>
-          <button onClick={onClose} className="p-1 hover:bg-accent rounded">
+          <button onClick={onClose} className="p-1 hover:bg-accent rounded" aria-label="Close dialog">
             <X size={16} />
           </button>
         </div>
@@ -86,6 +99,7 @@ export function SavePromptDialog({ open, onClose }: SavePromptDialogProps) {
         <div>
           <label className="text-sm font-medium">Title *</label>
           <input
+            ref={titleRef}
             className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
             value={title}
             onChange={(e) => setTitle(e.target.value)}

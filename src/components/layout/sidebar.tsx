@@ -41,6 +41,8 @@ export function Sidebar() {
         )}
         <button
           onClick={toggleSidebar}
+          aria-label={sidebarOpen ? "Collapse sidebar" : "Expand sidebar"}
+          aria-expanded={sidebarOpen}
           className="p-1 rounded hover:bg-sidebar-accent text-sidebar-foreground"
         >
           {sidebarOpen ? <PanelLeftClose size={18} /> : <PanelLeft size={18} />}
@@ -54,6 +56,7 @@ export function Sidebar() {
             <Link
               key={href}
               href={href}
+              aria-current={isActive ? "page" : undefined}
               className={cn(
                 "flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors",
                 isActive

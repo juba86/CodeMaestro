@@ -1,5 +1,8 @@
-// Simple encryption for API keys in localStorage
-// Not bank-grade, but better than plaintext
+// Client-side encryption for API keys in localStorage.
+// Security note: This is obfuscation, not true security. The encryption key is
+// derived from a static salt embedded in the client code, meaning anyone with
+// access to the source can decrypt stored keys. This is a known limitation of
+// client-side-only encryption. For production use, consider server-side key storage.
 
 const SALT = "prompt-builder-v1";
 
@@ -13,7 +16,7 @@ async function getKey(password: string): Promise<CryptoKey> {
     ["deriveKey"]
   );
   return crypto.subtle.deriveKey(
-    { name: "PBKDF2", salt: enc.encode(SALT), iterations: 100000, hash: "SHA-256" },
+    { name: "PBKDF2", salt: enc.encode(SALT), iterations: 600000, hash: "SHA-256" },
     keyMaterial,
     { name: "AES-GCM", length: 256 },
     false,

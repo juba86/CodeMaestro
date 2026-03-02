@@ -4,7 +4,8 @@ import { useBuilderStore } from "@/stores/builder-store";
 import { useSettingsStore } from "@/stores/settings-store";
 import { REFINEMENT_SYSTEM_PROMPT, QUICK_ACTIONS } from "@/lib/prompt-engine/refinement-prompts";
 import { parseXml } from "@/lib/prompt-engine/xml-parser";
-import { buildXml } from "@/lib/prompt-engine/xml-builder";
+import { decryptApiKey } from "@/lib/ai/crypto";
+import type { ProviderName } from "@/lib/ai/types";
 import { useState, useRef, useEffect } from "react";
 import { Send, Wand2 } from "lucide-react";
 import { toast } from "sonner";
@@ -17,10 +18,24 @@ export function RefinementChat() {
   const { activeProvider, activeModel } = useSettingsStore();
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [chatMessages]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => { abortRef.current?.abort(); };
+  }, []);
+
+  async function getApiKey(provider: ProviderName): Promise<string> {
+    const enc = localStorage.getItem(`pb-apikey-${provider}`);
+    if (enc) {
+      try { return await decryptApiKey(enc); } catch { /* fallback */ }
+    }
+    return "";
+  }
 
   async function sendMessage(text: string) {
     if (!text.trim() || isGenerating) return;
@@ -30,7 +45,18 @@ export function RefinementChat() {
     setInput("");
     setIsGenerating(true);
 
+    // Abort previous request if still running
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    // Timeout after 30 seconds
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
+
     try {
+      // Load API key from encrypted localStorage
+      const apiKey = await getApiKey(activeProvider);
+
       const res = await fetch("/api/ai/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -43,7 +69,9 @@ export function RefinementChat() {
           provider: activeProvider,
           model: activeModel,
           stream: true,
+          apiKey,
         }),
+        signal: controller.signal,
       });
 
       if (!res.ok) throw new Error("Chat request failed");
@@ -73,8 +101,9 @@ export function RefinementChat() {
 
       addChatMessage({ role: "assistant", content: fullResponse });
 
-      // Try to extract XML from response and update
-      const xmlMatch = fullResponse.match(/<instructions>[\s\S]*<\/task>/);
+      // Try to extract XML from response - broader pattern matching
+      const xmlMatch = fullResponse.match(/<instructions>[\s\S]*?<\/task>/) ||
+                       fullResponse.match(/<instructions>[\s\S]*<\/instructions>/);
       if (xmlMatch) {
         const newXml = xmlMatch[0];
         setXmlContent(newXml);
@@ -82,9 +111,14 @@ export function RefinementChat() {
         toast.success("Prompt updated from AI suggestion");
       }
     } catch (err) {
-      toast.error("Chat failed. Check your API key.");
-      console.error(err);
+      if (err instanceof DOMException && err.name === "AbortError") {
+        toast.error("Request timed out or was cancelled.");
+      } else {
+        toast.error("Chat failed. Check your API key.");
+        console.error(err);
+      }
     } finally {
+      clearTimeout(timeoutId);
       setIsGenerating(false);
     }
   }

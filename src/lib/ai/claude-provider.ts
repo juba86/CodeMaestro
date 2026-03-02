@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { AIProvider, SendMessageParams, StreamChunk, ModelInfo } from "./types";
+import { getStaticModels } from "./models";
 
 export class ClaudeProvider implements AIProvider {
   name = "claude" as const;
@@ -10,11 +11,7 @@ export class ClaudeProvider implements AIProvider {
   }
 
   getModels(): ModelInfo[] {
-    return [
-      { id: "claude-opus-4-20250514", name: "Claude Opus 4", provider: "claude", maxTokens: 32000 },
-      { id: "claude-sonnet-4-20250514", name: "Claude Sonnet 4", provider: "claude", maxTokens: 16000 },
-      { id: "claude-haiku-4-20250414", name: "Claude Haiku 4", provider: "claude", maxTokens: 8192 },
-    ];
+    return getStaticModels("claude");
   }
 
   async sendMessage(params: SendMessageParams): Promise<string> {

@@ -38,7 +38,8 @@ export function PromptDetail({ promptId, onBack, onDelete, onRefresh }: PromptDe
       .then((d) => {
         setPrompt(d.prompt);
         if (d.prompt?.versions.length > 0) setActiveVersion(d.prompt.versions[0].version);
-      });
+      })
+      .catch(() => toast.error("Failed to load prompt"));
   }, [promptId]);
 
   if (!prompt) return <p className="text-sm text-muted-foreground">Loading...</p>;
@@ -60,22 +61,38 @@ export function PromptDetail({ promptId, onBack, onDelete, onRefresh }: PromptDe
   }
 
   function handleExport(format: "json" | "yaml") {
-    const data = {
-      title: prompt!.title,
-      description: prompt!.description,
-      content: prompt!.content,
-      structured: JSON.parse(prompt!.structured),
-      tags: prompt!.tags.map((t) => t.tag),
-    };
-    const str = format === "json" ? JSON.stringify(data, null, 2) : yaml.dump(data);
-    const blob = new Blob([str], { type: "text/plain" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${prompt!.title.replace(/\s+/g, "-").toLowerCase()}.${format}`;
-    a.click();
-    URL.revokeObjectURL(url);
-    toast.success(`Exported as ${format.toUpperCase()}`);
+    try {
+      let structuredData: Record<string, unknown> = {};
+      try {
+        structuredData = JSON.parse(prompt!.structured);
+      } catch {
+        // If structured data is invalid JSON, export as empty object
+      }
+
+      const data = {
+        title: prompt!.title,
+        description: prompt!.description,
+        content: prompt!.content,
+        structured: structuredData,
+        tags: prompt!.tags.map((t) => t.tag),
+      };
+      const str = format === "json" ? JSON.stringify(data, null, 2) : yaml.dump(data);
+      const blob = new Blob([str], { type: "text/plain" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${prompt!.title.replace(/\s+/g, "-").toLowerCase()}.${format}`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success(`Exported as ${format.toUpperCase()}`);
+    } catch {
+      toast.error(`Export failed`);
+    }
+  }
+
+  function handleDelete() {
+    if (!window.confirm("Delete this prompt? This action cannot be undone.")) return;
+    onDelete();
   }
 
   function handleTest() {
@@ -102,13 +119,13 @@ export function PromptDetail({ promptId, onBack, onDelete, onRefresh }: PromptDe
           <button onClick={handleTest} className="px-3 py-1.5 text-sm rounded-md border border-input hover:bg-accent flex items-center gap-1">
             <Play size={14} /> Test
           </button>
-          <button onClick={handleCopy} className="p-1.5 rounded-md border border-input hover:bg-accent">
+          <button onClick={handleCopy} className="p-1.5 rounded-md border border-input hover:bg-accent" aria-label="Copy to clipboard">
             <Copy size={14} />
           </button>
           <button onClick={() => handleExport("json")} className="p-1.5 rounded-md border border-input hover:bg-accent" title="Export JSON">
             <Download size={14} />
           </button>
-          <button onClick={onDelete} className="p-1.5 rounded-md border border-input hover:bg-accent text-destructive">
+          <button onClick={handleDelete} className="p-1.5 rounded-md border border-input hover:bg-accent text-destructive" aria-label="Delete prompt">
             <Trash2 size={14} />
           </button>
         </div>

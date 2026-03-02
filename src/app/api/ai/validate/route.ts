@@ -1,14 +1,28 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createProvider } from "@/lib/ai/provider-factory";
-import type { ProviderName } from "@/lib/ai/types";
+import { validateRequestSchema, formatZodError } from "@/lib/validation/schemas";
 
 export async function POST(req: NextRequest) {
   try {
-    const { provider: providerName, apiKey } = (await req.json()) as {
-      provider: ProviderName;
-      apiKey: string;
-    };
+    let body: unknown;
+    try {
+      body = await req.json();
+    } catch {
+      return NextResponse.json(
+        { error: "Invalid JSON body", code: "INVALID_JSON" },
+        { status: 400 }
+      );
+    }
 
+    const result = validateRequestSchema.safeParse(body);
+    if (!result.success) {
+      return NextResponse.json(
+        { error: formatZodError(result.error), code: "VALIDATION_ERROR" },
+        { status: 400 }
+      );
+    }
+
+    const { provider: providerName, apiKey } = result.data;
     const provider = createProvider(providerName, apiKey);
     const valid = await provider.validateCredentials(apiKey);
 

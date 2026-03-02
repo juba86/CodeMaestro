@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { PromptCard } from "./prompt-card";
 import { PromptDetail } from "./prompt-detail";
 import { Search, Plus } from "lucide-react";
@@ -21,26 +21,49 @@ export function PromptLibrary() {
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   const fetchPrompts = useCallback(async () => {
+    // Cancel previous in-flight request
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     setLoading(true);
-    const params = new URLSearchParams();
-    if (search) params.set("q", search);
-    const res = await fetch(`/api/prompts?${params}`);
-    const data = await res.json();
-    setPrompts(data.prompts || []);
-    setLoading(false);
+    setError(null);
+    try {
+      const params = new URLSearchParams();
+      if (search) params.set("q", search);
+      const res = await fetch(`/api/prompts?${params}`, { signal: controller.signal });
+      if (!res.ok) throw new Error("Failed to load prompts");
+      const data = await res.json();
+      setPrompts(data.prompts || []);
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      setError("Failed to load prompts. Please try again.");
+    } finally {
+      setLoading(false);
+    }
   }, [search]);
 
   useEffect(() => {
     const timer = setTimeout(fetchPrompts, 300);
-    return () => clearTimeout(timer);
+    return () => {
+      clearTimeout(timer);
+      abortRef.current?.abort();
+    };
   }, [fetchPrompts]);
 
   async function handleDelete(id: string) {
-    await fetch(`/api/prompts/${id}`, { method: "DELETE" });
-    setSelectedId(null);
-    fetchPrompts();
+    if (!window.confirm("Delete this prompt? This action cannot be undone.")) return;
+    try {
+      await fetch(`/api/prompts/${id}`, { method: "DELETE" });
+      setSelectedId(null);
+      fetchPrompts();
+    } catch {
+      setError("Failed to delete prompt.");
+    }
   }
 
   if (selectedId) {
@@ -76,9 +99,15 @@ export function PromptLibrary() {
         />
       </div>
 
+      {error && (
+        <div className="text-sm text-destructive bg-destructive/10 rounded-md px-4 py-2">
+          {error}
+        </div>
+      )}
+
       {loading && <p className="text-sm text-muted-foreground">Loading...</p>}
 
-      {!loading && prompts.length === 0 && (
+      {!loading && !error && prompts.length === 0 && (
         <div className="text-center py-12 text-muted-foreground">
           <p className="text-lg">No prompts yet</p>
           <p className="text-sm mt-1">Create your first prompt in the Builder.</p>

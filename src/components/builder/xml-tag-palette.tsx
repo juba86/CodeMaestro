@@ -29,6 +29,7 @@ export function XmlTagPalette({ onInsert }: XmlTagPaletteProps) {
         <button
           key={tag}
           onClick={() => onInsert(tag)}
+          title={`Insert <${tag}> tag`}
           className="px-2 py-0.5 text-xs rounded bg-accent hover:bg-accent/80 font-mono"
         >
           &lt;{tag}&gt;

@@ -27,6 +27,7 @@ export function Header() {
       <div className="flex items-center gap-2">
         <button
           onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+          aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
           className="p-2 rounded-md hover:bg-accent text-muted-foreground"
         >
           {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}

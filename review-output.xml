@@ -1,0 +1,165 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<code-review project="PromptBuilder" date="2026-03-02" methodology="tree-of-thoughts">
+
+  <executive-summary>
+    <overview>
+      PromptBuilder is a Next.js 16 full-stack prompt engineering platform supporting Claude and Gemini providers,
+      14 prompting techniques, multi-agent swarm configuration, version history, and encrypted API key storage.
+      The codebase is well-structured but has several security, robustness, and accessibility gaps.
+    </overview>
+    <risk-level>MEDIUM</risk-level>
+    <critical-findings count="7">
+      <finding id="SEC-1" severity="high">No input validation on most API routes (only /api/prompts/import uses Zod)</finding>
+      <finding id="SEC-2" severity="high">Gemini validateCredentials sends string instead of Contents array - crashes silently</finding>
+      <finding id="SEC-3" severity="medium">PBKDF2 iterations at 100,000 - below current OWASP recommendation of 600,000</finding>
+      <finding id="SEC-4" severity="medium">JSON.parse without try-catch in prompt-detail.tsx can crash the UI</finding>
+      <finding id="BUG-1" severity="medium">Playground saves stale results (uses old results array due to closure)</finding>
+      <finding id="BUG-2" severity="medium">Tag update in PUT /api/prompts/[id] is not atomic - delete + create without transaction</finding>
+      <finding id="UX-1" severity="medium">No delete confirmation dialogs anywhere - data loss risk</finding>
+    </critical-findings>
+    <total-issues>28</total-issues>
+  </executive-summary>
+
+  <commit-1 scope="frontend">
+    <title>Frontend Fixes: Accessibility, UX, Error Handling</title>
+
+    <issue id="A11Y-1" file="src/components/layout/sidebar.tsx">
+      <description>Navigation links lack aria-current="page" for active state; toggle button has no aria-label or aria-expanded</description>
+      <fix>Add aria-current="page" on active links; add aria-label and aria-expanded on sidebar toggle</fix>
+    </issue>
+
+    <issue id="A11Y-2" file="src/components/layout/header.tsx">
+      <description>Theme toggle button has no accessible label</description>
+      <fix>Add aria-label="Toggle theme"</fix>
+    </issue>
+
+    <issue id="A11Y-3" file="src/components/settings/settings-view.tsx">
+      <description>Show/hide password buttons lack accessible labels</description>
+      <fix>Add aria-label="Show/Hide API key" on eye toggle buttons</fix>
+    </issue>
+
+    <issue id="A11Y-4" file="src/components/builder/xml-tag-palette.tsx">
+      <description>Tag insertion buttons have no title or aria-label explaining their purpose</description>
+      <fix>Add title attributes describing what each tag does</fix>
+    </issue>
+
+    <issue id="A11Y-5" file="src/components/builder/save-prompt-dialog.tsx">
+      <description>Modal container lacks role="dialog" and aria-modal="true"; no auto-focus on title input</description>
+      <fix>Add role, aria-modal, aria-labelledby; add autoFocus on title input</fix>
+    </issue>
+
+    <issue id="UX-1" file="src/components/builder/builder-workflow.tsx">
+      <description>Reset button immediately clears all work with no confirmation</description>
+      <fix>Add window.confirm() before calling reset()</fix>
+    </issue>
+
+    <issue id="UX-2" file="src/components/library/prompt-library.tsx">
+      <description>No AbortController for fetch; no error state display; delete has no confirmation</description>
+      <fix>Add AbortController cleanup; add error state; add confirm() before delete</fix>
+    </issue>
+
+    <issue id="UX-3" file="src/components/library/prompt-detail.tsx">
+      <description>JSON.parse(prompt.structured) can throw; export has no error handling; delete has no confirmation</description>
+      <fix>Wrap JSON.parse in try-catch; wrap export in try-catch; add confirm() on delete</fix>
+    </issue>
+
+    <issue id="UX-4" file="src/components/builder/refinement-chat.tsx">
+      <description>No AbortController or timeout for streaming; XML extraction regex too rigid</description>
+      <fix>Add AbortController with 30s timeout; broaden XML extraction pattern</fix>
+    </issue>
+
+    <issue id="UX-5" file="src/components/settings/settings-view.tsx">
+      <description>No AbortController for model fetch; validation status persists after key change</description>
+      <fix>Add AbortController cleanup; reset validation on key change</fix>
+    </issue>
+
+    <issue id="BUG-1" file="src/components/playground/playground-view.tsx">
+      <description>Test result save uses stale results array from closure (results is old when promise resolves)</description>
+      <fix>Save results from the newly created array, not the stale closure variable</fix>
+    </issue>
+
+    <issue id="STORE-1" file="src/stores/builder-store.ts">
+      <description>chatMessages array can grow unbounded; no persist middleware for draft autosave</description>
+      <fix>Limit chatMessages to 100; add persist middleware for draft recovery</fix>
+    </issue>
+  </commit-1>
+
+  <commit-2 scope="backend">
+    <title>Backend Fixes: Validation, Pagination, Error Handling, Security</title>
+
+    <issue id="VAL-1" file="src/lib/validation/schemas.ts" type="new-file">
+      <description>Missing centralized Zod schemas for all API request bodies</description>
+      <fix>Create shared validation schemas used by all API routes</fix>
+    </issue>
+
+    <issue id="VAL-2" file="src/app/api/ai/chat/route.ts">
+      <description>No input validation; provider not checked against valid names; no message limit</description>
+      <fix>Add Zod schema; validate provider; limit messages to 50; cap maxTokens</fix>
+    </issue>
+
+    <issue id="VAL-3" file="src/app/api/ai/validate/route.ts">
+      <description>No input validation; provider cast without check</description>
+      <fix>Add Zod schema with provider enum validation</fix>
+    </issue>
+
+    <issue id="VAL-4" file="src/app/api/ai/models/route.ts">
+      <description>Provider param cast as ProviderName without validation</description>
+      <fix>Validate provider param against known names; return 400 for unknown</fix>
+    </issue>
+
+    <issue id="VAL-5" file="src/app/api/prompts/route.ts">
+      <description>POST has no validation; GET has no pagination</description>
+      <fix>Add Zod schema for POST; add limit/offset pagination for GET</fix>
+    </issue>
+
+    <issue id="VAL-6" file="src/app/api/prompts/[id]/route.ts">
+      <description>PUT has no validation; tag operations not atomic</description>
+      <fix>Add Zod schema; wrap tag update in Prisma transaction</fix>
+    </issue>
+
+    <issue id="VAL-7" file="src/app/api/templates/route.ts">
+      <description>POST has no validation</description>
+      <fix>Add Zod schema for template creation</fix>
+    </issue>
+
+    <issue id="VAL-8" file="src/app/api/test-results/route.ts">
+      <description>No validation; no promptId existence check</description>
+      <fix>Add Zod schema; verify prompt exists before creating result</fix>
+    </issue>
+
+    <issue id="PROV-1" file="src/lib/ai/gemini-provider.ts">
+      <description>validateCredentials passes "hi" as string instead of Contents array format</description>
+      <fix>Pass contents as proper array with parts structure</fix>
+    </issue>
+
+    <issue id="PROV-2" files="src/lib/ai/claude-provider.ts, src/lib/ai/gemini-provider.ts">
+      <description>Model lists duplicated in providers and provider-factory (3 copies)</description>
+      <fix>Delegate getModels() to getStaticModels() from provider-factory</fix>
+    </issue>
+
+    <issue id="CRYPTO-1" file="src/lib/ai/crypto.ts">
+      <description>PBKDF2 uses 100,000 iterations; OWASP 2023 recommends 600,000 for SHA-256</description>
+      <fix>Increase to 600,000 iterations; add security limitation comment</fix>
+    </issue>
+
+    <issue id="DB-1" file="prisma/schema.prisma">
+      <description>Missing indexes on PromptVersion.createdAt and TestResult.createdAt for time-based queries</description>
+      <fix>Add @@index([createdAt]) to both models</fix>
+    </issue>
+
+    <issue id="XML-1" file="src/lib/prompt-engine/xml-parser.ts">
+      <description>unescapeXml double-processes when called on already-unescaped extractTag results; no fallback on parse errors</description>
+      <fix>Document regex limitations; add fallback for parse errors; note unescaping behavior</fix>
+    </issue>
+  </commit-2>
+
+  <recommendations>
+    <recommendation priority="high">Add rate limiting to AI chat endpoint to prevent API key abuse</recommendation>
+    <recommendation priority="high">Consider server-side API key storage (encrypted in DB) instead of client-side localStorage</recommendation>
+    <recommendation priority="medium">Add CSP headers in next.config.ts for XSS protection</recommendation>
+    <recommendation priority="medium">Add request ID logging for API route debugging</recommendation>
+    <recommendation priority="low">Consider migrating XML parser to a proper SAX/DOM parser for complex prompts</recommendation>
+    <recommendation priority="low">Add E2E tests with Playwright for critical workflows</recommendation>
+  </recommendations>
+
+</code-review>

@@ -21,6 +21,13 @@ export function BuilderWorkflow() {
   const { step, setStep, reset, xmlContent } = useBuilderStore();
   const [saveOpen, setSaveOpen] = useState(false);
 
+  function handleReset() {
+    if (!window.confirm("Reset all progress? This will clear your current prompt and chat history.")) {
+      return;
+    }
+    reset();
+  }
+
   return (
     <div className="max-w-6xl mx-auto space-y-6">
       <div className="flex items-center justify-between">
@@ -54,7 +61,7 @@ export function BuilderWorkflow() {
             </button>
           )}
           <button
-            onClick={reset}
+            onClick={handleReset}
             className="flex items-center gap-1 px-3 py-1.5 text-sm rounded-md border border-input hover:bg-accent text-muted-foreground"
           >
             <RotateCcw size={14} /> Reset

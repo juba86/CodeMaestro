@@ -1,5 +1,6 @@
 import { GoogleGenAI } from "@google/genai";
 import type { AIProvider, SendMessageParams, StreamChunk, ModelInfo } from "./types";
+import { getStaticModels } from "./models";
 
 export class GeminiProvider implements AIProvider {
   name = "gemini" as const;
@@ -10,11 +11,7 @@ export class GeminiProvider implements AIProvider {
   }
 
   getModels(): ModelInfo[] {
-    return [
-      { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", provider: "gemini", maxTokens: 65536 },
-      { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", provider: "gemini", maxTokens: 65536 },
-      { id: "gemini-2.0-flash", name: "Gemini 2.0 Flash", provider: "gemini", maxTokens: 8192 },
-    ];
+    return getStaticModels("gemini");
   }
 
   async sendMessage(params: SendMessageParams): Promise<string> {
@@ -67,9 +64,10 @@ export class GeminiProvider implements AIProvider {
   async validateCredentials(apiKey: string): Promise<boolean> {
     try {
       const client = new GoogleGenAI({ apiKey });
+      // Fix: pass proper Contents array instead of bare string
       await client.models.generateContent({
         model: "gemini-2.0-flash",
-        contents: "hi",
+        contents: [{ role: "user", parts: [{ text: "hi" }] }],
       });
       return true;
     } catch {

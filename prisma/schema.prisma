@@ -36,6 +36,7 @@ model PromptVersion {
 
   @@unique([promptId, version])
   @@index([promptId])
+  @@index([createdAt])
 }
 
 model PromptTag {
@@ -62,6 +63,7 @@ model TestResult {
   prompt    Prompt   @relation(fields: [promptId], references: [id], onDelete: Cascade)
 
   @@index([promptId])
+  @@index([createdAt])
 }
 
 model Template {

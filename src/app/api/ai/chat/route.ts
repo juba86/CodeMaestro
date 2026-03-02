@@ -1,25 +1,28 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createProvider } from "@/lib/ai/provider-factory";
-import type { ProviderName, ChatMessage } from "@/lib/ai/types";
+import { chatRequestSchema, formatZodError } from "@/lib/validation/schemas";
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
-    const {
-      messages,
-      systemPrompt,
-      provider: providerName,
-      model,
-      stream,
-      apiKey: clientApiKey,
-    } = body as {
-      messages: ChatMessage[];
-      systemPrompt?: string;
-      provider: ProviderName;
-      model?: string;
-      stream?: boolean;
-      apiKey?: string;
-    };
+    let body: unknown;
+    try {
+      body = await req.json();
+    } catch {
+      return NextResponse.json(
+        { error: "Invalid JSON body", code: "INVALID_JSON" },
+        { status: 400 }
+      );
+    }
+
+    const result = chatRequestSchema.safeParse(body);
+    if (!result.success) {
+      return NextResponse.json(
+        { error: formatZodError(result.error), code: "VALIDATION_ERROR" },
+        { status: 400 }
+      );
+    }
+
+    const { messages, systemPrompt, provider: providerName, model, stream, apiKey: clientApiKey, maxTokens, temperature } = result.data;
 
     // Get API key from request or env
     const apiKey =
@@ -31,7 +34,7 @@ export async function POST(req: NextRequest) {
 
     if (!apiKey) {
       return NextResponse.json(
-        { error: "No API key configured. Set it in Settings." },
+        { error: "No API key configured. Set it in Settings.", code: "MISSING_API_KEY" },
         { status: 400 }
       );
     }
@@ -47,6 +50,8 @@ export async function POST(req: NextRequest) {
               messages,
               systemPrompt,
               model,
+              maxTokens,
+              temperature,
             })) {
               const data = `data: ${JSON.stringify(chunk)}\n\n`;
               controller.enqueue(encoder.encode(data));
@@ -76,11 +81,16 @@ export async function POST(req: NextRequest) {
       messages,
       systemPrompt,
       model,
+      maxTokens,
+      temperature,
     });
 
     return NextResponse.json({ content });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "Unknown error";
-    return NextResponse.json({ error: msg }, { status: 500 });
+    console.error("[POST /api/ai/chat]", err);
+    return NextResponse.json(
+      { error: "Internal server error", code: "INTERNAL_ERROR" },
+      { status: 500 }
+    );
   }
 }
