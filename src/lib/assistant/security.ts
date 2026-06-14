@@ -77,6 +77,48 @@ export async function createWorkspace(parent: string, name: string): Promise<str
   return target;
 }
 
+/**
+ * Lists the subdirectories of a directory for the folder browser, confined to the
+ * allowed roots. Returns the resolved path, its parent (null if leaving the
+ * allowlist), and the immediate child directories.
+ */
+export async function browseDir(requested?: string): Promise<{
+  path: string;
+  parent: string | null;
+  dirs: { name: string; path: string }[];
+}> {
+  const roots = allowedRoots();
+  const target = requested && requested.trim() ? path.resolve(requested.trim()) : roots[0];
+
+  let real: string;
+  try {
+    real = await fs.realpath(target);
+  } catch {
+    throw new Error("Directory does not exist.");
+  }
+  const stat = await fs.stat(real);
+  if (!stat.isDirectory()) throw new Error("Not a directory.");
+  if (!roots.some((r) => isInside(real, r))) {
+    throw new Error("Directory is outside the allowed roots.");
+  }
+
+  const parentPath = path.dirname(real);
+  const parent =
+    parentPath !== real && roots.some((r) => isInside(parentPath, r)) ? parentPath : null;
+
+  let dirs: { name: string; path: string }[] = [];
+  try {
+    const entries = await fs.readdir(real, { withFileTypes: true });
+    dirs = entries
+      .filter((e) => e.isDirectory() && !e.name.startsWith("."))
+      .map((e) => ({ name: e.name, path: path.join(real, e.name) }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  } catch {
+    /* unreadable — return empty */
+  }
+  return { path: real, parent, dirs };
+}
+
 /** Lists the allowed roots and their immediate subdirectories as pickable workspaces. */
 export async function listWorkspaces(): Promise<{ path: string; label: string }[]> {
   const roots = allowedRoots();

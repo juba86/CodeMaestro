@@ -4,7 +4,8 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { getApiKey } from "@/lib/ai/client-keys";
 import {
   Plus, Send, Square, Trash2, Loader2, Terminal, Wrench, FileText,
-  AlertCircle, FolderGit2, Network, Cpu, Sparkles, FolderPlus,
+  AlertCircle, FolderGit2, Network, Cpu, Sparkles, FolderPlus, Folder, ChevronUp, ExternalLink, Play,
+  ChevronDown, Maximize2, Minimize2,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -38,7 +39,11 @@ interface PlannedSubtask {
   editsFiles: boolean;
 }
 
-interface Workspace { path: string; label: string }
+interface BrowseState {
+  path: string;
+  parent: string | null;
+  dirs: { name: string; path: string }[];
+}
 
 const PROVIDERS = [
   { id: "claude", label: "Claude Code" },
@@ -62,9 +67,20 @@ export function AssistantView() {
   const [pendingPrompt, setPendingPrompt] = useState("");
   const [newFolder, setNewFolder] = useState("");
 
-  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [browse, setBrowse] = useState<BrowseState | null>(null);
   const [tools, setTools] = useState<string[]>([]);
   const [permissionModes, setPermissionModes] = useState<string[]>([]);
+
+  // Dev-server launcher state for the active session.
+  const [dev, setDev] = useState<{ running: boolean; port?: number; command?: string; logs?: string[]; exitInfo?: string } | null>(null);
+  const [devCmd, setDevCmd] = useState("");
+  const [devPort, setDevPort] = useState<number>(0);
+  const [devLogsOpen, setDevLogsOpen] = useState(false);
+  const devPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Mobile/UX: maximize the chat to full screen; collapse the new-session config.
+  const [maximized, setMaximized] = useState(false);
+  const [configOpen, setConfigOpen] = useState(false);
 
   const [draft, setDraft] = useState({
     provider: "claude",
@@ -83,14 +99,41 @@ export function AssistantView() {
 
   useEffect(() => { loadSessions(); }, [loadSessions]);
 
+  // Open the new-session config by default only when there's nothing to show yet.
+  useEffect(() => {
+    if (sessions.length === 0 && !activeId) setConfigOpen(true);
+  }, [sessions.length, activeId]);
+
+  // Handoff from the Prompt Builder: a prompt was sent over → prefill the input.
+  useEffect(() => {
+    const handoff = sessionStorage.getItem("pb-assistant-prompt");
+    if (handoff) {
+      sessionStorage.removeItem("pb-assistant-prompt");
+      setInput(handoff);
+      setConfigOpen(true);
+      toast.info("Prompt übernommen — wähle/erstelle eine Session und sende ihn ab.");
+    }
+  }, []);
+
   useEffect(() => {
     fetch("/api/assistant/workspaces").then((r) => r.json()).then((d) => {
-      setWorkspaces(d.workspaces || []);
       setTools(d.tools || []);
       setPermissionModes(d.permissionModes || ["default"]);
-      setDraft((prev) => ({ ...prev, cwd: prev.cwd || d.workspaces?.[0]?.path || "" }));
     }).catch(() => {});
+    loadBrowse();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Folder browser: navigate the allowed directory tree; the browsed folder is
+  // the working directory the session will run in.
+  async function loadBrowse(path?: string) {
+    const url = path ? `/api/assistant/browse?path=${encodeURIComponent(path)}` : "/api/assistant/browse";
+    const d = await fetch(url).then((r) => r.json()).catch(() => null);
+    if (d?.path) {
+      setBrowse({ path: d.path, parent: d.parent ?? null, dirs: d.dirs || [] });
+      setDraft((prev) => ({ ...prev, cwd: d.path }));
+    }
+  }
 
   useEffect(() => {
     threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight, behavior: "smooth" });
@@ -110,6 +153,16 @@ export function AssistantView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId, running]);
 
+  // Poll the dev-server status (logs/exit) while it's running.
+  useEffect(() => {
+    if (devPollRef.current) { clearInterval(devPollRef.current); devPollRef.current = null; }
+    if (activeId && dev?.running) {
+      devPollRef.current = setInterval(() => loadDev(activeId), 3000);
+    }
+    return () => { if (devPollRef.current) clearInterval(devPollRef.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId, dev?.running]);
+
   const activeSession = sessions.find((s) => s.id === activeId);
 
   async function openSession(sid: string) {
@@ -117,6 +170,41 @@ export function AssistantView() {
     setLive([]);
     const d = await fetch(`/api/assistant/sessions/${sid}`).then((r) => r.json());
     setMessages(d.session?.messages || []);
+    loadDev(sid);
+  }
+
+  async function loadDev(sid: string) {
+    const d = await fetch(`/api/assistant/sessions/${sid}/dev`).then((r) => r.json()).catch(() => null);
+    if (!d) return;
+    setDev(d);
+    if (d.suggestion) { setDevCmd(d.suggestion.command); setDevPort(d.suggestion.port); }
+    else if (d.command && d.port) { setDevCmd(d.command); setDevPort(d.port); }
+  }
+
+  async function startDevServer() {
+    if (!activeId || !devCmd.trim() || !devPort) return;
+    const res = await fetch(`/api/assistant/sessions/${activeId}/dev`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ command: devCmd, port: devPort }),
+    });
+    const d = await res.json();
+    if (!res.ok) { toast.error(d.error || "Start fehlgeschlagen."); return; }
+    setDev(d);
+    setDevLogsOpen(true);
+    toast.success(`App gestartet auf Port ${devPort}.`);
+  }
+
+  async function stopDevServer() {
+    if (!activeId) return;
+    await fetch(`/api/assistant/sessions/${activeId}/dev/stop`, { method: "POST" });
+    await loadDev(activeId);
+    toast.info("App gestoppt.");
+  }
+
+  function devLink(port: number) {
+    if (typeof window === "undefined") return `:${port}`;
+    return `${window.location.protocol}//${window.location.hostname}:${port}`;
   }
 
   async function createSession() {
@@ -389,20 +477,16 @@ export function AssistantView() {
 
   async function createFolder() {
     if (!newFolder.trim()) return;
+    const parent = browse?.path || draft.cwd;
     const res = await fetch("/api/assistant/workspaces", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: newFolder.trim(), parent: draft.cwd }),
+      body: JSON.stringify({ name: newFolder.trim(), parent }),
     });
     const d = await res.json();
     if (!res.ok) { toast.error(d.error || "Ordner konnte nicht erstellt werden."); return; }
-    // Refresh the workspace list and select the new folder (ensure it's present
-    // even if it's nested deeper than the listed immediate subdirectories).
-    const ws = await fetch("/api/assistant/workspaces").then((r) => r.json()).catch(() => null);
-    const list: Workspace[] = ws?.workspaces || workspaces;
-    setWorkspaces(list.some((w) => w.path === d.path) ? list : [...list, { path: d.path, label: d.path }]);
-    setDraft((prev) => ({ ...prev, cwd: d.path }));
     setNewFolder("");
+    await loadBrowse(d.path); // navigate into the new folder (becomes the cwd)
     toast.success("Ordner erstellt.");
   }
 
@@ -418,13 +502,21 @@ export function AssistantView() {
   const thread = [...messages, ...live];
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-[300px_1fr] gap-4 h-[calc(100vh-7rem)]">
-      {/* Sidebar: new session + list */}
-      <div className="flex flex-col gap-3 overflow-y-auto pr-1">
+    <div className="flex flex-col gap-4 lg:grid lg:grid-cols-[300px_1fr] lg:h-[calc(100vh-7rem)]">
+      {/* Sidebar: new session + list — hidden when the chat is maximized */}
+      <div className={`flex-col gap-3 lg:overflow-y-auto pr-1 ${maximized ? "hidden" : "flex"}`}>
         <h1 className="text-xl font-bold flex items-center gap-2"><Terminal size={18} /> Code Assistant</h1>
 
         <div className="rounded-lg border border-border p-3 space-y-2 text-sm">
-          <div className="font-medium">Neue Session</div>
+          <button
+            onClick={() => setConfigOpen((v) => !v)}
+            className="w-full flex items-center justify-between font-medium"
+            aria-expanded={configOpen}
+          >
+            <span className="flex items-center gap-1.5"><Plus size={14} /> Neue Session</span>
+            <ChevronDown size={16} className={`transition-transform ${configOpen ? "rotate-180" : ""}`} />
+          </button>
+          {configOpen && (<>
           <select
             aria-label="Provider"
             className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm"
@@ -433,21 +525,45 @@ export function AssistantView() {
           >
             {PROVIDERS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
           </select>
-          <select
-            aria-label="Arbeitsverzeichnis"
-            className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm"
-            value={draft.cwd}
-            onChange={(e) => setDraft({ ...draft, cwd: e.target.value })}
-          >
-            {workspaces.length === 0 && <option value="">Keine erlaubten Verzeichnisse</option>}
-            {workspaces.map((w) => (
-              <option key={w.path} value={w.path}>{w.label.split("/").slice(-2).join("/")}</option>
-            ))}
-          </select>
+          {/* Folder browser — navigate into any existing project within the allowed roots */}
+          <div className="rounded-md border border-input">
+            <div className="flex items-center gap-1.5 px-2 py-1.5 border-b border-border text-xs">
+              <button
+                onClick={() => browse?.parent && loadBrowse(browse.parent)}
+                disabled={!browse?.parent}
+                title="Übergeordneter Ordner"
+                aria-label="Übergeordneter Ordner"
+                className="p-0.5 rounded hover:bg-accent disabled:opacity-30"
+              >
+                <ChevronUp size={14} />
+              </button>
+              <FolderGit2 size={12} className="text-muted-foreground shrink-0" />
+              <span className="truncate text-muted-foreground" title={browse?.path}>
+                {browse ? browse.path.split("/").slice(-2).join("/") : "…"}
+              </span>
+            </div>
+            <div className="max-h-44 overflow-y-auto p-1">
+              {browse && browse.dirs.length === 0 && (
+                <p className="px-2 py-1 text-[11px] text-muted-foreground">Keine Unterordner</p>
+              )}
+              {browse?.dirs.map((dir) => (
+                <button
+                  key={dir.path}
+                  onClick={() => loadBrowse(dir.path)}
+                  className="w-full text-left px-2 py-1 rounded text-xs hover:bg-accent flex items-center gap-1.5"
+                >
+                  <Folder size={12} className="text-muted-foreground shrink-0" /> {dir.name}
+                </button>
+              ))}
+            </div>
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            Session startet in: <span className="font-medium text-foreground">{browse?.path.split("/").slice(-1)[0] || "—"}</span>
+          </p>
           <div className="flex gap-1.5">
             <input
               className="flex-1 rounded-md border border-input bg-background px-2 py-1.5 text-sm"
-              placeholder="Neuer Ordner (im gewählten Verzeichnis)"
+              placeholder="Neuer Ordner (hier anlegen)"
               value={newFolder}
               onChange={(e) => setNewFolder(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); createFolder(); } }}
@@ -501,6 +617,7 @@ export function AssistantView() {
           >
             {creating ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />} Session starten
           </button>
+          </>)}
         </div>
 
         <div className="space-y-1">
@@ -528,17 +645,89 @@ export function AssistantView() {
       </div>
 
       {/* Thread */}
-      <div className="flex flex-col border border-border rounded-lg min-h-0">
+      <div className={maximized
+        ? "fixed inset-0 z-50 bg-background flex flex-col"
+        : "flex flex-col border border-border rounded-lg min-h-[65vh] lg:min-h-0"}>
         {!activeId ? (
           <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
             Wähle links eine Session oder starte eine neue.
           </div>
         ) : (
           <>
-            <div className="border-b border-border px-4 py-2 text-xs text-muted-foreground flex items-center gap-2">
-              <FolderGit2 size={13} /> {activeSession?.cwd}
-              <span className="ml-auto capitalize">{activeSession?.provider} {activeSession?.model && `· ${activeSession.model}`}</span>
+            <div className="border-b border-border px-3 py-2 text-xs text-muted-foreground flex items-center gap-2">
+              <FolderGit2 size={13} className="shrink-0" />
+              <span className="truncate" title={activeSession?.cwd}>
+                {maximized ? (activeSession?.title || activeSession?.cwd) : activeSession?.cwd}
+              </span>
+              <span className="ml-auto capitalize whitespace-nowrap hidden sm:inline">{activeSession?.provider}{activeSession?.model && ` · ${activeSession.model}`}</span>
+              <button
+                onClick={() => setMaximized((v) => !v)}
+                aria-label={maximized ? "Verkleinern" : "Chat maximieren"}
+                title={maximized ? "Verkleinern" : "Chat maximieren"}
+                className="shrink-0 p-1 rounded hover:bg-accent text-foreground"
+              >
+                {maximized ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+              </button>
             </div>
+
+            {/* Dev-server launcher */}
+            <div className="border-b border-border px-4 py-2 text-xs space-y-1.5">
+              {dev?.running ? (
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="inline-flex items-center gap-1 text-green-500 font-medium">
+                    <Play size={12} /> App läuft · Port {dev.port}
+                  </span>
+                  <a
+                    href={devLink(dev.port!)}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="px-2 py-0.5 rounded bg-primary text-primary-foreground inline-flex items-center gap-1"
+                  >
+                    <ExternalLink size={11} /> Öffnen
+                  </a>
+                  <code className="px-1 bg-accent rounded">{devLink(dev.port!)}</code>
+                  <button onClick={() => setDevLogsOpen((v) => !v)} className="px-2 py-0.5 rounded border border-input hover:bg-accent ml-auto">Logs</button>
+                  <button
+                    onClick={stopDevServer}
+                    className="px-2 py-0.5 rounded bg-red-500/15 text-red-500 border border-red-500/40 hover:bg-red-500/25 inline-flex items-center gap-1 font-medium"
+                  >
+                    <Square size={11} /> App beenden
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <input
+                    className="flex-1 min-w-[150px] rounded-md border border-input bg-background px-2 py-1 text-xs font-mono"
+                    placeholder="Start-Befehl (z.B. npm run dev)"
+                    value={devCmd}
+                    onChange={(e) => setDevCmd(e.target.value)}
+                  />
+                  <input
+                    type="number"
+                    className="w-20 rounded-md border border-input bg-background px-2 py-1 text-xs"
+                    placeholder="Port"
+                    value={devPort || ""}
+                    onChange={(e) => setDevPort(Number(e.target.value))}
+                  />
+                  <button
+                    onClick={startDevServer}
+                    disabled={!devCmd.trim() || !devPort}
+                    className="px-2 py-1 rounded bg-primary text-primary-foreground inline-flex items-center gap-1 disabled:opacity-50"
+                  >
+                    <Play size={12} /> App starten
+                  </button>
+                </div>
+              )}
+              {dev && !dev.running && dev.exitInfo && (
+                <p className="text-[11px] text-amber-500">{dev.exitInfo}</p>
+              )}
+              {devLogsOpen && dev?.logs && dev.logs.length > 0 && (
+                <pre className="max-h-40 overflow-y-auto bg-accent/30 rounded p-2 text-[11px] whitespace-pre-wrap leading-snug">
+                  {dev.logs.join("\n")}
+                </pre>
+              )}
+            </div>
+
             <div ref={threadRef} className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0">
               {thread.length === 0 && (
                 <p className="text-sm text-muted-foreground text-center py-8">

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
 import { stopSession } from "@/lib/assistant/runner";
+import { stopDev } from "@/lib/assistant/devserver";
 
 export async function GET(
   _req: NextRequest,
@@ -23,6 +24,7 @@ export async function DELETE(
 ) {
   const { id } = await params;
   stopSession(id);
+  stopDev(id);
   try {
     await prisma.assistantSession.delete({ where: { id } });
     return NextResponse.json({ ok: true });

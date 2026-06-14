@@ -4,6 +4,7 @@ import { fetchOllamaModels } from "@/lib/ai/ollama-provider";
 import { fetchClaudeModels } from "@/lib/ai/claude-provider";
 import { fetchGeminiModels } from "@/lib/ai/gemini-provider";
 import { geminiCliModels } from "@/lib/ai/gemini-cli-provider";
+import { claudeCliModels } from "@/lib/ai/claude-cli-provider";
 import { getSetting } from "@/lib/settings";
 import type { ModelInfo } from "@/lib/ai/types";
 
@@ -19,6 +20,9 @@ async function liveModels(
   if (provider === "ollama") return fetchOllamaModels();
 
   if (provider === "claude") {
+    if ((await getSetting("claudeAuthMode", "key")) === "oauth") {
+      return claudeCliModels();
+    }
     const key = headerKey || process.env.ANTHROPIC_API_KEY || "";
     const live = key ? await fetchClaudeModels(key) : [];
     return live.length ? live : getStaticModels("claude");

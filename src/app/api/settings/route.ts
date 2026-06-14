@@ -3,7 +3,7 @@ import { getSetting, setSetting } from "@/lib/settings";
 import { z } from "zod";
 
 // Only a small allowlist of keys is settable via this endpoint.
-const ALLOWED = new Set(["geminiAuthMode"]);
+const ALLOWED = new Set(["geminiAuthMode", "claudeAuthMode"]);
 
 const putSchema = z.object({
   key: z.string().min(1),
@@ -12,7 +12,8 @@ const putSchema = z.object({
 
 export async function GET() {
   const geminiAuthMode = await getSetting("geminiAuthMode", "key");
-  return NextResponse.json({ settings: { geminiAuthMode } });
+  const claudeAuthMode = await getSetting("claudeAuthMode", "key");
+  return NextResponse.json({ settings: { geminiAuthMode, claudeAuthMode } });
 }
 
 export async function POST(req: NextRequest) {

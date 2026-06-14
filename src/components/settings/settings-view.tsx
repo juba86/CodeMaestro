@@ -36,31 +36,35 @@ export function SettingsView() {
     ollama: null,
   });
   const [models, setModels] = useState<ModelInfo[]>([]);
-  const [geminiAuthMode, setGeminiAuthMode] = useState<"key" | "oauth">("key");
+  const [authModes, setAuthModes] = useState<{ claude: "key" | "oauth"; gemini: "key" | "oauth" }>({ claude: "key", gemini: "key" });
   const modelAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     fetch("/api/settings")
       .then((r) => r.json())
-      .then((d) => setGeminiAuthMode(d.settings?.geminiAuthMode === "oauth" ? "oauth" : "key"))
+      .then((d) => setAuthModes({
+        claude: d.settings?.claudeAuthMode === "oauth" ? "oauth" : "key",
+        gemini: d.settings?.geminiAuthMode === "oauth" ? "oauth" : "key",
+      }))
       .catch(() => {});
   }, []);
 
-  async function changeGeminiAuthMode(mode: "key" | "oauth") {
-    setGeminiAuthMode(mode);
-    setValidationResults((prev) => ({ ...prev, gemini: null }));
+  const LOGIN_LABEL: Record<string, string> = { claude: "Login (Claude Code)", gemini: "Google-Login" };
+
+  async function changeAuthMode(provider: "claude" | "gemini", mode: "key" | "oauth") {
+    setAuthModes((prev) => ({ ...prev, [provider]: mode }));
+    setValidationResults((prev) => ({ ...prev, [provider]: null }));
     await fetch("/api/settings", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key: "geminiAuthMode", value: mode }),
+      body: JSON.stringify({ key: `${provider}AuthMode`, value: mode }),
     }).catch(() => {});
-    // Refresh the model list for the (possibly now active) gemini provider.
-    if (activeProvider === "gemini") {
-      const m = await fetchModelsForProvider("gemini", undefined, apiKeys.gemini);
+    if (activeProvider === provider) {
+      const m = await fetchModelsForProvider(provider, undefined, apiKeys[provider]);
       setModels(m);
       if (m.length > 0 && !m.some((x) => x.id === activeModel)) setActiveModel(m[0].id);
     }
-    toast.success(mode === "oauth" ? "Gemini nutzt jetzt Google-Login." : "Gemini nutzt jetzt API-Key.");
+    toast.success(mode === "oauth" ? `${provider === "claude" ? "Claude" : "Gemini"} nutzt jetzt Login.` : `${provider === "claude" ? "Claude" : "Gemini"} nutzt jetzt API-Key.`);
   }
 
   useEffect(() => {
@@ -119,7 +123,7 @@ export function SettingsView() {
   }
 
   async function validateKey(provider: ProviderName) {
-    const oauth = provider === "gemini" && geminiAuthMode === "oauth";
+    const oauth = (provider === "gemini" || provider === "claude") && authModes[provider] === "oauth";
     setValidating(provider);
     try {
       const res = await fetch("/api/ai/validate", {
@@ -130,7 +134,7 @@ export function SettingsView() {
       const { valid } = await res.json();
       setValidationResults((prev) => ({ ...prev, [provider]: valid }));
       if (valid && oauth) {
-        toast.success("Google-Login funktioniert.");
+        toast.success("Login funktioniert.");
       } else if (valid) {
         // Auto-save on successful validation so the key is actually usable for
         // generation/chat (which read the stored key) — no separate Save needed.
@@ -138,7 +142,9 @@ export function SettingsView() {
         localStorage.setItem(`pb-apikey-${provider}`, enc);
         toast.success("API key is valid and saved!");
       } else {
-        toast.error(oauth ? "Google-Login nicht aktiv. Auf dem Server `gemini` einloggen." : "Invalid API key.");
+        toast.error(oauth
+          ? `Login nicht aktiv. Auf dem Server \`${provider === "claude" ? "claude" : "gemini"}\` einloggen.`
+          : "Invalid API key.");
       }
     } catch {
       setValidationResults((prev) => ({ ...prev, [provider]: false }));
@@ -174,7 +180,8 @@ export function SettingsView() {
       <section className="space-y-4">
         <h2 className="text-lg font-semibold">API Keys</h2>
         {keyProviders.map((p) => {
-          const oauth = p.id === "gemini" && geminiAuthMode === "oauth";
+          const supportsLogin = p.id === "gemini" || p.id === "claude";
+          const oauth = supportsLogin && authModes[p.id as "claude" | "gemini"] === "oauth";
           return (
           <div key={p.id} className="space-y-2">
             <label className="text-sm font-medium flex items-center gap-2">
@@ -183,15 +190,15 @@ export function SettingsView() {
               {validationResults[p.id] === false && <X size={14} className="text-red-500" />}
             </label>
 
-            {p.id === "gemini" && (
+            {supportsLogin && (
               <div className="flex rounded-md border border-input overflow-hidden text-xs w-fit">
                 {(["key", "oauth"] as const).map((m) => (
                   <button
                     key={m}
-                    onClick={() => changeGeminiAuthMode(m)}
-                    className={`px-3 py-1 ${geminiAuthMode === m ? "bg-primary text-primary-foreground font-medium" : "hover:bg-accent"}`}
+                    onClick={() => changeAuthMode(p.id as "claude" | "gemini", m)}
+                    className={`px-3 py-1 ${authModes[p.id as "claude" | "gemini"] === m ? "bg-primary text-primary-foreground font-medium" : "hover:bg-accent"}`}
                   >
-                    {m === "key" ? "API-Key" : "Google-Login"}
+                    {m === "key" ? "API-Key" : LOGIN_LABEL[p.id]}
                   </button>
                 ))}
               </div>
@@ -200,16 +207,18 @@ export function SettingsView() {
             {oauth ? (
               <div className="space-y-1.5">
                 <p className="text-xs text-muted-foreground">
-                  Nutzt den Google-Login der lokalen <code className="px-1 bg-accent rounded">gemini</code>-CLI
-                  (kein API-Key). Einmalig auf dem Server <code className="px-1 bg-accent rounded">gemini</code> ausführen
-                  und „Login with Google" wählen.
+                  {p.id === "claude" ? (
+                    <>Nutzt den Login der lokalen <code className="px-1 bg-accent rounded">claude</code>-CLI (Claude Code, kein API-Key). Auf dem Server einmalig <code className="px-1 bg-accent rounded">claude</code> einloggen.</>
+                  ) : (
+                    <>Nutzt den Google-Login der lokalen <code className="px-1 bg-accent rounded">gemini</code>-CLI (kein API-Key). Einmalig auf dem Server <code className="px-1 bg-accent rounded">gemini</code> ausführen und „Login with Google" wählen.</>
+                  )}
                 </p>
                 <button
-                  onClick={() => validateKey("gemini")}
-                  disabled={validating === "gemini"}
+                  onClick={() => validateKey(p.id)}
+                  disabled={validating === p.id}
                   className="px-3 py-2 text-sm rounded-md border border-input hover:bg-accent disabled:opacity-50 flex items-center gap-1 w-fit"
                 >
-                  {validating === "gemini" ? <Loader2 size={14} className="animate-spin" /> : "Verbindung testen"}
+                  {validating === p.id ? <Loader2 size={14} className="animate-spin" /> : "Verbindung testen"}
                 </button>
               </div>
             ) : (

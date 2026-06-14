@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createProvider } from "@/lib/ai/provider-factory";
 import { GeminiCliProvider } from "@/lib/ai/gemini-cli-provider";
+import { ClaudeCliProvider } from "@/lib/ai/claude-cli-provider";
 import { getSetting } from "@/lib/settings";
 import { chatRequestSchema, formatZodError } from "@/lib/validation/schemas";
 
@@ -26,12 +27,14 @@ export async function POST(req: NextRequest) {
 
     const { messages, systemPrompt, provider: providerName, model, stream, apiKey: clientApiKey, maxTokens, temperature } = result.data;
 
-    // Gemini can run via the OAuth-logged-in gemini-cli instead of an API key.
+    // Claude/Gemini can run via their locally logged-in CLI instead of an API key.
     const geminiOauth =
       providerName === "gemini" && (await getSetting("geminiAuthMode", "key")) === "oauth";
+    const claudeLogin =
+      providerName === "claude" && (await getSetting("claudeAuthMode", "key")) === "oauth";
 
-    // Local providers (Ollama) and Gemini-via-OAuth run without an API key.
-    const requiresKey = providerName !== "ollama" && !geminiOauth;
+    // Local providers (Ollama) and CLI-login providers run without an API key.
+    const requiresKey = providerName !== "ollama" && !geminiOauth && !claudeLogin;
 
     // Get API key from request or env
     const apiKey =
@@ -50,7 +53,11 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const provider = geminiOauth ? new GeminiCliProvider() : createProvider(providerName, apiKey);
+    const provider = geminiOauth
+      ? new GeminiCliProvider()
+      : claudeLogin
+        ? new ClaudeCliProvider()
+        : createProvider(providerName, apiKey);
 
     if (stream) {
       const encoder = new TextEncoder();

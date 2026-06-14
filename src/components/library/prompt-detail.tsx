@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { ArrowLeft, Trash2, Copy, Play, GitCompare } from "lucide-react";
+import { ArrowLeft, Trash2, Copy, Play, GitCompare, Terminal } from "lucide-react";
 import { useBuilderStore } from "@/stores/builder-store";
 import { parseXml } from "@/lib/prompt-engine/xml-parser";
 import { downloadExport, EXPORT_FORMATS, type ExportFormat } from "@/lib/exporters/prompt-exporter";
@@ -102,6 +102,11 @@ export function PromptDetail({ promptId, onBack, onDelete, onRefresh }: PromptDe
     router.push("/playground");
   }
 
+  function handleSendToAssistant() {
+    sessionStorage.setItem("pb-assistant-prompt", prompt!.content);
+    router.push("/assistant");
+  }
+
   return (
     <div className="max-w-4xl mx-auto space-y-6">
       <button onClick={onBack} className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
@@ -119,6 +124,9 @@ export function PromptDetail({ promptId, onBack, onDelete, onRefresh }: PromptDe
           </button>
           <button onClick={handleTest} className="px-3 py-1.5 text-sm rounded-md border border-input hover:bg-accent flex items-center gap-1">
             <Play size={14} /> Test
+          </button>
+          <button onClick={handleSendToAssistant} className="px-3 py-1.5 text-sm rounded-md border border-input hover:bg-accent flex items-center gap-1" title="Im Code Assistant ausführen">
+            <Terminal size={14} /> Assistant
           </button>
           <button onClick={handleCopy} className="p-1.5 rounded-md border border-input hover:bg-accent" aria-label="Copy to clipboard">
             <Copy size={14} />
