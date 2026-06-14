@@ -5,7 +5,7 @@ import { getApiKey } from "@/lib/ai/client-keys";
 import {
   Plus, Send, Square, Trash2, Loader2, Terminal, Wrench, FileText,
   AlertCircle, FolderGit2, Network, Cpu, Sparkles, FolderPlus, Folder, ChevronUp, ExternalLink, Play,
-  ChevronDown, Maximize2, Minimize2,
+  ChevronDown, Maximize2, Minimize2, Paperclip,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -92,6 +92,29 @@ export function AssistantView() {
 
   const threadRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
+
+  async function uploadFiles(files: FileList | null) {
+    if (!files || files.length === 0 || !activeId) return;
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      Array.from(files).forEach((f) => fd.append("files", f));
+      const res = await fetch(`/api/assistant/sessions/${activeId}/upload`, { method: "POST", body: fd });
+      const d = await res.json();
+      if (!res.ok) { toast.error(d.error || "Upload fehlgeschlagen."); return; }
+      toast.success(`${d.saved.length} Datei(en) hochgeladen: ${d.saved.join(", ")}`);
+      if (d.saved.length) {
+        setInput((prev) => prev
+          ? prev
+          : `Ich habe folgende Dateien ins Projekt hochgeladen: ${d.saved.join(", ")}. `);
+      }
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
 
   const loadSessions = useCallback(() => {
     fetch("/api/assistant/sessions").then((r) => r.json()).then((d) => setSessions(d.sessions || [])).catch(() => {});
@@ -861,7 +884,23 @@ export function AssistantView() {
               </div>
             )}
 
-            <div className="px-3 pb-3 pt-2 flex gap-2">
+            <div className="px-3 pb-3 pt-2 flex gap-2 items-end" style={{ paddingBottom: "max(0.75rem, env(safe-area-inset-bottom))" }}>
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                className="hidden"
+                onChange={(e) => uploadFiles(e.target.files)}
+              />
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploading || running}
+                aria-label="Dateien hochladen"
+                title="Dateien ins Projekt hochladen"
+                className="px-3 py-2 rounded-md border border-input hover:bg-accent disabled:opacity-50 shrink-0"
+              >
+                {uploading ? <Loader2 size={16} className="animate-spin" /> : <Paperclip size={16} />}
+              </button>
               <textarea
                 className="flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm resize-none min-h-[44px] max-h-40 focus:outline-none focus:ring-2 focus:ring-ring"
                 placeholder={orchestrateMode ? "Größere Aufgabe — wird zerlegt & verteilt…" : "Aufgabe an den Assistenten…"}

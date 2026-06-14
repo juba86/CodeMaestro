@@ -1,7 +1,8 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { AppShell } from "@/components/layout/app-shell";
+import { PwaRegister } from "@/components/pwa-register";
 import { Toaster } from "sonner";
 
 const geistSans = Geist({
@@ -15,8 +16,21 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "PromptBuilder - CoT Prompt Engineering",
-  description: "Build structured Chain-of-Thought prompts with XML tags for AI development",
+  title: "PromptBuilder",
+  description: "Prompt workbench + multi-model code assistant",
+  manifest: "/manifest.webmanifest",
+  appleWebApp: { capable: true, statusBarStyle: "black-translucent", title: "PromptBuilder" },
+  icons: {
+    icon: "/icons/icon-192.png",
+    apple: "/icons/apple-touch-icon.png",
+  },
+};
+
+export const viewport: Viewport = {
+  themeColor: "#111113",
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
 };
 
 export default function RootLayout({
@@ -31,6 +45,7 @@ export default function RootLayout({
       >
         <AppShell>{children}</AppShell>
         <Toaster richColors position="bottom-right" />
+        <PwaRegister />
       </body>
     </html>
   );
