@@ -104,6 +104,14 @@ export function AssistantView() {
     if (sessions.length === 0 && !activeId) setConfigOpen(true);
   }, [sessions.length, activeId]);
 
+  // Keep the session list (running badges) fresh while anything is running.
+  const anyRunning = sessions.some((s) => s.status === "running");
+  useEffect(() => {
+    if (!anyRunning) return;
+    const t = setInterval(() => loadSessions(), 4000);
+    return () => clearInterval(t);
+  }, [anyRunning, loadSessions]);
+
   // Handoff from the Prompt Builder: a prompt was sent over → prefill the input.
   useEffect(() => {
     const handoff = sessionStorage.getItem("pb-assistant-prompt");
@@ -238,6 +246,15 @@ export function AssistantView() {
     if (!activeId) return;
     await fetch(`/api/assistant/sessions/${activeId}/stop`, { method: "POST" });
     abortRef.current?.abort();
+  }
+
+  // Stop a (possibly background) run in any session from the session list.
+  async function stopSessionById(sid: string) {
+    await fetch(`/api/assistant/sessions/${sid}/stop`, { method: "POST" }).catch(() => {});
+    if (sid === activeId) abortRef.current?.abort();
+    loadSessions();
+    if (sid === activeId) await openSession(sid);
+    toast.info("Aufgabe gestoppt.");
   }
 
   // Poll a session until it is no longer "running", updating the transcript.
@@ -630,15 +647,25 @@ export function AssistantView() {
               onClick={() => openSession(s.id)}
             >
               <div className="min-w-0">
-                <div className="truncate font-medium">{s.title || "(neu)"}</div>
+                <div className="truncate font-medium flex items-center gap-1.5">
+                  {s.status === "running" && <span className="inline-block w-2 h-2 rounded-full bg-green-500 animate-pulse shrink-0" title="läuft" />}
+                  <span className="truncate">{s.title || "(neu)"}</span>
+                </div>
                 <div className="truncate text-[11px] text-muted-foreground">
                   {s.provider} · {s.cwd.split("/").slice(-1)[0]} · ${s.totalCostUsd.toFixed(3)}
                 </div>
               </div>
-              <button onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }} aria-label="löschen"
-                className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive shrink-0">
-                <Trash2 size={13} />
-              </button>
+              {s.status === "running" ? (
+                <button onClick={(e) => { e.stopPropagation(); stopSessionById(s.id); }} aria-label="stoppen"
+                  className="text-amber-500 hover:text-amber-400 shrink-0" title="Aufgabe stoppen">
+                  <Square size={13} />
+                </button>
+              ) : (
+                <button onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }} aria-label="löschen"
+                  className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive shrink-0">
+                  <Trash2 size={13} />
+                </button>
+              )}
             </div>
           ))}
         </div>

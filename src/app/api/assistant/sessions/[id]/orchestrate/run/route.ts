@@ -30,6 +30,12 @@ export async function POST(
   if (!session) {
     return NextResponse.json({ error: "Not found", code: "NOT_FOUND" }, { status: 404 });
   }
+  if (session.status === "running") {
+    return NextResponse.json(
+      { error: "In dieser Session läuft bereits eine Aufgabe. Bitte erst stoppen.", code: "SESSION_BUSY" },
+      { status: 409 }
+    );
+  }
   try {
     await resolveWorkdir(session.cwd);
   } catch (err) {
