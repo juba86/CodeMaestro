@@ -11,12 +11,18 @@ export function Header() {
     const root = document.documentElement;
     if (theme === "dark") {
       root.classList.add("dark");
-    } else if (theme === "light") {
-      root.classList.remove("dark");
-    } else {
-      const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-      root.classList.toggle("dark", prefersDark);
+      return;
     }
+    if (theme === "light") {
+      root.classList.remove("dark");
+      return;
+    }
+    // System: follow the OS preference and keep tracking live changes.
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const apply = () => root.classList.toggle("dark", mq.matches);
+    apply();
+    mq.addEventListener("change", apply);
+    return () => mq.removeEventListener("change", apply);
   }, [theme]);
 
   return (

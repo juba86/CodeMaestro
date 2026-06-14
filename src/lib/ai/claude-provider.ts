@@ -2,6 +2,32 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { AIProvider, SendMessageParams, StreamChunk, ModelInfo } from "./types";
 import { getStaticModels } from "./models";
 
+const DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-6";
+const VALIDATE_CLAUDE_MODEL = "claude-haiku-4-5";
+
+/**
+ * Fetches the live list of Claude models the given key can access
+ * (GET /v1/models). Returns [] on any failure so the caller can fall back.
+ */
+export async function fetchClaudeModels(apiKey: string): Promise<ModelInfo[]> {
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/models?limit=100", {
+      headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+      cache: "no-store",
+    });
+    if (!res.ok) return [];
+    const data = (await res.json()) as { data?: { id: string; display_name?: string }[] };
+    return (data.data || []).map((m) => ({
+      id: m.id,
+      name: m.display_name || m.id,
+      provider: "claude" as const,
+      maxTokens: 32000,
+    }));
+  } catch {
+    return [];
+  }
+}
+
 export class ClaudeProvider implements AIProvider {
   name = "claude" as const;
   private client: Anthropic;
@@ -23,7 +49,7 @@ export class ClaudeProvider implements AIProvider {
       }));
 
     const response = await this.client.messages.create({
-      model: params.model || "claude-sonnet-4-20250514",
+      model: params.model || DEFAULT_CLAUDE_MODEL,
       max_tokens: params.maxTokens || 4096,
       system: params.systemPrompt || undefined,
       messages,
@@ -42,7 +68,7 @@ export class ClaudeProvider implements AIProvider {
       }));
 
     const stream = this.client.messages.stream({
-      model: params.model || "claude-sonnet-4-20250514",
+      model: params.model || DEFAULT_CLAUDE_MODEL,
       max_tokens: params.maxTokens || 4096,
       system: params.systemPrompt || undefined,
       messages,
@@ -63,7 +89,7 @@ export class ClaudeProvider implements AIProvider {
     try {
       const client = new Anthropic({ apiKey });
       await client.messages.create({
-        model: "claude-haiku-4-20250414",
+        model: VALIDATE_CLAUDE_MODEL,
         max_tokens: 10,
         messages: [{ role: "user", content: "hi" }],
       });

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createProvider } from "@/lib/ai/provider-factory";
+import { GeminiCliProvider } from "@/lib/ai/gemini-cli-provider";
 import { validateRequestSchema, formatZodError } from "@/lib/validation/schemas";
 
 export async function POST(req: NextRequest) {
@@ -22,8 +23,11 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { provider: providerName, apiKey } = result.data;
-    const provider = createProvider(providerName, apiKey);
+    const { provider: providerName, apiKey, authMode } = result.data;
+    const provider =
+      providerName === "gemini" && authMode === "oauth"
+        ? new GeminiCliProvider()
+        : createProvider(providerName, apiKey);
     const valid = await provider.validateCredentials(apiKey);
 
     return NextResponse.json({ valid });

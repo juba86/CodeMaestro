@@ -1,4 +1,4 @@
-export type ProviderName = "claude" | "gemini";
+export type ProviderName = "claude" | "gemini" | "ollama";
 
 export interface ModelInfo {
   id: string;

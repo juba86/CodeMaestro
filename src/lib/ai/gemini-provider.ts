@@ -2,6 +2,51 @@ import { GoogleGenAI } from "@google/genai";
 import type { AIProvider, SendMessageParams, StreamChunk, ModelInfo } from "./types";
 import { getStaticModels } from "./models";
 
+interface GeminiApiModel {
+  name: string;
+  displayName?: string;
+  supportedGenerationMethods?: string[];
+  outputTokenLimit?: number;
+}
+
+/**
+ * Fetches the live list of Gemini models the given key can access
+ * (GET /v1beta/models). Filters to chat-capable models (generateContent),
+ * excluding embedding / legacy variants. Returns [] on failure for fallback.
+ */
+export async function fetchGeminiModels(apiKey: string): Promise<ModelInfo[]> {
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models?pageSize=200&key=${encodeURIComponent(apiKey)}`,
+      { cache: "no-store" }
+    );
+    if (!res.ok) return [];
+    const data = (await res.json()) as { models?: GeminiApiModel[] };
+    return (data.models || [])
+      // Keep chat models. Only exclude when the methods list is present AND lacks
+      // generateContent — if the field is absent we keep the model rather than
+      // dropping everything.
+      .filter((m) => {
+        const methods = m.supportedGenerationMethods;
+        if (methods && methods.length > 0 && !methods.includes("generateContent")) return false;
+        return true;
+      })
+      .filter((m) => !/embedding|aqa/i.test(m.name))
+      .map((m) => {
+        const id = m.name.replace(/^models\//, "");
+        return {
+          id,
+          name: m.displayName || id,
+          provider: "gemini" as const,
+          maxTokens: m.outputTokenLimit || 8192,
+        };
+      })
+      .sort((a, b) => b.id.localeCompare(a.id)); // newer ids (gemini-3 before 2.5) first
+  } catch {
+    return [];
+  }
+}
+
 export class GeminiProvider implements AIProvider {
   name = "gemini" as const;
   private client: GoogleGenAI;
@@ -62,14 +107,15 @@ export class GeminiProvider implements AIProvider {
   }
 
   async validateCredentials(apiKey: string): Promise<boolean> {
+    // Validate against the models-list endpoint rather than a specific model,
+    // so a valid key isn't rejected just because one hardcoded model is
+    // unavailable to the key/project.
     try {
-      const client = new GoogleGenAI({ apiKey });
-      // Fix: pass proper Contents array instead of bare string
-      await client.models.generateContent({
-        model: "gemini-2.0-flash",
-        contents: [{ role: "user", parts: [{ text: "hi" }] }],
-      });
-      return true;
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models?pageSize=1&key=${encodeURIComponent(apiKey)}`,
+        { cache: "no-store" }
+      );
+      return res.ok;
     } catch {
       return false;
     }

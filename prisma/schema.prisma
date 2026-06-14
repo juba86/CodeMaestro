@@ -19,6 +19,7 @@ model Prompt {
   versions    PromptVersion[]
   tags        PromptTag[]
   testResults TestResult[]
+  testCases   TestCase[]
 
   @@index([title])
 }
@@ -51,19 +52,64 @@ model PromptTag {
 }
 
 model TestResult {
-  id        String   @id @default(cuid())
-  promptId  String
-  provider  String   // "claude" | "gemini"
-  model     String
-  input     String
-  output    String
-  latencyMs Int
-  createdAt DateTime @default(now())
+  id           String   @id @default(cuid())
+  promptId     String
+  provider     String   // "claude" | "gemini" | "ollama"
+  model        String
+  input        String
+  output       String
+  latencyMs    Int
+  inputTokens  Int?
+  outputTokens Int?
+  costUsd      Float?
+  createdAt    DateTime @default(now())
 
   prompt    Prompt   @relation(fields: [promptId], references: [id], onDelete: Cascade)
 
   @@index([promptId])
   @@index([createdAt])
+}
+
+// User-defined evaluation cases for a prompt (regression testing).
+model TestCase {
+  id        String   @id @default(cuid())
+  promptId  String
+  name      String   @default("")
+  input     String   @default("")
+  matchType String   @default("contains") // "contains" | "regex" | "equals" | "icontains"
+  expected  String   @default("")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  prompt    Prompt   @relation(fields: [promptId], references: [id], onDelete: Cascade)
+
+  @@index([promptId])
+}
+
+// RAG knowledge base: a source document split into embedded chunks.
+model KnowledgeDoc {
+  id        String           @id @default(cuid())
+  title     String
+  source    String           @default("") // url/filename/manual
+  createdAt DateTime         @default(now())
+
+  chunks    KnowledgeChunk[]
+
+  @@index([createdAt])
+}
+
+model KnowledgeChunk {
+  id        String   @id @default(cuid())
+  docId     String
+  idx       Int
+  content   String
+  embedding String   // JSON array of floats
+  model     String   @default("") // embedding model used
+  createdAt DateTime @default(now())
+
+  doc       KnowledgeDoc @relation(fields: [docId], references: [id], onDelete: Cascade)
+
+  @@index([docId])
 }
 
 model Template {
@@ -88,4 +134,37 @@ model Setting {
   value String // JSON string
 
   @@index([key])
+}
+
+// Embedded code-assistant sessions (Claude Code / gemini-cli driven via -p).
+model AssistantSession {
+  id             String   @id @default(cuid())
+  externalId     String?  @unique // session_id from the CLI (for --resume)
+  provider       String   @default("claude") // "claude" | "gemini"
+  model          String   @default("")
+  title          String   @default("")
+  cwd            String                    // working directory (whitelisted)
+  permissionMode String   @default("default")
+  allowedTools   String   @default("Read,Grep,Glob") // CSV
+  status         String   @default("idle") // idle|running|error|done
+  totalCostUsd   Float    @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  messages       AssistantMessage[]
+
+  @@index([createdAt])
+}
+
+model AssistantMessage {
+  id        String   @id @default(cuid())
+  sessionId String
+  role      String   // user | assistant | tool_use | tool_result | system | error
+  content   String
+  meta      String   @default("{}") // JSON: tokens, tool name, cost, etc.
+  createdAt DateTime @default(now())
+
+  session   AssistantSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
 }

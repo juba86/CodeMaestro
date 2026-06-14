@@ -1,6 +1,7 @@
 "use client";
 
 import { useBuilderStore } from "@/stores/builder-store";
+import { uid } from "@/lib/uid";
 import { Plus, Trash2 } from "lucide-react";
 
 export function ExampleEditor() {
@@ -8,7 +9,7 @@ export function ExampleEditor() {
 
   function handleAdd() {
     addExample({
-      id: crypto.randomUUID(),
+      id: uid(),
       input: "",
       thinking: "",
       answer: "",

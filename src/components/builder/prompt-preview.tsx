@@ -3,6 +3,7 @@
 import { useBuilderStore } from "@/stores/builder-store";
 import { useEffect, useRef } from "react";
 import { XmlTagPalette } from "./xml-tag-palette";
+import { PromptQualityPanel } from "./prompt-quality-panel";
 import { buildXml } from "@/lib/prompt-engine/xml-builder";
 import { parseXml } from "@/lib/prompt-engine/xml-parser";
 import { Copy, Download } from "lucide-react";
@@ -60,6 +61,8 @@ export function PromptPreview() {
       </div>
 
       <XmlTagPalette onInsert={handleInsertTag} />
+
+      <PromptQualityPanel xmlContent={xmlContent} />
 
       <textarea
         ref={textareaRef}

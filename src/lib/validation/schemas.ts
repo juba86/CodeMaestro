@@ -2,7 +2,7 @@ import { z } from "zod";
 
 // --- Shared enums ---
 
-const providerEnum = z.enum(["claude", "gemini"]);
+const providerEnum = z.enum(["claude", "gemini", "ollama"]);
 
 // --- AI Routes ---
 
@@ -27,7 +27,10 @@ export const chatRequestSchema = z.object({
 
 export const validateRequestSchema = z.object({
   provider: providerEnum,
-  apiKey: z.string().min(1),
+  // Local providers (Ollama) need no key, so an empty string is allowed.
+  apiKey: z.string().optional().default(""),
+  // "oauth" validates Gemini via the logged-in gemini-cli instead of a key.
+  authMode: z.enum(["key", "oauth"]).optional().default("key"),
 });
 
 // --- Prompt Routes ---
@@ -77,6 +80,68 @@ export const createTestResultSchema = z.object({
   input: z.string(),
   output: z.string(),
   latencyMs: z.number().int().min(0),
+  inputTokens: z.number().int().min(0).optional(),
+  outputTokens: z.number().int().min(0).optional(),
+  costUsd: z.number().min(0).optional(),
+});
+
+// --- Test Case (evaluation) Routes ---
+
+export const matchTypeEnum = z.enum(["contains", "icontains", "regex", "equals"]);
+
+export const createTestCaseSchema = z.object({
+  name: z.string().max(200).optional().default(""),
+  input: z.string().max(20000).optional().default(""),
+  matchType: matchTypeEnum.optional().default("contains"),
+  expected: z.string().max(20000).optional().default(""),
+});
+
+// --- Knowledge Base (RAG) Routes ---
+
+export const createKnowledgeDocSchema = z.object({
+  title: z.string().min(1).max(300),
+  source: z.string().max(500).optional().default("manual"),
+  content: z.string().min(1).max(500000),
+});
+
+export const knowledgeSearchSchema = z.object({
+  query: z.string().min(1).max(4000),
+  topK: z.coerce.number().int().min(1).max(20).optional().default(5),
+});
+
+// --- Assistant (code-assistant) Routes ---
+
+export const createAssistantSessionSchema = z.object({
+  provider: z.enum(["claude", "gemini"]).optional().default("claude"),
+  model: z.string().max(100).optional().default(""),
+  title: z.string().max(200).optional().default(""),
+  cwd: z.string().max(1000).optional().default(""),
+  permissionMode: z.enum(["default", "acceptEdits", "plan", "bypassPermissions"]).optional().default("default"),
+  allowedTools: z.string().max(500).optional().default("Read,Grep,Glob"),
+});
+
+export const assistantMessageSchema = z.object({
+  prompt: z.string().min(1).max(100000),
+  apiKey: z.string().optional(),
+});
+
+export const orchestrateSchema = z.object({
+  prompt: z.string().min(1).max(100000),
+  preference: z.string().max(2000).optional(),
+});
+
+const plannedSubtaskSchema = z.object({
+  id: z.string().min(1).max(50),
+  title: z.string().max(300).optional().default(""),
+  description: z.string().max(20000).optional().default(""),
+  workerId: z.string().min(1).max(120),
+  dependsOn: z.array(z.string().max(50)).max(20).optional().default([]),
+  editsFiles: z.boolean().optional().default(false),
+});
+
+export const orchestrateRunSchema = z.object({
+  prompt: z.string().min(1).max(100000),
+  subtasks: z.array(plannedSubtaskSchema).min(1).max(20),
 });
 
 // --- Helper ---

@@ -4,9 +4,10 @@ import { useBuilderStore } from "@/stores/builder-store";
 import { useSettingsStore } from "@/stores/settings-store";
 import { buildXml } from "@/lib/prompt-engine/xml-builder";
 import { generateCoTPrompt } from "@/lib/prompt-engine/cot-generator";
-import { decryptApiKey } from "@/lib/ai/crypto";
+import { getApiKey } from "@/lib/ai/client-keys";
 import { SwarmConfigPanel } from "./swarm-config-panel";
 import { TechniqueRecommender } from "./technique-recommender";
+import { KnowledgeInsert } from "@/components/knowledge/knowledge-insert";
 import { toast } from "sonner";
 
 export function ProjectInfoForm() {
@@ -21,11 +22,7 @@ export function ProjectInfoForm() {
     }
     setIsGenerating(true);
     try {
-      let apiKey: string | undefined;
-      const enc = localStorage.getItem(`pb-apikey-${activeProvider}`);
-      if (enc) {
-        try { apiKey = await decryptApiKey(enc); } catch { /* ignore */ }
-      }
+      const apiKey = await getApiKey(activeProvider);
       const result = await generateCoTPrompt(structured, activeProvider, activeModel, apiKey);
       if (result) {
         updateStructured(result);
@@ -34,7 +31,7 @@ export function ProjectInfoForm() {
         toast.success("CoT prompt generated!");
       }
     } catch (err) {
-      toast.error("Generation failed. Check your API key in Settings.");
+      toast.error(err instanceof Error ? err.message : "Generation failed. Check your API key in Settings.");
       console.error(err);
     } finally {
       setIsGenerating(false);
@@ -63,7 +60,16 @@ export function ProjectInfoForm() {
           </div>
 
           <div>
-            <label className="text-sm font-medium">Context</label>
+            <div className="flex items-center justify-between">
+              <label className="text-sm font-medium">Context</label>
+              <KnowledgeInsert
+                onInsert={(text) =>
+                  updateStructured({
+                    context: structured.context ? `${structured.context}\n\n${text}` : text,
+                  })
+                }
+              />
+            </div>
             <textarea
               className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm min-h-[60px] focus:outline-none focus:ring-2 focus:ring-ring"
               placeholder="Background info, tech stack, project details..."

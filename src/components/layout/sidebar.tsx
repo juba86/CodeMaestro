@@ -10,6 +10,8 @@ import {
   FlaskConical,
   Settings,
   LayoutTemplate,
+  BookOpen,
+  Terminal,
   PanelLeftClose,
   PanelLeft,
 } from "lucide-react";
@@ -19,6 +21,8 @@ const navItems = [
   { href: "/library", label: "Library", icon: Library },
   { href: "/templates", label: "Templates", icon: LayoutTemplate },
   { href: "/playground", label: "Playground", icon: FlaskConical },
+  { href: "/knowledge", label: "Knowledge", icon: BookOpen },
+  { href: "/assistant", label: "Assistant", icon: Terminal },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 

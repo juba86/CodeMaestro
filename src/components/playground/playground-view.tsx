@@ -1,10 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useBuilderStore } from "@/stores/builder-store";
 import { useSettingsStore } from "@/stores/settings-store";
-import { decryptApiKey } from "@/lib/ai/crypto";
-import type { ProviderName } from "@/lib/ai/types";
+import { getApiKey, fetchModelsForProvider } from "@/lib/ai/client-keys";
+import { estimateCost, formatCost } from "@/lib/ai/pricing";
+import type { ProviderName, ModelInfo } from "@/lib/ai/types";
 import { Play, Loader2, RotateCcw, Columns } from "lucide-react";
 import { toast } from "sonner";
 
@@ -14,7 +15,17 @@ interface TestRun {
   output: string;
   latencyMs: number;
   timestamp: Date;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+  isLocal: boolean;
 }
+
+const PROVIDER_OPTIONS: { id: ProviderName; label: string }[] = [
+  { id: "claude", label: "Claude" },
+  { id: "gemini", label: "Gemini" },
+  { id: "ollama", label: "Ollama (lokal)" },
+];
 
 export function PlaygroundView() {
   const { xmlContent, setXmlContent, currentPromptId } = useBuilderStore();
@@ -25,14 +36,30 @@ export function PlaygroundView() {
   const [compareMode, setCompareMode] = useState(false);
   const [selectedProvider, setSelectedProvider] = useState<ProviderName>(activeProvider);
   const [selectedModel, setSelectedModel] = useState(activeModel);
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  const modelAbortRef = useRef<AbortController | null>(null);
 
-  async function getApiKey(provider: ProviderName): Promise<string> {
-    const enc = localStorage.getItem(`pb-apikey-${provider}`);
-    if (enc) {
-      try { return await decryptApiKey(enc); } catch { /* fallback */ }
-    }
-    return "";
-  }
+  // Fetch the available models whenever the chosen provider changes, so the
+  // model dropdown always reflects reality — including dynamically discovered
+  // local Ollama models.
+  useEffect(() => {
+    modelAbortRef.current?.abort();
+    const controller = new AbortController();
+    modelAbortRef.current = controller;
+
+    fetchModelsForProvider(selectedProvider, controller.signal)
+      .then((m) => {
+        setModels(m);
+        setSelectedModel((prev) =>
+          m.some((model) => model.id === prev) ? prev : m[0]?.id || ""
+        );
+      })
+      .catch((err) => {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+      });
+
+    return () => controller.abort();
+  }, [selectedProvider]);
 
   async function runTest(provider: ProviderName, model: string) {
     const apiKey = await getApiKey(provider);
@@ -50,11 +77,41 @@ export function PlaygroundView() {
       }),
     });
 
-    if (!res.ok) throw new Error("Test failed");
+    if (!res.ok) {
+      let msg = `${provider} request failed`;
+      try {
+        const e = await res.json();
+        if (e?.error) msg = `${provider}: ${e.error}`;
+      } catch { /* ignore */ }
+      throw new Error(msg);
+    }
     const data = await res.json();
     const latencyMs = Math.round(performance.now() - start);
+    const output = data.content || "";
+    const cost = estimateCost(provider, model, prompt, output);
 
-    return { provider, model, output: data.content || "", latencyMs, timestamp: new Date() };
+    return {
+      provider, model, output, latencyMs, timestamp: new Date(),
+      inputTokens: cost.inputTokens, outputTokens: cost.outputTokens,
+      costUsd: cost.costUsd, isLocal: cost.isLocal,
+    };
+  }
+
+  // Pick one model per provider that the user can actually run, for compare mode.
+  async function buildComparisonTargets(): Promise<{ provider: ProviderName; model: string }[]> {
+    const res = await fetch(`/api/ai/models`);
+    const data = await res.json();
+    const allModels: ModelInfo[] = data.models || [];
+
+    const targets: { provider: ProviderName; model: string }[] = [];
+    for (const { id: provider } of PROVIDER_OPTIONS) {
+      const first = allModels.find((m) => m.provider === provider);
+      if (!first) continue;
+      // Skip cloud providers without a configured key; always include local Ollama.
+      if (provider !== "ollama" && !(await getApiKey(provider))) continue;
+      targets.push({ provider, model: first.id });
+    }
+    return targets;
   }
 
   async function handleRun() {
@@ -68,20 +125,31 @@ export function PlaygroundView() {
       let newResults: TestRun[];
 
       if (compareMode) {
-        const [claudeResult, geminiResult] = await Promise.allSettled([
-          runTest("claude", "claude-sonnet-4-20250514"),
-          runTest("gemini", "gemini-2.5-flash"),
-        ]);
-
-        newResults = [];
-        if (claudeResult.status === "fulfilled") newResults.push(claudeResult.value);
-        if (geminiResult.status === "fulfilled") newResults.push(geminiResult.value);
-
-        if (newResults.length === 0) {
-          toast.error("Both providers failed. Check API keys in Settings.");
+        const targets = await buildComparisonTargets();
+        if (targets.length === 0) {
+          toast.error("No runnable models. Add an API key or start Ollama.");
           return;
         }
+        const settled = await Promise.allSettled(
+          targets.map((t) => runTest(t.provider, t.model))
+        );
+        newResults = settled
+          .filter((s): s is PromiseFulfilledResult<TestRun> => s.status === "fulfilled")
+          .map((s) => s.value);
+
+        const failed = settled.filter((s) => s.status === "rejected").length;
+        if (newResults.length === 0) {
+          toast.error("All models failed. Check API keys / Ollama in Settings.");
+          return;
+        }
+        if (failed > 0) {
+          toast.warning(`${failed} model(s) failed; showing ${newResults.length} result(s).`);
+        }
       } else {
+        if (!selectedModel) {
+          toast.error("No model selected. Check the provider in Settings.");
+          return;
+        }
         const result = await runTest(selectedProvider, selectedModel);
         newResults = [result];
       }
@@ -101,12 +169,15 @@ export function PlaygroundView() {
               input: testInput,
               output: r.output,
               latencyMs: r.latencyMs,
+              inputTokens: r.inputTokens,
+              outputTokens: r.outputTokens,
+              costUsd: r.costUsd,
             }),
           }).catch(() => {});
         }
       }
     } catch (err) {
-      toast.error("Test failed. Check your API key.");
+      toast.error(err instanceof Error ? err.message : "Test failed. Check your API key.");
       console.error(err);
     } finally {
       setRunning(false);
@@ -155,34 +226,39 @@ export function PlaygroundView() {
             placeholder="Additional input to append to the prompt..."
           />
 
-          {!compareMode && (
+          {compareMode ? (
+            <p className="text-xs text-muted-foreground">
+              Compare mode runs this prompt across one model per available provider
+              (Claude, Gemini, and your local Ollama) — providers without a key are skipped.
+            </p>
+          ) : (
             <div className="flex gap-3">
               <select
+                aria-label="Provider"
                 className="rounded-md border border-input bg-background px-3 py-2 text-sm"
                 value={selectedProvider}
                 onChange={(e) => setSelectedProvider(e.target.value as ProviderName)}
               >
-                <option value="claude">Claude</option>
-                <option value="gemini">Gemini</option>
+                {PROVIDER_OPTIONS.map((p) => (
+                  <option key={p.id} value={p.id}>{p.label}</option>
+                ))}
               </select>
               <select
+                aria-label="Model"
                 className="flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm"
                 value={selectedModel}
                 onChange={(e) => setSelectedModel(e.target.value)}
               >
-                {selectedProvider === "claude" ? (
-                  <>
-                    <option value="claude-opus-4-20250514">Claude Opus 4</option>
-                    <option value="claude-sonnet-4-20250514">Claude Sonnet 4</option>
-                    <option value="claude-haiku-4-20250414">Claude Haiku 4</option>
-                  </>
-                ) : (
-                  <>
-                    <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
-                    <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-                    <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
-                  </>
+                {models.length === 0 && (
+                  <option value="" disabled>
+                    {selectedProvider === "ollama"
+                      ? "Keine Ollama-Modelle — läuft der Daemon?"
+                      : "Keine Modelle verfügbar"}
+                  </option>
                 )}
+                {models.map((m) => (
+                  <option key={m.id} value={m.id}>{m.name}</option>
+                ))}
               </select>
             </div>
           )}
@@ -206,9 +282,11 @@ export function PlaygroundView() {
         <div className={`grid gap-4 ${results.length > 1 ? "grid-cols-1 lg:grid-cols-2" : "grid-cols-1"}`}>
           {results.map((r, idx) => (
             <div key={idx} className="border border-border rounded-lg p-4 space-y-2">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-2">
                 <span className="text-sm font-semibold capitalize">{r.provider} - {r.model}</span>
-                <span className="text-xs text-muted-foreground">{r.latencyMs}ms</span>
+                <span className="text-xs text-muted-foreground shrink-0">
+                  {r.latencyMs}ms · ~{(r.inputTokens + r.outputTokens).toLocaleString()} tok · {formatCost(r.costUsd, r.isLocal)}
+                </span>
               </div>
               <pre className="p-3 rounded bg-accent/30 text-sm whitespace-pre-wrap max-h-[400px] overflow-y-auto font-mono">
                 {r.output}

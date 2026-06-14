@@ -15,7 +15,7 @@ export const useSettingsStore = create<SettingsState>()(
   persist(
     (set) => ({
       activeProvider: "claude",
-      activeModel: "claude-sonnet-4-20250514",
+      activeModel: "claude-sonnet-4-6",
       theme: "dark",
       setActiveProvider: (provider) => set({ activeProvider: provider }),
       setActiveModel: (model) => set({ activeModel: model }),

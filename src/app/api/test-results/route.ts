@@ -22,7 +22,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { promptId, provider, model, input, output, latencyMs } = parsed.data;
+    const { promptId, provider, model, input, output, latencyMs, inputTokens, outputTokens, costUsd } = parsed.data;
 
     // Verify prompt exists
     const prompt = await prisma.prompt.findUnique({ where: { id: promptId } });

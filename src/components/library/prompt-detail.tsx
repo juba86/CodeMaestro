@@ -1,12 +1,14 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { ArrowLeft, Trash2, Copy, Download, Play } from "lucide-react";
+import { ArrowLeft, Trash2, Copy, Play, GitCompare } from "lucide-react";
 import { useBuilderStore } from "@/stores/builder-store";
 import { parseXml } from "@/lib/prompt-engine/xml-parser";
+import { downloadExport, EXPORT_FORMATS, type ExportFormat } from "@/lib/exporters/prompt-exporter";
+import { VersionDiff } from "./version-diff";
+import { TestCasePanel } from "./test-case-panel";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import * as yaml from "js-yaml";
 
 interface PromptFull {
   id: string;
@@ -29,6 +31,7 @@ interface PromptDetailProps {
 export function PromptDetail({ promptId, onBack, onDelete, onRefresh }: PromptDetailProps) {
   const [prompt, setPrompt] = useState<PromptFull | null>(null);
   const [activeVersion, setActiveVersion] = useState<number | null>(null);
+  const [compareVersion, setCompareVersion] = useState<number | null>(null);
   const router = useRouter();
   const { updateStructured, setXmlContent, setCurrentPromptId, setStep } = useBuilderStore();
 
@@ -45,6 +48,9 @@ export function PromptDetail({ promptId, onBack, onDelete, onRefresh }: PromptDe
   if (!prompt) return <p className="text-sm text-muted-foreground">Loading...</p>;
 
   const currentVersion = prompt.versions.find((v) => v.version === activeVersion);
+  const compareCurrent = compareVersion != null
+    ? prompt.versions.find((v) => v.version === compareVersion)
+    : undefined;
 
   function handleEdit() {
     const parsed = parseXml(prompt!.content);
@@ -60,30 +66,25 @@ export function PromptDetail({ promptId, onBack, onDelete, onRefresh }: PromptDe
     toast.success("Copied to clipboard!");
   }
 
-  function handleExport(format: "json" | "yaml") {
+  function handleExport(format: ExportFormat) {
+    if (!prompt) return;
     try {
       let structuredData: Record<string, unknown> = {};
       try {
-        structuredData = JSON.parse(prompt!.structured);
+        structuredData = JSON.parse(prompt.structured);
       } catch {
         // If structured data is invalid JSON, export as empty object
       }
-
-      const data = {
-        title: prompt!.title,
-        description: prompt!.description,
-        content: prompt!.content,
-        structured: structuredData,
-        tags: prompt!.tags.map((t) => t.tag),
-      };
-      const str = format === "json" ? JSON.stringify(data, null, 2) : yaml.dump(data);
-      const blob = new Blob([str], { type: "text/plain" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${prompt!.title.replace(/\s+/g, "-").toLowerCase()}.${format}`;
-      a.click();
-      URL.revokeObjectURL(url);
+      downloadExport(
+        {
+          title: prompt.title,
+          description: prompt.description,
+          content: prompt.content,
+          structured: structuredData,
+          tags: prompt.tags.map((t) => t.tag),
+        },
+        format
+      );
       toast.success(`Exported as ${format.toUpperCase()}`);
     } catch {
       toast.error(`Export failed`);
@@ -122,9 +123,21 @@ export function PromptDetail({ promptId, onBack, onDelete, onRefresh }: PromptDe
           <button onClick={handleCopy} className="p-1.5 rounded-md border border-input hover:bg-accent" aria-label="Copy to clipboard">
             <Copy size={14} />
           </button>
-          <button onClick={() => handleExport("json")} className="p-1.5 rounded-md border border-input hover:bg-accent" title="Export JSON">
-            <Download size={14} />
-          </button>
+          <select
+            aria-label="Export prompt"
+            title="Export as…"
+            className="rounded-md border border-input bg-background px-2 py-1.5 text-xs hover:bg-accent"
+            value=""
+            onChange={(e) => {
+              if (e.target.value) handleExport(e.target.value as ExportFormat);
+              e.target.value = "";
+            }}
+          >
+            <option value="" disabled>Export ▾</option>
+            {EXPORT_FORMATS.map((f) => (
+              <option key={f.id} value={f.id}>{f.label}</option>
+            ))}
+          </select>
           <button onClick={handleDelete} className="p-1.5 rounded-md border border-input hover:bg-accent text-destructive" aria-label="Delete prompt">
             <Trash2 size={14} />
           </button>
@@ -141,12 +154,32 @@ export function PromptDetail({ promptId, onBack, onDelete, onRefresh }: PromptDe
 
       {/* Version timeline */}
       <div className="space-y-2">
-        <h3 className="text-sm font-semibold">Versions ({prompt.versions.length})</h3>
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold">Versions ({prompt.versions.length})</h3>
+          {prompt.versions.length > 1 && (
+            <div className="flex items-center gap-2">
+              <GitCompare size={14} className="text-muted-foreground" />
+              <select
+                aria-label="Compare against version"
+                className="rounded-md border border-input bg-background px-2 py-1 text-xs"
+                value={compareVersion ?? ""}
+                onChange={(e) => setCompareVersion(e.target.value ? Number(e.target.value) : null)}
+              >
+                <option value="">Compare with…</option>
+                {prompt.versions
+                  .filter((v) => v.version !== activeVersion)
+                  .map((v) => (
+                    <option key={v.id} value={v.version}>vs. v{v.version}</option>
+                  ))}
+              </select>
+            </div>
+          )}
+        </div>
         <div className="flex gap-2 overflow-x-auto pb-1">
           {prompt.versions.map((v) => (
             <button
               key={v.id}
-              onClick={() => setActiveVersion(v.version)}
+              onClick={() => { setActiveVersion(v.version); if (compareVersion === v.version) setCompareVersion(null); }}
               className={`shrink-0 px-3 py-1.5 text-xs rounded-md ${
                 activeVersion === v.version
                   ? "bg-primary text-primary-foreground"
@@ -159,18 +192,30 @@ export function PromptDetail({ promptId, onBack, onDelete, onRefresh }: PromptDe
         </div>
       </div>
 
-      {/* Content */}
-      <div className="space-y-2">
-        <h3 className="text-sm font-semibold">
-          {currentVersion ? `Content (v${currentVersion.version})` : "Content"}
-        </h3>
-        <pre className="p-4 rounded-lg border border-border bg-accent/30 text-sm font-mono whitespace-pre-wrap overflow-x-auto max-h-[500px] overflow-y-auto">
-          {currentVersion?.content || prompt.content}
-        </pre>
-        {currentVersion?.changelog && (
-          <p className="text-xs text-muted-foreground">Changelog: {currentVersion.changelog}</p>
-        )}
-      </div>
+      {/* Content or diff */}
+      {compareCurrent ? (
+        <VersionDiff
+          from={compareCurrent.content}
+          to={currentVersion?.content || prompt.content}
+          fromLabel={`v${compareCurrent.version}`}
+          toLabel={`v${currentVersion?.version ?? "current"}`}
+        />
+      ) : (
+        <div className="space-y-2">
+          <h3 className="text-sm font-semibold">
+            {currentVersion ? `Content (v${currentVersion.version})` : "Content"}
+          </h3>
+          <pre className="p-4 rounded-lg border border-border bg-accent/30 text-sm font-mono whitespace-pre-wrap overflow-x-auto max-h-[500px] overflow-y-auto">
+            {currentVersion?.content || prompt.content}
+          </pre>
+          {currentVersion?.changelog && (
+            <p className="text-xs text-muted-foreground">Changelog: {currentVersion.changelog}</p>
+          )}
+        </div>
+      )}
+
+      {/* Evaluation test cases */}
+      <TestCasePanel promptId={prompt.id} xmlContent={currentVersion?.content || prompt.content} />
     </div>
   );
 }

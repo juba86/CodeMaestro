@@ -70,7 +70,14 @@ export async function generateCoTPrompt(
     }),
   });
 
-  if (!res.ok) throw new Error("AI generation failed");
+  if (!res.ok) {
+    let msg = "AI generation failed";
+    try {
+      const e = await res.json();
+      if (e?.error) msg = e.error;
+    } catch { /* ignore */ }
+    throw new Error(msg);
+  }
 
   const { content } = await res.json();
 

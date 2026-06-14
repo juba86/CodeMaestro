@@ -4,8 +4,7 @@ import { useBuilderStore } from "@/stores/builder-store";
 import { useSettingsStore } from "@/stores/settings-store";
 import { REFINEMENT_SYSTEM_PROMPT, QUICK_ACTIONS } from "@/lib/prompt-engine/refinement-prompts";
 import { parseXml } from "@/lib/prompt-engine/xml-parser";
-import { decryptApiKey } from "@/lib/ai/crypto";
-import type { ProviderName } from "@/lib/ai/types";
+import { getApiKey } from "@/lib/ai/client-keys";
 import { useState, useRef, useEffect } from "react";
 import { Send, Wand2 } from "lucide-react";
 import { toast } from "sonner";
@@ -29,14 +28,6 @@ export function RefinementChat() {
     return () => { abortRef.current?.abort(); };
   }, []);
 
-  async function getApiKey(provider: ProviderName): Promise<string> {
-    const enc = localStorage.getItem(`pb-apikey-${provider}`);
-    if (enc) {
-      try { return await decryptApiKey(enc); } catch { /* fallback */ }
-    }
-    return "";
-  }
-
   async function sendMessage(text: string) {
     if (!text.trim() || isGenerating) return;
 
@@ -50,11 +41,18 @@ export function RefinementChat() {
     const controller = new AbortController();
     abortRef.current = controller;
 
-    // Timeout after 30 seconds
-    const timeoutId = setTimeout(() => controller.abort(), 30000);
+    // Idle timeout (reset on every received chunk) instead of a hard total cap.
+    // Local Ollama models — especially large reasoning models — can take a long
+    // time to first token, so a fixed 30s total would abort valid requests.
+    const idleMs = activeProvider === "ollama" ? 180000 : 60000;
+    let timeoutId = setTimeout(() => controller.abort(), idleMs);
+    const resetIdle = () => {
+      clearTimeout(timeoutId);
+      timeoutId = setTimeout(() => controller.abort(), idleMs);
+    };
 
     try {
-      // Load API key from encrypted localStorage
+      // Load API key from encrypted localStorage (empty for local providers)
       const apiKey = await getApiKey(activeProvider);
 
       const res = await fetch("/api/ai/chat", {
@@ -80,11 +78,13 @@ export function RefinementChat() {
       if (!reader) throw new Error("No reader");
 
       let fullResponse = "";
+      let streamError = "";
       const decoder = new TextDecoder();
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        resetIdle();
         const chunk = decoder.decode(value, { stream: true });
         const lines = chunk.split("\n");
         for (const line of lines) {
@@ -93,10 +93,19 @@ export function RefinementChat() {
             if (data === "[DONE]") break;
             try {
               const parsed = JSON.parse(data);
-              if (parsed.content) fullResponse += parsed.content;
+              if (parsed.type === "error") {
+                streamError = parsed.content || "Stream error";
+              } else if (parsed.content) {
+                fullResponse += parsed.content;
+              }
             } catch { /* skip invalid JSON */ }
           }
         }
+      }
+
+      if (streamError && !fullResponse) {
+        toast.error(`AI error: ${streamError}`);
+        return;
       }
 
       addChatMessage({ role: "assistant", content: fullResponse });

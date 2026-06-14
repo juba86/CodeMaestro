@@ -1,5 +1,6 @@
 import type { PromptStructured, PromptExample, SwarmConfig, SwarmAgentRole, PromptTechnique } from "@/lib/ai/types";
 import { techniques } from "./techniques";
+import { uid } from "@/lib/uid";
 
 /**
  * Lightweight regex-based XML parser for prompt XML format.
@@ -52,7 +53,7 @@ export function parseXml(xml: string): PromptStructured {
     const exampleMatches = examplesBlock.match(/<example>[\s\S]*?<\/example>/gi) || [];
     for (const ex of exampleMatches) {
       examples.push({
-        id: crypto.randomUUID(),
+        id: uid(),
         input: unescapeXml(extractTag(ex, "input")),
         thinking: unescapeXml(extractTag(ex, "thinking")),
         answer: unescapeXml(extractTag(ex, "answer")),
