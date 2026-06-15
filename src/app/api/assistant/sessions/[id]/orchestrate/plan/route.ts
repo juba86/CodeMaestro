@@ -41,9 +41,10 @@ export async function POST(
   };
 
   try {
-    const { subtasks } = await planSubtasks(sessionRow, parsed.data.prompt, parsed.data.preference);
-    // Offer the full pool (incl. every local Ollama model) for manual reassignment.
-    const allWorkers = await discoverAllWorkers();
+    const { subtasks } = await planSubtasks(sessionRow, parsed.data.prompt, parsed.data.preference, parsed.data.clientProviders);
+    // Offer the full pool (incl. every local Ollama model + configured cloud APIs)
+    // for manual reassignment.
+    const allWorkers = await discoverAllWorkers(parsed.data.clientProviders);
     return NextResponse.json({
       workers: allWorkers.map((w) => ({ id: w.id, label: w.label, editsFiles: w.editsFiles, strengths: w.strengths })),
       subtasks,

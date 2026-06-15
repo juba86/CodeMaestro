@@ -133,9 +133,19 @@ export const assistantMessageSchema = z.object({
   apiKey: z.string().optional(),
 });
 
+// Cloud/local OpenAI-compatible providers the user has configured client-side,
+// offered to the orchestrator as optional text-only workers (keys/base URL live
+// in the browser; the planner may route to them but is never forced to).
+const clientProviderSchema = z.object({
+  id: z.string().min(1).max(40),
+  key: z.string().max(500).optional().default(""),
+  baseUrl: z.string().max(500).optional().default(""),
+});
+
 export const orchestrateSchema = z.object({
   prompt: z.string().min(1).max(100000),
   preference: z.string().max(2000).optional(),
+  clientProviders: z.array(clientProviderSchema).max(20).optional().default([]),
 });
 
 const plannedSubtaskSchema = z.object({
@@ -150,6 +160,7 @@ const plannedSubtaskSchema = z.object({
 export const orchestrateRunSchema = z.object({
   prompt: z.string().min(1).max(100000),
   subtasks: z.array(plannedSubtaskSchema).min(1).max(20),
+  clientProviders: z.array(clientProviderSchema).max(20).optional().default([]),
 });
 
 // --- Helper ---

@@ -3,15 +3,28 @@ import path from "path";
 import { runTurn, type AssistantSessionRow, type NormalizedEvent } from "./runner";
 import { fetchOllamaModels } from "@/lib/ai/ollama-provider";
 import { createProvider } from "@/lib/ai/provider-factory";
+import { getProvider } from "@/lib/ai/catalog";
+import { fetchOpenAICompatModels } from "@/lib/ai/openai-compatible-provider";
+
+// A configured OpenAI-compatible provider passed from the client (key/base URL
+// live in the browser). Offered to the planner as an optional text worker.
+export interface ClientProvider {
+  id: string;
+  key?: string;
+  baseUrl?: string;
+}
 
 // A worker is a concrete model the orchestrator can route a subtask to.
 export interface Worker {
   id: string;
-  kind: "claude-cli" | "gemini-cli" | "ollama";
+  kind: "claude-cli" | "gemini-cli" | "ollama" | "api";
   model: string;
   label: string;
   strengths: string;
   editsFiles: boolean;
+  providerId?: string; // for kind "api" — catalog id
+  apiKey?: string; // for kind "api"
+  baseUrl?: string; // for kind "api" (custom endpoint)
 }
 
 export interface OrchEvent {
@@ -51,7 +64,37 @@ async function geminiAvailable(): Promise<boolean> {
  * the planner uses to route subtasks. Claude Code and gemini-cli can edit files;
  * local Ollama models are text-only (great for isolated code, analysis, review).
  */
-export async function discoverWorkers(): Promise<Worker[]> {
+// Build optional text-only workers from the user's client-configured cloud /
+// custom OpenAI-compatible providers. Only included when usable (cloud needs a
+// key; the custom endpoint needs a base URL), so the planner may route to them
+// but is never forced to.
+function buildApiWorkers(clientProviders: ClientProvider[] = []): Worker[] {
+  const out: Worker[] = [];
+  const seen = new Set<string>();
+  for (const cp of clientProviders) {
+    const def = getProvider(cp.id);
+    if (!def || seen.has(cp.id)) continue;
+    if (def.kind !== "openai" && def.kind !== "openai-local") continue;
+    if (def.kind === "openai" && !cp.key) continue; // cloud needs a key
+    const baseUrl = cp.baseUrl || def.baseUrl;
+    if (!baseUrl) continue; // custom endpoint needs a base URL
+    seen.add(cp.id);
+    out.push({
+      id: `api:${def.id}`,
+      kind: "api",
+      model: "",
+      label: `API: ${def.label}`,
+      strengths: `Cloud/remote text model via ${def.label} (OpenAI-compatible). Strong general LLM — use for analysis, drafting code/snippets, or reviewing other workers' output. Cannot edit files directly; returns text/code that a file-editing worker or the user applies.`,
+      editsFiles: false,
+      providerId: def.id,
+      apiKey: cp.key || "",
+      baseUrl,
+    });
+  }
+  return out;
+}
+
+export async function discoverWorkers(clientProviders: ClientProvider[] = []): Promise<Worker[]> {
   const workers: Worker[] = [
     {
       id: "claude",
@@ -105,6 +148,9 @@ export async function discoverWorkers(): Promise<Worker[]> {
     /* ollama optional */
   }
 
+  // Optional cloud/custom text workers from the user's configured providers.
+  workers.push(...buildApiWorkers(clientProviders));
+
   return workers;
 }
 
@@ -124,8 +170,8 @@ function buildOllamaWorker(model: string): Worker {
  * installed Ollama chat model, so the user can manually route a subtask to any
  * local model (e.g. gemma4:31b).
  */
-export async function discoverAllWorkers(): Promise<Worker[]> {
-  const curated = await discoverWorkers();
+export async function discoverAllWorkers(clientProviders: ClientProvider[] = []): Promise<Worker[]> {
+  const curated = await discoverWorkers(clientProviders);
   const cli = curated.filter((w) => w.kind !== "ollama");
   const ids = new Set(cli.map((w) => w.id));
   const out = [...cli];
@@ -189,6 +235,27 @@ async function runOllamaWorker(worker: Worker, prompt: string): Promise<{ text: 
   return { text };
 }
 
+// Run a subtask on a cloud/custom OpenAI-compatible provider (text-only).
+async function runApiWorker(worker: Worker, prompt: string): Promise<{ text: string }> {
+  const providerId = worker.providerId || "";
+  const def = getProvider(providerId);
+  let model = worker.model;
+  if (!model) {
+    if (def?.staticModels?.length) {
+      model = def.staticModels[0].id;
+    } else {
+      const live = await fetchOpenAICompatModels(providerId, worker.baseUrl || "", worker.apiKey);
+      model = live[0]?.id || "";
+    }
+  }
+  const provider = createProvider(providerId, worker.apiKey || "", { baseUrl: worker.baseUrl });
+  const text = await provider.sendMessage({
+    messages: [{ role: "user", content: prompt }],
+    model,
+  });
+  return { text };
+}
+
 // --- Planner ---
 
 function extractJson(s: string): string {
@@ -225,8 +292,8 @@ Rules:
 - For a simple question, status check, or single action, return EXACTLY ONE subtask assigned to a file-capable worker (claude or gemini) — that worker will do the actual reading/answering.
 - Otherwise use 2-5 subtasks.
 - Any subtask that creates/modifies/deletes files MUST use a worker with editsFiles=true (claude or gemini).
-- Use local Ollama workers (editsFiles=false) only for analysis, drafting snippets, or reviewing other workers' output — never for applying file changes or for tasks needing to read the project.
-- Prefer claude for the hardest reasoning/architecture; gemini for broad/large-context sweeps; local models for cheap isolated work.
+- Non-file-editing workers (editsFiles=false — local Ollama models and "api:" cloud text models) are OPTIONAL helpers: use them only for analysis, drafting snippets, or reviewing other workers' output — never for applying file changes or tasks needing to read the project. It is fine to not use them at all.
+- Prefer claude for the hardest reasoning/architecture; gemini for broad/large-context sweeps; local/api text models for cheap isolated work.
 - Order subtasks with dependsOn (array of subtask ids that must finish first). Independent subtasks may have an empty dependsOn.
 
 Respond with ONLY this JSON shape:
@@ -305,9 +372,10 @@ export interface OrchestrationResult {
 export async function planSubtasks(
   session: AssistantSessionRow,
   task: string,
-  preference?: string
+  preference?: string,
+  clientProviders: ClientProvider[] = []
 ): Promise<{ workers: Worker[]; subtasks: PlannedSubtask[] }> {
-  const workers = await discoverWorkers();
+  const workers = await discoverWorkers(clientProviders);
   const subtasks = orderSubtasks(await plan(session, task, workers, preference));
   return { workers, subtasks };
 }
@@ -321,13 +389,14 @@ export async function executePlan(
   session: AssistantSessionRow,
   task: string,
   subtasks: PlannedSubtask[],
-  emit: (e: OrchEvent) => void
+  emit: (e: OrchEvent) => void,
+  clientProviders: ClientProvider[] = []
 ): Promise<OrchestrationResult> {
   const records: { role: string; content: string; meta: string }[] = [];
   let totalCost = 0;
   let anyError = false;
 
-  const workers = await discoverWorkers();
+  const workers = await discoverWorkers(clientProviders);
   emit({ type: "log", content: `Workers: ${workers.map((w) => w.id).join(", ")}` });
 
   emit({ type: "plan", subtasks });
@@ -351,6 +420,10 @@ export async function executePlan(
       let text = "";
       if (worker.kind === "ollama") {
         const r = await runOllamaWorker(worker, prompt);
+        text = r.text;
+        emit({ type: "subtask_text", subtaskId: st.id, content: text });
+      } else if (worker.kind === "api") {
+        const r = await runApiWorker(worker, prompt);
         text = r.text;
         emit({ type: "subtask_text", subtaskId: st.id, content: text });
       } else {
@@ -402,15 +475,16 @@ export async function orchestrate(
   session: AssistantSessionRow,
   task: string,
   emit: (e: OrchEvent) => void,
-  preference?: string
+  preference?: string,
+  clientProviders: ClientProvider[] = []
 ): Promise<OrchestrationResult> {
   let subtasks: PlannedSubtask[];
   try {
-    ({ subtasks } = await planSubtasks(session, task, preference));
+    ({ subtasks } = await planSubtasks(session, task, preference, clientProviders));
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Planning failed";
     emit({ type: "error", content: msg });
     return { costUsd: 0, isError: true, records: [{ role: "error", content: msg, meta: "{}" }] };
   }
-  return executePlan(session, task, subtasks, emit);
+  return executePlan(session, task, subtasks, emit, clientProviders);
 }

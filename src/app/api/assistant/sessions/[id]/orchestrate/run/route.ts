@@ -24,7 +24,7 @@ export async function POST(
   if (!parsed.success) {
     return NextResponse.json({ error: formatZodError(parsed.error), code: "VALIDATION_ERROR" }, { status: 400 });
   }
-  const { prompt, subtasks } = parsed.data;
+  const { prompt, subtasks, clientProviders } = parsed.data;
 
   const session = await prisma.assistantSession.findUnique({ where: { id } });
   if (!session) {
@@ -61,7 +61,7 @@ export async function POST(
       };
       let result;
       try {
-        result = await executePlan(sessionRow, prompt, subtasks, send);
+        result = await executePlan(sessionRow, prompt, subtasks, send, clientProviders);
       } catch (err) {
         send({ type: "error", content: err instanceof Error ? err.message : "Run failed" });
         result = { costUsd: 0, isError: true, records: [] };

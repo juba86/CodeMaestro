@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { getApiKey } from "@/lib/ai/client-keys";
+import { getApiKey, getBaseUrl } from "@/lib/ai/client-keys";
+import { PROVIDERS as CHAT_PROVIDERS } from "@/lib/ai/catalog";
 import {
   Plus, Send, Square, Trash2, Loader2, Terminal, Wrench, FileText,
   AlertCircle, FolderGit2, Network, Cpu, Sparkles, FolderPlus, Folder, ChevronUp, ExternalLink, Play,
@@ -439,6 +440,23 @@ export function AssistantView() {
     return parts.join(" ");
   }
 
+  // Collect the user's configured cloud/custom OpenAI-compatible providers so the
+  // orchestrator can offer them as optional text workers (keys live in the
+  // browser). Cloud needs a key; the custom endpoint needs a base URL.
+  async function gatherClientProviders(): Promise<{ id: string; key: string; baseUrl: string }[]> {
+    const out: { id: string; key: string; baseUrl: string }[] = [];
+    for (const def of CHAT_PROVIDERS) {
+      if (def.kind !== "openai" && def.kind !== "openai-local") continue;
+      const key = await getApiKey(def.id);
+      const baseUrl = getBaseUrl(def.id);
+      if (def.kind === "openai") { if (!key) continue; } // cloud: needs key
+      else if (def.configurableBaseUrl) { if (!baseUrl) continue; } // custom: needs base
+      else continue; // lmstudio etc.: skip auto-include to avoid inert workers
+      out.push({ id: def.id, key, baseUrl });
+    }
+    return out;
+  }
+
   async function orchestrate() {
     if (orchestrateMode && wizardEnabled && !wizardOpen) {
       setWizardOpen(true);
@@ -452,6 +470,8 @@ export function AssistantView() {
     setMessages((prev) => [...prev, { role: "user", content: prompt }]);
     setLive([]);
 
+    const clientProviders = await gatherClientProviders();
+
     if (orchMode === "hybrid") {
       setPendingPrompt(prompt);
       setRunning(true);
@@ -459,7 +479,7 @@ export function AssistantView() {
         const res = await fetch(`/api/assistant/sessions/${activeId}/orchestrate/plan`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt, preference }),
+          body: JSON.stringify({ prompt, preference, clientProviders }),
         });
         const d = await res.json();
         if (!res.ok) { toast.error(d.error || "Planung fehlgeschlagen."); return; }
@@ -469,14 +489,15 @@ export function AssistantView() {
       }
       return;
     }
-    await streamOrchestrate(`/api/assistant/sessions/${activeId}/orchestrate`, { prompt, preference });
+    await streamOrchestrate(`/api/assistant/sessions/${activeId}/orchestrate`, { prompt, preference, clientProviders });
   }
 
   async function runEditedPlan() {
     if (!planDraft || !activeId) return;
     const subtasks = planDraft.subtasks;
     setPlanDraft(null);
-    await streamOrchestrate(`/api/assistant/sessions/${activeId}/orchestrate/run`, { prompt: pendingPrompt, subtasks });
+    const clientProviders = await gatherClientProviders();
+    await streamOrchestrate(`/api/assistant/sessions/${activeId}/orchestrate/run`, { prompt: pendingPrompt, subtasks, clientProviders });
   }
 
   async function streamOrchestrate(url: string, body: object) {
