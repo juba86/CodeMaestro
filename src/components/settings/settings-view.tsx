@@ -4,37 +4,27 @@ import { useState, useEffect, useRef } from "react";
 import { useSettingsStore } from "@/stores/settings-store";
 import { encryptApiKey, decryptApiKey } from "@/lib/ai/crypto";
 import { fetchModelsForProvider } from "@/lib/ai/client-keys";
-import type { ProviderName, ModelInfo } from "@/lib/ai/types";
+import { PROVIDERS, type ProviderDef } from "@/lib/ai/catalog";
+import type { ModelInfo } from "@/lib/ai/types";
 import { Check, X, Loader2, Eye, EyeOff } from "lucide-react";
 import { toast } from "sonner";
 
-const providers: { id: ProviderName; label: string; envHint: string; local?: boolean }[] = [
-  { id: "claude", label: "Claude (Anthropic)", envHint: "ANTHROPIC_API_KEY" },
-  { id: "gemini", label: "Gemini (Google)", envHint: "GOOGLE_API_KEY" },
-  { id: "ollama", label: "Ollama (lokal)", envHint: "OLLAMA_BASE_URL", local: true },
-];
+// Display ordering: dedicated + cloud first, local/custom last.
+const ORDER = ["claude", "gemini", "openai", "openrouter", "groq", "deepseek", "mistral", "xai", "together", "perplexity", "ollama", "lmstudio", "custom"];
+const providerList = [...PROVIDERS].sort((a, b) => ORDER.indexOf(a.id) - ORDER.indexOf(b.id));
 
-const keyProviders = providers.filter((p) => !p.local);
+function isOllama(def: ProviderDef) { return def.kind === "ollama"; }
+function showKeyField(def: ProviderDef) { return !isOllama(def); }
+function keyRequired(def: ProviderDef) { return !def.local && !def.keyOptional && !isOllama(def); }
 
 export function SettingsView() {
   const { activeProvider, activeModel, setActiveProvider, setActiveModel, theme, setTheme } =
     useSettingsStore();
-  const [apiKeys, setApiKeys] = useState<Record<ProviderName, string>>({
-    claude: "",
-    gemini: "",
-    ollama: "",
-  });
-  const [showKeys, setShowKeys] = useState<Record<ProviderName, boolean>>({
-    claude: false,
-    gemini: false,
-    ollama: false,
-  });
-  const [validating, setValidating] = useState<ProviderName | null>(null);
-  const [validationResults, setValidationResults] = useState<Record<ProviderName, boolean | null>>({
-    claude: null,
-    gemini: null,
-    ollama: null,
-  });
+  const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
+  const [baseUrls, setBaseUrls] = useState<Record<string, string>>({});
+  const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
+  const [validating, setValidating] = useState<string | null>(null);
+  const [validationResults, setValidationResults] = useState<Record<string, boolean | null>>({});
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [authModes, setAuthModes] = useState<{ claude: "key" | "oauth"; gemini: "key" | "oauth" }>({ claude: "key", gemini: "key" });
   const modelAbortRef = useRef<AbortController | null>(null);
@@ -68,27 +58,32 @@ export function SettingsView() {
   }
 
   useEffect(() => {
-    // Load encrypted keys from localStorage
+    // Load stored keys + base URLs from localStorage.
     (async () => {
-      for (const p of keyProviders) {
-        const enc = localStorage.getItem(`pb-apikey-${p.id}`);
-        if (enc) {
-          try {
-            const key = await decryptApiKey(enc);
-            setApiKeys((prev) => ({ ...prev, [p.id]: key }));
-          } catch { /* ignore */ }
+      for (const p of providerList) {
+        if (showKeyField(p)) {
+          const enc = localStorage.getItem(`pb-apikey-${p.id}`);
+          if (enc) {
+            try {
+              const key = await decryptApiKey(enc);
+              setApiKeys((prev) => ({ ...prev, [p.id]: key }));
+            } catch { /* ignore */ }
+          }
+        }
+        if (p.configurableBaseUrl) {
+          const b = localStorage.getItem(`pb-baseurl-${p.id}`);
+          if (b) setBaseUrls((prev) => ({ ...prev, [p.id]: b }));
         }
       }
     })();
   }, []);
 
   useEffect(() => {
-    // Cancel previous model fetch
     modelAbortRef.current?.abort();
     const controller = new AbortController();
     modelAbortRef.current = controller;
 
-    fetchModelsForProvider(activeProvider, controller.signal, apiKeys[activeProvider])
+    fetchModelsForProvider(activeProvider, controller.signal, apiKeys[activeProvider], baseUrls[activeProvider])
       .then((m) => {
         setModels(m);
         if (m.length > 0 && !m.some((model) => model.id === activeModel)) {
@@ -100,18 +95,25 @@ export function SettingsView() {
       });
 
     return () => controller.abort();
-    // Refetch live models when the provider changes or its key becomes available.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeProvider, apiKeys[activeProvider]]);
+  }, [activeProvider, apiKeys[activeProvider], baseUrls[activeProvider]]);
 
-  function handleKeyChange(provider: ProviderName, value: string) {
+  function handleKeyChange(provider: string, value: string) {
     setApiKeys((prev) => ({ ...prev, [provider]: value }));
-    // Reset validation status when key changes
     setValidationResults((prev) => ({ ...prev, [provider]: null }));
   }
 
-  async function saveKey(provider: ProviderName) {
-    const key = apiKeys[provider];
+  function handleBaseChange(provider: string, value: string) {
+    setBaseUrls((prev) => ({ ...prev, [provider]: value }));
+    setValidationResults((prev) => ({ ...prev, [provider]: null }));
+    try {
+      if (value.trim()) localStorage.setItem(`pb-baseurl-${provider}`, value.trim());
+      else localStorage.removeItem(`pb-baseurl-${provider}`);
+    } catch { /* ignore */ }
+  }
+
+  async function saveKey(provider: string) {
+    const key = apiKeys[provider] || "";
     if (!key.trim()) {
       localStorage.removeItem(`pb-apikey-${provider}`);
       toast.info("API key removed.");
@@ -122,29 +124,30 @@ export function SettingsView() {
     toast.success("API key saved.");
   }
 
-  async function validateKey(provider: ProviderName) {
+  async function validateKey(provider: string) {
     const oauth = (provider === "gemini" || provider === "claude") && authModes[provider] === "oauth";
     setValidating(provider);
     try {
       const res = await fetch("/api/ai/validate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider, apiKey: apiKeys[provider], authMode: oauth ? "oauth" : "key" }),
+        body: JSON.stringify({ provider, apiKey: apiKeys[provider] || "", authMode: oauth ? "oauth" : "key", baseUrl: baseUrls[provider] }),
       });
       const { valid } = await res.json();
       setValidationResults((prev) => ({ ...prev, [provider]: valid }));
       if (valid && oauth) {
         toast.success("Login funktioniert.");
       } else if (valid) {
-        // Auto-save on successful validation so the key is actually usable for
-        // generation/chat (which read the stored key) — no separate Save needed.
-        const enc = await encryptApiKey(apiKeys[provider]);
-        localStorage.setItem(`pb-apikey-${provider}`, enc);
-        toast.success("API key is valid and saved!");
+        // Auto-save a valid key so chat/generation (which read the stored key) work.
+        if ((apiKeys[provider] || "").trim()) {
+          const enc = await encryptApiKey(apiKeys[provider]);
+          localStorage.setItem(`pb-apikey-${provider}`, enc);
+        }
+        toast.success("Verbindung gültig und gespeichert!");
       } else {
         toast.error(oauth
-          ? `Login nicht aktiv. Auf dem Server \`${provider === "claude" ? "claude" : "gemini"}\` einloggen.`
-          : "Invalid API key.");
+          ? `Login nicht aktiv. Auf dem Server \`${provider}\` einloggen.`
+          : "Ungültig — Key/Endpoint prüfen.");
       }
     } catch {
       setValidationResults((prev) => ({ ...prev, [provider]: false }));
@@ -159,13 +162,13 @@ export function SettingsView() {
       <h1 className="text-2xl font-bold">Settings</h1>
 
       <section className="space-y-4">
-        <h2 className="text-lg font-semibold">AI Provider</h2>
-        <div className="flex gap-2">
-          {providers.map((p) => (
+        <h2 className="text-lg font-semibold">Aktiver Provider</h2>
+        <div className="flex flex-wrap gap-2">
+          {providerList.map((p) => (
             <button
               key={p.id}
               onClick={() => setActiveProvider(p.id)}
-              className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+              className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
                 activeProvider === p.id
                   ? "bg-primary text-primary-foreground"
                   : "border border-input hover:bg-accent"
@@ -177,15 +180,18 @@ export function SettingsView() {
         </div>
       </section>
 
-      <section className="space-y-4">
-        <h2 className="text-lg font-semibold">API Keys</h2>
-        {keyProviders.map((p) => {
-          const supportsLogin = p.id === "gemini" || p.id === "claude";
+      <section className="space-y-5">
+        <h2 className="text-lg font-semibold">Provider & Keys</h2>
+        {providerList.map((p) => {
+          const supportsLogin = p.supportsOAuth && (p.id === "claude" || p.id === "gemini");
           const oauth = supportsLogin && authModes[p.id as "claude" | "gemini"] === "oauth";
+          const required = keyRequired(p);
           return (
-          <div key={p.id} className="space-y-2">
+          <div key={p.id} className="space-y-2 border border-border rounded-lg p-3">
             <label className="text-sm font-medium flex items-center gap-2">
               {p.label}
+              {p.local && <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-accent text-muted-foreground">lokal</span>}
+              {!required && !p.local && p.keyOptional && <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent text-muted-foreground">Key optional</span>}
               {validationResults[p.id] === true && <Check size={14} className="text-green-500" />}
               {validationResults[p.id] === false && <X size={14} className="text-red-500" />}
             </label>
@@ -202,6 +208,16 @@ export function SettingsView() {
                   </button>
                 ))}
               </div>
+            )}
+
+            {p.configurableBaseUrl && (
+              <input
+                type="text"
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                placeholder="Base-URL (z.B. http://localhost:8000/v1)"
+                value={baseUrls[p.id] || ""}
+                onChange={(e) => handleBaseChange(p.id, e.target.value)}
+              />
             )}
 
             {oauth ? (
@@ -221,6 +237,21 @@ export function SettingsView() {
                   {validating === p.id ? <Loader2 size={14} className="animate-spin" /> : "Verbindung testen"}
                 </button>
               </div>
+            ) : isOllama(p) ? (
+              <div className="space-y-1.5">
+                <p className="text-xs text-muted-foreground">
+                  Kein API-Key nötig. Verbindet sich mit{" "}
+                  <code className="px-1 bg-accent rounded">{process.env.NEXT_PUBLIC_OLLAMA_BASE_URL || "http://localhost:11434"}</code>.
+                  Installierte Modelle erscheinen unten, sobald Ollama als Provider gewählt ist.
+                </p>
+                <button
+                  onClick={() => validateKey("ollama")}
+                  disabled={validating === "ollama"}
+                  className="px-3 py-2 text-sm rounded-md border border-input hover:bg-accent disabled:opacity-50 flex items-center gap-1 w-fit"
+                >
+                  {validating === "ollama" ? <Loader2 size={14} className="animate-spin" /> : "Verbindung testen"}
+                </button>
+              </div>
             ) : (
               <>
                 <div className="flex gap-2">
@@ -228,8 +259,8 @@ export function SettingsView() {
                     <input
                       type={showKeys[p.id] ? "text" : "password"}
                       className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm pr-10 focus:outline-none focus:ring-2 focus:ring-ring"
-                      placeholder={`Enter ${p.label} API key (or set ${p.envHint} in .env)`}
-                      value={apiKeys[p.id]}
+                      placeholder={required ? `${p.label} API-Key` : `${p.label} API-Key (optional)`}
+                      value={apiKeys[p.id] || ""}
                       onChange={(e) => handleKeyChange(p.id, e.target.value)}
                     />
                     <button
@@ -248,15 +279,20 @@ export function SettingsView() {
                   </button>
                   <button
                     onClick={() => validateKey(p.id)}
-                    disabled={!apiKeys[p.id] || validating === p.id}
+                    disabled={validating === p.id || (required && !apiKeys[p.id])}
                     className="px-3 py-2 text-sm rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 flex items-center gap-1"
                   >
                     {validating === p.id ? <Loader2 size={14} className="animate-spin" /> : "Validate"}
                   </button>
                 </div>
-                <p className="text-xs text-muted-foreground">
-                  Or set <code className="px-1 bg-accent rounded">{p.envHint}</code> in your .env file
-                </p>
+                {p.docs && (
+                  <p className="text-xs text-muted-foreground">
+                    {p.envKeys?.length ? <>Or set <code className="px-1 bg-accent rounded">{p.envKeys[0]}</code> in .env · </> : null}
+                    <a href={p.docs.startsWith("http") ? p.docs : undefined} target="_blank" rel="noreferrer" className={p.docs.startsWith("http") ? "underline hover:text-foreground" : ""}>
+                      {p.docs.startsWith("http") ? "Key holen" : p.docs}
+                    </a>
+                  </p>
+                )}
               </>
             )}
           </div>
@@ -265,38 +301,9 @@ export function SettingsView() {
       </section>
 
       <section className="space-y-3">
-        <h2 className="text-lg font-semibold flex items-center gap-2">
-          Ollama (lokal)
-          {validationResults.ollama === true && <Check size={14} className="text-green-500" />}
-          {validationResults.ollama === false && <X size={14} className="text-red-500" />}
-        </h2>
-        <p className="text-xs text-muted-foreground">
-          Kein API-Key nötig. Verbindet sich mit{" "}
-          <code className="px-1 bg-accent rounded">
-            {process.env.NEXT_PUBLIC_OLLAMA_BASE_URL || "http://localhost:11434"}
-          </code>
-          . Installierte Modelle erscheinen unten in der Modell-Auswahl, sobald du
-          Ollama als Provider wählst. (Override per{" "}
-          <code className="px-1 bg-accent rounded">OLLAMA_BASE_URL</code> in der .env.)
-        </p>
-        <button
-          onClick={() => validateKey("ollama")}
-          disabled={validating === "ollama"}
-          className="px-3 py-2 text-sm rounded-md border border-input hover:bg-accent disabled:opacity-50 flex items-center gap-1"
-        >
-          {validating === "ollama" ? (
-            <Loader2 size={14} className="animate-spin" />
-          ) : (
-            "Verbindung testen"
-          )}
-        </button>
-      </section>
-
-      <section className="space-y-3">
         <h2 className="text-lg font-semibold">Default Model</h2>
         <p className="text-xs text-muted-foreground">
-          Aktiver Provider:{" "}
-          <span className="font-medium capitalize">{activeProvider}</span>
+          Aktiver Provider: <span className="font-medium">{activeProvider}</span>
         </p>
         <select
           className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"

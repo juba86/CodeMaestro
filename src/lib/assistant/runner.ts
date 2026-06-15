@@ -108,6 +108,47 @@ function geminiArgs(session: AssistantSessionRow, prompt: string): string[] {
   return args;
 }
 
+// --- Additional CLI coding agents (plain stdout, no structured tool stream) ---
+// These drive their own file edits on disk; we surface their textual output.
+// They are inert (graceful error) until the corresponding binary is installed.
+export interface PlainAgentDef {
+  bin: string;
+  label: string;
+  install: string; // hint shown when the binary isn't on PATH
+}
+
+export const PLAIN_AGENTS: Record<string, PlainAgentDef> = {
+  opencode: { bin: "opencode", label: "OpenCode", install: "npm i -g opencode-ai  (oder: brew install sst/tap/opencode)" },
+  codex: { bin: "codex", label: "Codex CLI", install: "npm i -g @openai/codex" },
+  aider: { bin: "aider", label: "Aider", install: "pipx install aider-chat  (oder: pip install aider-chat)" },
+};
+
+export function isPlainAgent(provider: string): boolean {
+  return provider in PLAIN_AGENTS;
+}
+
+// Build argv for a plain agent's one-shot, non-interactive run.
+function plainArgs(provider: string, session: AssistantSessionRow, prompt: string): string[] {
+  if (provider === "opencode") {
+    const args = ["run"];
+    if (session.model) args.push("--model", session.model);
+    // Continue the previous OpenCode session in this dir on follow-up turns.
+    if (session.externalId) args.push("--continue");
+    args.push(prompt);
+    return args;
+  }
+  if (provider === "codex") {
+    const args = ["exec", "--skip-git-repo-check"];
+    if (session.model) args.push("--model", session.model);
+    args.push(prompt);
+    return args;
+  }
+  // aider
+  const args = ["--message", prompt, "--yes-always", "--no-stream"];
+  if (session.model) args.push("--model", session.model);
+  return args;
+}
+
 interface ClaudeStreamLine {
   type: string;
   subtype?: string;
@@ -130,17 +171,25 @@ export async function runTurn(
   apiKey: string | undefined,
   emit: (e: NormalizedEvent) => void
 ): Promise<TurnResult> {
+  const plain = isPlainAgent(session.provider);
   const isGemini = session.provider === "gemini";
-  const bin = isGemini ? "gemini" : "claude";
-  const settingsFile = isGemini ? null : buildSettingsFile(session);
-  const args = isGemini ? geminiArgs(session, prompt) : claudeArgs(session, prompt, settingsFile);
+  const kind: "claude" | "gemini" | "plain" = plain ? "plain" : isGemini ? "gemini" : "claude";
+
+  // Approval hook + sandbox are Claude-Code-specific (PreToolUse settings).
+  const settingsFile = kind === "claude" ? buildSettingsFile(session) : null;
+  const bin = plain ? PLAIN_AGENTS[session.provider].bin : isGemini ? "gemini" : "claude";
+  const args = plain
+    ? plainArgs(session.provider, session, prompt)
+    : isGemini
+      ? geminiArgs(session, prompt)
+      : claudeArgs(session, prompt, settingsFile);
 
   const env: NodeJS.ProcessEnv = { ...process.env };
   if (isGemini && apiKey) {
     env.GEMINI_API_KEY = apiKey;
     env.GOOGLE_API_KEY = apiKey;
   }
-  if (!isGemini && apiKey) {
+  if (kind === "claude" && apiKey) {
     // Optional: allow overriding Claude auth with an explicit key.
     env.ANTHROPIC_API_KEY = apiKey;
   }
@@ -152,11 +201,13 @@ export async function runTurn(
     env.PB_SESSION_ID = session.id;
   }
 
+  const installHint = plain ? ` (nicht installiert? ${PLAIN_AGENTS[session.provider].install})` : "";
+
   let child: ChildProcessWithoutNullStreams;
   try {
     child = spawn(bin, args, { cwd: session.cwd, env });
   } catch (err) {
-    emit({ type: "error", content: `Failed to start ${bin}: ${err instanceof Error ? err.message : String(err)}` });
+    emit({ type: "error", content: `Failed to start ${bin}: ${err instanceof Error ? err.message : String(err)}${installHint}` });
     return { externalId: session.externalId, costUsd: 0, isError: true };
   }
 
@@ -215,11 +266,17 @@ export async function runTurn(
 
   return await new Promise<TurnResult>((resolve) => {
     child.stdout.on("data", (chunk: Buffer) => {
-      if (isGemini) {
-        stdoutBuffer += chunk.toString();
+      const text = chunk.toString();
+      if (kind === "gemini") {
+        stdoutBuffer += text;
         return; // gemini returns a single JSON object; parse at close
       }
-      stdoutBuffer += chunk.toString();
+      if (kind === "plain") {
+        // No structured stream — surface stdout live as assistant text.
+        emit({ type: "text", content: text });
+        return;
+      }
+      stdoutBuffer += text;
       const lines = stdoutBuffer.split("\n");
       stdoutBuffer = lines.pop() || "";
       for (const line of lines) handleClaudeLine(line);
@@ -230,7 +287,8 @@ export async function runTurn(
     });
 
     child.on("error", (err) => {
-      emit({ type: "error", content: err.message });
+      const enoent = (err as NodeJS.ErrnoException).code === "ENOENT";
+      emit({ type: "error", content: enoent ? `${bin} nicht gefunden${installHint}` : err.message });
       isError = true;
     });
 
@@ -238,7 +296,7 @@ export async function runTurn(
       procs.delete(session.id);
       if (settingsFile) { try { unlinkSync(settingsFile); } catch { /* ignore */ } }
 
-      if (isGemini) {
+      if (kind === "gemini") {
         try {
           const data = JSON.parse(stdoutBuffer);
           if (data.response) emit({ type: "text", content: String(data.response) });
@@ -251,6 +309,10 @@ export async function runTurn(
           if (stdoutBuffer.trim()) emit({ type: "text", content: stdoutBuffer.trim() });
           emit({ type: "result", content: "", costUsd: 0, isError });
         }
+      } else if (kind === "plain") {
+        // Mark the session started so follow-up turns can continue it (opencode).
+        externalId = externalId || session.provider;
+        emit({ type: "result", content: "", costUsd: 0, isError });
       } else if (stdoutBuffer.trim()) {
         handleClaudeLine(stdoutBuffer);
       }

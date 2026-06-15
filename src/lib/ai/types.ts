@@ -1,4 +1,6 @@
-export type ProviderName = "claude" | "gemini" | "ollama";
+// Provider ids are catalog-driven (see catalog.ts), so this is a free string.
+// The dedicated providers still narrow their own `name` to a literal.
+export type ProviderName = string;
 
 export interface ModelInfo {
   id: string;

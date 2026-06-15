@@ -1,5 +1,10 @@
 import type { ProviderName } from "./types";
+import { getProvider } from "./catalog";
 import { estimateTokens } from "@/lib/prompt-engine/prompt-linter";
+
+function isLocalProvider(provider: ProviderName): boolean {
+  return provider === "ollama" || !!getProvider(provider)?.local;
+}
 
 // USD price per 1,000,000 tokens. Approximate public list prices; adjust as needed.
 interface Price {
@@ -24,7 +29,7 @@ const MODEL_PRICING: Record<string, Price> = {
 };
 
 function priceFor(provider: ProviderName, model: string): Price {
-  if (provider === "ollama") return { input: 0, output: 0 }; // local = free
+  if (isLocalProvider(provider)) return { input: 0, output: 0 }; // local = free
   if (MODEL_PRICING[model]) return MODEL_PRICING[model];
   // Prefix match for dated/variant ids (e.g. "claude-opus-4-8-...").
   const prefix = Object.keys(MODEL_PRICING).find((k) => model.startsWith(k));
@@ -54,7 +59,7 @@ export function estimateCost(
   const p = priceFor(provider, model);
   const costUsd =
     (inputTokens / 1_000_000) * p.input + (outputTokens / 1_000_000) * p.output;
-  return { inputTokens, outputTokens, costUsd, isLocal: provider === "ollama" };
+  return { inputTokens, outputTokens, costUsd, isLocal: isLocalProvider(provider) };
 }
 
 export function formatCost(costUsd: number, isLocal: boolean): string {

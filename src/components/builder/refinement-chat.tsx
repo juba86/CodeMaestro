@@ -4,7 +4,7 @@ import { useBuilderStore } from "@/stores/builder-store";
 import { useSettingsStore } from "@/stores/settings-store";
 import { REFINEMENT_SYSTEM_PROMPT, QUICK_ACTIONS } from "@/lib/prompt-engine/refinement-prompts";
 import { parseXml } from "@/lib/prompt-engine/xml-parser";
-import { getApiKey } from "@/lib/ai/client-keys";
+import { getApiKey, getBaseUrl } from "@/lib/ai/client-keys";
 import { useState, useRef, useEffect } from "react";
 import { Send, Wand2 } from "lucide-react";
 import { toast } from "sonner";
@@ -54,6 +54,7 @@ export function RefinementChat() {
     try {
       // Load API key from encrypted localStorage (empty for local providers)
       const apiKey = await getApiKey(activeProvider);
+      const baseUrl = getBaseUrl(activeProvider);
 
       const res = await fetch("/api/ai/chat", {
         method: "POST",
@@ -68,6 +69,7 @@ export function RefinementChat() {
           model: activeModel,
           stream: true,
           apiKey,
+          baseUrl,
         }),
         signal: controller.signal,
       });

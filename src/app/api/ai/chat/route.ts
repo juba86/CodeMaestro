@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createProvider } from "@/lib/ai/provider-factory";
 import { GeminiCliProvider } from "@/lib/ai/gemini-cli-provider";
 import { ClaudeCliProvider } from "@/lib/ai/claude-cli-provider";
+import { getProvider, envKeyFor, requiresKey } from "@/lib/ai/catalog";
 import { getSetting } from "@/lib/settings";
 import { chatRequestSchema, formatZodError } from "@/lib/validation/schemas";
 
@@ -25,7 +26,15 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { messages, systemPrompt, provider: providerName, model, stream, apiKey: clientApiKey, maxTokens, temperature } = result.data;
+    const { messages, systemPrompt, provider: providerName, model, stream, apiKey: clientApiKey, baseUrl, maxTokens, temperature } = result.data;
+
+    const def = getProvider(providerName);
+    if (!def) {
+      return NextResponse.json(
+        { error: `Unknown provider: ${providerName}`, code: "INVALID_PROVIDER" },
+        { status: 400 }
+      );
+    }
 
     // Claude/Gemini can run via their locally logged-in CLI instead of an API key.
     const geminiOauth =
@@ -33,20 +42,13 @@ export async function POST(req: NextRequest) {
     const claudeLogin =
       providerName === "claude" && (await getSetting("claudeAuthMode", "key")) === "oauth";
 
-    // Local providers (Ollama) and CLI-login providers run without an API key.
-    const requiresKey = providerName !== "ollama" && !geminiOauth && !claudeLogin;
+    // Local providers, key-optional servers, and CLI-login providers run without a key.
+    const needsKey = requiresKey(def) && !geminiOauth && !claudeLogin;
 
-    // Get API key from request or env
-    const apiKey =
-      clientApiKey ||
-      (providerName === "claude"
-        ? process.env.ANTHROPIC_API_KEY
-        : providerName === "gemini"
-          ? process.env.GOOGLE_API_KEY
-          : "") ||
-      "";
+    // Get API key from request or the provider's env fallback.
+    const apiKey = clientApiKey || envKeyFor(def) || "";
 
-    if (requiresKey && !apiKey) {
+    if (needsKey && !apiKey) {
       return NextResponse.json(
         { error: "No API key configured. Set it in Settings.", code: "MISSING_API_KEY" },
         { status: 400 }
@@ -57,7 +59,7 @@ export async function POST(req: NextRequest) {
       ? new GeminiCliProvider()
       : claudeLogin
         ? new ClaudeCliProvider()
-        : createProvider(providerName, apiKey);
+        : createProvider(providerName, apiKey, { baseUrl });
 
     if (stream) {
       const encoder = new TextEncoder();

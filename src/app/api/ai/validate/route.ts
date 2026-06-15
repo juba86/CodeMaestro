@@ -24,13 +24,13 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { provider: providerName, apiKey, authMode } = result.data;
+    const { provider: providerName, apiKey, authMode, baseUrl } = result.data;
     const provider =
       authMode === "oauth" && providerName === "gemini"
         ? new GeminiCliProvider()
         : authMode === "oauth" && providerName === "claude"
           ? new ClaudeCliProvider()
-          : createProvider(providerName, apiKey);
+          : createProvider(providerName, apiKey, { baseUrl });
     const valid = await provider.validateCredentials(apiKey);
 
     return NextResponse.json({ valid });

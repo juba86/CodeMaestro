@@ -3,8 +3,9 @@
 import { useState, useEffect, useRef } from "react";
 import { useBuilderStore } from "@/stores/builder-store";
 import { useSettingsStore } from "@/stores/settings-store";
-import { getApiKey, fetchModelsForProvider } from "@/lib/ai/client-keys";
+import { getApiKey, getBaseUrl, fetchModelsForProvider } from "@/lib/ai/client-keys";
 import { estimateCost, formatCost } from "@/lib/ai/pricing";
+import { PROVIDERS, getProvider } from "@/lib/ai/catalog";
 import type { ProviderName, ModelInfo } from "@/lib/ai/types";
 import { Play, Loader2, RotateCcw, Columns } from "lucide-react";
 import { toast } from "sonner";
@@ -21,11 +22,10 @@ interface TestRun {
   isLocal: boolean;
 }
 
-const PROVIDER_OPTIONS: { id: ProviderName; label: string }[] = [
-  { id: "claude", label: "Claude" },
-  { id: "gemini", label: "Gemini" },
-  { id: "ollama", label: "Ollama (lokal)" },
-];
+const PROVIDER_OPTIONS: { id: ProviderName; label: string }[] = PROVIDERS.map((p) => ({
+  id: p.id,
+  label: p.label,
+}));
 
 export function PlaygroundView() {
   const { xmlContent, setXmlContent, currentPromptId } = useBuilderStore();
@@ -63,6 +63,7 @@ export function PlaygroundView() {
 
   async function runTest(provider: ProviderName, model: string) {
     const apiKey = await getApiKey(provider);
+    const baseUrl = getBaseUrl(provider);
     const prompt = xmlContent + (testInput ? `\n\nUser Input: ${testInput}` : "");
     const start = performance.now();
 
@@ -74,6 +75,7 @@ export function PlaygroundView() {
         provider,
         model,
         apiKey,
+        baseUrl,
       }),
     });
 
@@ -107,8 +109,9 @@ export function PlaygroundView() {
     for (const { id: provider } of PROVIDER_OPTIONS) {
       const first = allModels.find((m) => m.provider === provider);
       if (!first) continue;
-      // Skip cloud providers without a configured key; always include local Ollama.
-      if (provider !== "ollama" && !(await getApiKey(provider))) continue;
+      // Always include local providers; skip cloud providers without a key.
+      const isLocal = getProvider(provider)?.local;
+      if (!isLocal && !(await getApiKey(provider))) continue;
       targets.push({ provider, model: first.id });
     }
     return targets;

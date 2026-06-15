@@ -2,22 +2,47 @@ import type { AIProvider, ProviderName } from "./types";
 import { ClaudeProvider } from "./claude-provider";
 import { GeminiProvider } from "./gemini-provider";
 import { OllamaProvider } from "./ollama-provider";
+import { OpenAICompatibleProvider } from "./openai-compatible-provider";
+import { getProvider, PROVIDERS } from "./catalog";
 
 // Re-export from models.ts for backwards compatibility
 export { getStaticModels } from "./models";
 
-const providers: Record<ProviderName, new (apiKey: string) => AIProvider> = {
-  claude: ClaudeProvider,
-  gemini: GeminiProvider,
-  ollama: OllamaProvider,
-};
+export interface CreateProviderOpts {
+  baseUrl?: string; // required for the "custom" provider; overrides catalog baseUrl
+}
 
-export function createProvider(name: ProviderName, apiKey: string): AIProvider {
-  const Provider = providers[name];
-  if (!Provider) throw new Error(`Unknown provider: ${name}`);
-  return new Provider(apiKey);
+export function createProvider(
+  name: ProviderName,
+  apiKey: string,
+  opts: CreateProviderOpts = {}
+): AIProvider {
+  const def = getProvider(name);
+  if (!def) throw new Error(`Unknown provider: ${name}`);
+
+  switch (def.kind) {
+    case "anthropic":
+      return new ClaudeProvider(apiKey);
+    case "gemini":
+      return new GeminiProvider(apiKey);
+    case "ollama":
+      return new OllamaProvider(apiKey);
+    case "openai":
+    case "openai-local": {
+      const baseUrl = opts.baseUrl || def.baseUrl;
+      if (!baseUrl) throw new Error(`Provider ${name} requires a base URL`);
+      return new OpenAICompatibleProvider({
+        providerId: def.id,
+        baseUrl,
+        apiKey,
+        noModelsEndpoint: def.noModelsEndpoint,
+      });
+    }
+    default:
+      throw new Error(`Unsupported provider kind for ${name}`);
+  }
 }
 
 export function getProviderNames(): ProviderName[] {
-  return Object.keys(providers) as ProviderName[];
+  return PROVIDERS.map((p) => p.id);
 }

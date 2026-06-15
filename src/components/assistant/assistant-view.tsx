@@ -58,7 +58,13 @@ interface ApprovalCard {
 const PROVIDERS = [
   { id: "claude", label: "Claude Code" },
   { id: "gemini", label: "Gemini CLI" },
+  { id: "opencode", label: "OpenCode" },
+  { id: "codex", label: "Codex CLI" },
+  { id: "aider", label: "Aider" },
 ];
+
+// Approval-gate + sandbox are Claude-Code-specific (PreToolUse hooks).
+const APPROVAL_CAPABLE = new Set(["claude"]);
 
 export function AssistantView() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -687,6 +693,7 @@ export function AssistantView() {
           <p className="text-[11px] text-muted-foreground">
             Nur erlaubte Tools werden ausgeführt. Edit/Write/Bash nur aktivieren, wenn der Assistent Dateien ändern / Befehle ausführen soll.
           </p>
+          {APPROVAL_CAPABLE.has(draft.provider) ? (
           <div className="space-y-1.5 rounded-md border border-border p-2">
             <label className="flex items-center gap-1.5 text-xs font-medium">
               <ShieldCheck size={13} /> Freigabe vor Aktionen
@@ -713,6 +720,11 @@ export function AssistantView() {
               Bei aktivierter Freigabe zeigt der Assistent vor jedem Edit/Write{draft.approvalMode === "all" ? "/Bash" : ""} einen Diff bzw. Befehl, den du freigeben oder mit Hinweis ablehnen kannst.
             </p>
           </div>
+          ) : (
+            <p className="text-[11px] text-muted-foreground rounded-md border border-border p-2">
+              Freigabe-Gate &amp; Sandbox sind aktuell nur für Claude Code verfügbar. {PROVIDERS.find((p) => p.id === draft.provider)?.label} führt Dateiänderungen direkt im Projektordner aus.
+            </p>
+          )}
           <button
             onClick={createSession}
             disabled={creating || !draft.cwd}

@@ -2,7 +2,9 @@ import { z } from "zod";
 
 // --- Shared enums ---
 
-const providerEnum = z.enum(["claude", "gemini", "ollama"]);
+// Provider ids are catalog-driven (see src/lib/ai/catalog.ts), so this is an
+// open string rather than a fixed enum. Routes validate against the catalog.
+const providerEnum = z.string().min(1).max(40);
 
 // --- AI Routes ---
 
@@ -21,6 +23,8 @@ export const chatRequestSchema = z.object({
   model: z.string().optional(),
   stream: z.boolean().optional(),
   apiKey: z.string().optional(),
+  // Base URL for the user-configurable "custom" OpenAI-compatible endpoint.
+  baseUrl: z.string().max(500).optional(),
   maxTokens: z.number().int().min(1).max(128000).optional(),
   temperature: z.number().min(0).max(2).optional(),
 });
@@ -29,8 +33,10 @@ export const validateRequestSchema = z.object({
   provider: providerEnum,
   // Local providers (Ollama) need no key, so an empty string is allowed.
   apiKey: z.string().optional().default(""),
-  // "oauth" validates Gemini via the logged-in gemini-cli instead of a key.
+  // "oauth" validates Gemini/Claude via the logged-in CLI instead of a key.
   authMode: z.enum(["key", "oauth"]).optional().default("key"),
+  // Base URL for the user-configurable "custom" OpenAI-compatible endpoint.
+  baseUrl: z.string().max(500).optional(),
 });
 
 // --- Prompt Routes ---
@@ -112,7 +118,7 @@ export const knowledgeSearchSchema = z.object({
 // --- Assistant (code-assistant) Routes ---
 
 export const createAssistantSessionSchema = z.object({
-  provider: z.enum(["claude", "gemini"]).optional().default("claude"),
+  provider: z.enum(["claude", "gemini", "opencode", "codex", "aider"]).optional().default("claude"),
   model: z.string().max(100).optional().default(""),
   title: z.string().max(200).optional().default(""),
   cwd: z.string().max(1000).optional().default(""),

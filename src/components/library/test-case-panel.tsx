@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useSettingsStore } from "@/stores/settings-store";
-import { getApiKey } from "@/lib/ai/client-keys";
+import { getApiKey, getBaseUrl } from "@/lib/ai/client-keys";
 import { Plus, Trash2, Play, Check, X, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -85,6 +85,7 @@ export function TestCasePanel({ promptId, xmlContent }: { promptId: string; xmlC
 
   async function runOne(tc: TestCase): Promise<CaseResult> {
     const apiKey = await getApiKey(activeProvider);
+    const baseUrl = getBaseUrl(activeProvider);
     const prompt = xmlContent + (tc.input ? `\n\nUser Input: ${tc.input}` : "");
     try {
       const res = await fetch("/api/ai/chat", {
@@ -95,6 +96,7 @@ export function TestCasePanel({ promptId, xmlContent }: { promptId: string; xmlC
           provider: activeProvider,
           model: activeModel,
           apiKey,
+          baseUrl,
         }),
       });
       if (!res.ok) {

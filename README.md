@@ -56,10 +56,12 @@ It runs entirely on infrastructure you control and installs as a phone-friendly 
 - Three modes: **Auto** (fully automatic), **Hybrid** (review the plan and reassign models before running), and **Wizard** (answer a few project questions that bias the plan).
 - Executes across the shared working directory and synthesizes a final summary.
 
-### 🔌 Providers & Auth
-- **Claude** & **Gemini** via API key, with live model discovery.
-- **Gemini via Google Login** (OAuth) instead of an API key — routes through the logged-in Gemini CLI.
-- **Ollama** for fully local models — auto-discovered, zero config beyond a running daemon.
+### 🔌 Providers & Auth — *a tool for everything*
+- **Dedicated:** **Claude** (Anthropic SDK) and **Gemini** (Google GenAI) via API key *or* their logged-in CLI (**OAuth/Login**, no key).
+- **OpenAI-compatible (one generic engine):** **OpenAI, OpenRouter, Groq, DeepSeek, Mistral, xAI/Grok, Together, Perplexity** — each via API key with live `/models` discovery.
+- **Local:** **Ollama** and **LM Studio** auto-discovered (no key), plus a **Custom OpenAI-compatible endpoint** (set any base URL — Jan, llama.cpp, vLLM, LocalAI, Azure OpenAI…). The real "everything" switch.
+- **Code-Assistant CLI agents:** drive **Claude Code**, **Gemini CLI**, **OpenCode**, **Codex CLI**, and **Aider** on a real working directory (each uses its own login/config; inert with an install hint until present).
+- New providers are catalog-driven — adding one is a few lines in `src/lib/ai/catalog.ts`.
 
 ---
 
