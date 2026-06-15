@@ -50,7 +50,7 @@ export async function POST(
 
   const sessionRow: AssistantSessionRow = {
     id: session.id, externalId: session.externalId, provider: session.provider,
-    model: session.model, cwd: session.cwd, permissionMode: session.permissionMode, allowedTools: session.allowedTools,
+    model: session.model, cwd: session.cwd, permissionMode: session.permissionMode, allowedTools: session.allowedTools, sandbox: session.sandbox,
   };
 
   const encoder = new TextEncoder();

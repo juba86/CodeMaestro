@@ -146,6 +146,8 @@ model AssistantSession {
   cwd            String                    // working directory (whitelisted)
   permissionMode String   @default("default")
   allowedTools   String   @default("Read,Grep,Glob") // CSV
+  approvalMode   String   @default("off") // off | edits | all
+  sandbox        Boolean  @default(false)
   status         String   @default("idle") // idle|running|error|done
   totalCostUsd   Float    @default(0)
   createdAt      DateTime @default(now())

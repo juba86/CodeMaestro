@@ -5,7 +5,7 @@ import { getApiKey } from "@/lib/ai/client-keys";
 import {
   Plus, Send, Square, Trash2, Loader2, Terminal, Wrench, FileText,
   AlertCircle, FolderGit2, Network, Cpu, Sparkles, FolderPlus, Folder, ChevronUp, ExternalLink, Play,
-  ChevronDown, Maximize2, Minimize2, Paperclip,
+  ChevronDown, Maximize2, Minimize2, Paperclip, ShieldCheck, Check, X,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -43,6 +43,16 @@ interface BrowseState {
   path: string;
   parent: string | null;
   dirs: { name: string; path: string }[];
+}
+
+interface DiffPart { op: "equal" | "add" | "del"; text: string }
+interface ApprovalCard {
+  approvalId: string;
+  tool: string; // Edit | Write | MultiEdit | Bash
+  command?: string;
+  filePath?: string;
+  isWrite?: boolean;
+  diff?: DiffPart[];
 }
 
 const PROVIDERS = [
@@ -88,7 +98,12 @@ export function AssistantView() {
     cwd: "",
     permissionMode: "default",
     allowedTools: ["Read", "Grep", "Glob"] as string[],
+    approvalMode: "off" as "off" | "edits" | "all",
+    sandbox: false,
   });
+
+  // Pending tool approvals (diff/command gate) awaiting the user's decision.
+  const [approvals, setApprovals] = useState<ApprovalCard[]>([]);
 
   const threadRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -299,6 +314,7 @@ export function AssistantView() {
     setRunning(false);
     abortRef.current = null;
     setLive([]);
+    setApprovals([]);
     if (!activeId) return;
     if (gotDone) {
       await openSession(activeId);
@@ -373,6 +389,13 @@ export function AssistantView() {
               pushLive({ role: "tool_result", content: e.content || "", meta: JSON.stringify({ isError: e.isError }) });
             } else if (e.type === "error" && e.content) {
               pushLive({ role: "error", content: e.content });
+            } else if (e.type === "approval_request") {
+              setApprovals((prev) => [...prev, {
+                approvalId: e.approvalId, tool: e.tool, command: e.command,
+                filePath: e.filePath, isWrite: e.isWrite, diff: e.diff,
+              }]);
+            } else if (e.type === "approval_resolved") {
+              setApprovals((prev) => prev.filter((a) => a.approvalId !== e.approvalId));
             }
           } catch { /* ignore */ }
         }
@@ -382,6 +405,20 @@ export function AssistantView() {
       if (err instanceof DOMException && err.name === "AbortError") gotDone = true;
     } finally {
       await settleStream(gotDone);
+    }
+  }
+
+  // Resolve a pending tool approval. reason (on deny) steers the model mid-run.
+  async function decideApproval(approvalId: string, decision: "allow" | "deny", reason?: string) {
+    setApprovals((prev) => prev.filter((a) => a.approvalId !== approvalId));
+    try {
+      await fetch(`/api/assistant/approval/${approvalId}/decide`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ decision, reason }),
+      });
+    } catch {
+      toast.error("Freigabe konnte nicht übermittelt werden.");
     }
   }
 
@@ -650,6 +687,32 @@ export function AssistantView() {
           <p className="text-[11px] text-muted-foreground">
             Nur erlaubte Tools werden ausgeführt. Edit/Write/Bash nur aktivieren, wenn der Assistent Dateien ändern / Befehle ausführen soll.
           </p>
+          <div className="space-y-1.5 rounded-md border border-border p-2">
+            <label className="flex items-center gap-1.5 text-xs font-medium">
+              <ShieldCheck size={13} /> Freigabe vor Aktionen
+            </label>
+            <select
+              aria-label="Freigabe-Modus"
+              className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+              value={draft.approvalMode}
+              onChange={(e) => setDraft({ ...draft, approvalMode: e.target.value as "off" | "edits" | "all" })}
+            >
+              <option value="off">Aus — direkt ausführen</option>
+              <option value="edits">Datei-Änderungen bestätigen (Diff)</option>
+              <option value="all">Änderungen + Befehle bestätigen</option>
+            </select>
+            <label className="flex items-center gap-1.5 text-xs cursor-pointer">
+              <input
+                type="checkbox"
+                checked={draft.sandbox}
+                onChange={(e) => setDraft({ ...draft, sandbox: e.target.checked })}
+              />
+              Sandbox (Schreibzugriff auf Projekt begrenzen)
+            </label>
+            <p className="text-[11px] text-muted-foreground">
+              Bei aktivierter Freigabe zeigt der Assistent vor jedem Edit/Write{draft.approvalMode === "all" ? "/Bash" : ""} einen Diff bzw. Befehl, den du freigeben oder mit Hinweis ablehnen kannst.
+            </p>
+          </div>
           <button
             onClick={createSession}
             disabled={creating || !draft.cwd}
@@ -884,6 +947,15 @@ export function AssistantView() {
               </div>
             )}
 
+            {/* Approval gate: diff/command cards awaiting the user's decision */}
+            {approvals.length > 0 && (
+              <div className="mx-3 mt-2 space-y-2">
+                {approvals.map((a) => (
+                  <ApprovalGate key={a.approvalId} card={a} onDecide={decideApproval} />
+                ))}
+              </div>
+            )}
+
             <div className="px-3 pb-3 pt-2 flex gap-2 items-end" style={{ paddingBottom: "max(0.75rem, env(safe-area-inset-bottom))" }}>
               <input
                 ref={fileInputRef}
@@ -919,6 +991,77 @@ export function AssistantView() {
                 </button>
               )}
             </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ApprovalGate({ card, onDecide }: { card: ApprovalCard; onDecide: (id: string, d: "allow" | "deny", reason?: string) => void }) {
+  const [reasonOpen, setReasonOpen] = useState(false);
+  const [reason, setReason] = useState("");
+  const isBash = card.tool === "Bash";
+  return (
+    <div className="rounded-md border border-amber-500/50 bg-amber-500/5 p-3 space-y-2 text-sm">
+      <div className="flex items-center gap-1.5 font-semibold text-amber-500">
+        <ShieldCheck size={14} />
+        Freigabe nötig: {card.tool}
+        {card.filePath && <span className="font-normal text-xs text-muted-foreground truncate">· {card.filePath}</span>}
+      </div>
+      {isBash ? (
+        <pre className="bg-background/60 rounded p-2 text-xs whitespace-pre-wrap max-h-48 overflow-y-auto border border-border">{card.command}</pre>
+      ) : (
+        <pre className="bg-background/60 rounded p-2 text-xs max-h-64 overflow-y-auto border border-border leading-snug">
+          {(card.diff || []).map((d, i) => (
+            <div key={i} className={
+              d.op === "add" ? "text-green-500 bg-green-500/10"
+                : d.op === "del" ? "text-red-500 bg-red-500/10"
+                : "text-muted-foreground"
+            }>
+              <span className="select-none opacity-60">{d.op === "add" ? "+ " : d.op === "del" ? "- " : "  "}</span>
+              {d.text || " "}
+            </div>
+          ))}
+        </pre>
+      )}
+      {reasonOpen && (
+        <textarea
+          className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm resize-none min-h-[44px]"
+          placeholder="Hinweis an den Assistenten (warum abgelehnt / was stattdessen tun)…"
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          autoFocus
+        />
+      )}
+      <div className="flex flex-wrap gap-2">
+        <button
+          onClick={() => onDecide(card.approvalId, "allow")}
+          className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md bg-green-600 text-white hover:bg-green-500"
+        >
+          <Check size={13} /> Freigeben
+        </button>
+        {reasonOpen ? (
+          <button
+            onClick={() => onDecide(card.approvalId, "deny", reason.trim() || undefined)}
+            className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md bg-destructive text-white hover:opacity-90"
+          >
+            <X size={13} /> Ablehnen + Hinweis senden
+          </button>
+        ) : (
+          <>
+            <button
+              onClick={() => onDecide(card.approvalId, "deny")}
+              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md border border-input hover:bg-accent"
+            >
+              <X size={13} /> Ablehnen
+            </button>
+            <button
+              onClick={() => setReasonOpen(true)}
+              className="px-3 py-1.5 text-xs rounded-md border border-input hover:bg-accent"
+            >
+              Ablehnen mit Hinweis…
+            </button>
           </>
         )}
       </div>

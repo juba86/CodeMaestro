@@ -60,6 +60,7 @@ export async function POST(
     cwd: session.cwd,
     permissionMode: session.permissionMode,
     allowedTools: session.allowedTools,
+    sandbox: session.sandbox,
   };
 
   const encoder = new TextEncoder();

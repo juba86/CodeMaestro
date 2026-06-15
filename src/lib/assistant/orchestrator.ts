@@ -164,6 +164,10 @@ async function runCliWorker(
     cwd: session.cwd,
     permissionMode: session.permissionMode,
     allowedTools: session.allowedTools,
+    // No interactive approval gate during orchestration (no live UI emitter is
+    // registered for worker turns, so a hook would auto-deny). Keep the sandbox.
+    approvalMode: "off",
+    sandbox: session.sandbox,
   };
   const res = await runTurn(row, prompt, undefined, (e) => {
     if (e.type === "text" && e.content) {

@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Hammer, Library, FlaskConical, LayoutTemplate } from "lucide-react";
+import { Hammer, Library, FlaskConical, LayoutTemplate, Gamepad2 } from "lucide-react";
 
 const features = [
   {
@@ -25,6 +25,12 @@ const features = [
     icon: FlaskConical,
     title: "Playground",
     description: "Test prompts live against Claude or Gemini and compare results",
+  },
+  {
+    href: "/game",
+    icon: Gamepad2,
+    title: "GME Chart Runner",
+    description: "A jump-and-run game on the GME stock chart.",
   },
 ];
 

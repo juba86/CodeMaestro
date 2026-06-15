@@ -118,6 +118,8 @@ export const createAssistantSessionSchema = z.object({
   cwd: z.string().max(1000).optional().default(""),
   permissionMode: z.enum(["default", "acceptEdits", "plan", "bypassPermissions"]).optional().default("default"),
   allowedTools: z.string().max(500).optional().default("Read,Grep,Glob"),
+  approvalMode: z.enum(["off", "edits", "all"]).optional().default("off"),
+  sandbox: z.boolean().optional().default(false),
 });
 
 export const assistantMessageSchema = z.object({

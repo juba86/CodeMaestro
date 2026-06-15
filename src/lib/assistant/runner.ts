@@ -1,4 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
+import { writeFileSync, unlinkSync } from "fs";
+import { tmpdir } from "os";
+import path from "path";
 
 export interface AssistantSessionRow {
   id: string;
@@ -8,6 +11,32 @@ export interface AssistantSessionRow {
   cwd: string;
   permissionMode: string;
   allowedTools: string;
+  approvalMode?: string; // off | edits | all
+  sandbox?: boolean;
+}
+
+const HOOK_PATH = path.join(process.cwd(), "scripts", "assistant-approval-hook.mjs");
+
+// Builds a Claude Code --settings file (PreToolUse approval hook + optional
+// sandbox) for this turn. Returns the file path, or null if neither is needed.
+function buildSettingsFile(session: AssistantSessionRow): string | null {
+  const approval = session.approvalMode && session.approvalMode !== "off";
+  if (!approval && !session.sandbox) return null;
+  const settings: Record<string, unknown> = {};
+  if (approval) {
+    const matcher = session.approvalMode === "all" ? "Edit|Write|MultiEdit|Bash" : "Edit|Write|MultiEdit";
+    settings.hooks = {
+      PreToolUse: [
+        { matcher, hooks: [{ type: "command", command: `${process.execPath} ${JSON.stringify(HOOK_PATH).slice(1, -1)}`, timeout: 320 }] },
+      ],
+    };
+  }
+  if (session.sandbox) {
+    settings.sandbox = { enabled: true };
+  }
+  const file = path.join(tmpdir(), `pb-settings-${session.id}-${Date.now()}.json`);
+  writeFileSync(file, JSON.stringify(settings));
+  return file;
 }
 
 export interface NormalizedEvent {
@@ -44,13 +73,14 @@ export function isRunning(sessionId: string): boolean {
   return procs.has(sessionId);
 }
 
-function claudeArgs(session: AssistantSessionRow, prompt: string): string[] {
+function claudeArgs(session: AssistantSessionRow, prompt: string, settingsFile: string | null): string[] {
   const args = ["-p", prompt, "--output-format", "stream-json", "--verbose"];
   if (session.externalId) args.push("--resume", session.externalId);
   if (session.model) args.push("--model", session.model);
   args.push("--permission-mode", session.permissionMode || "default");
   const tools = (session.allowedTools || "").trim();
   if (tools) args.push("--allowedTools", tools);
+  if (settingsFile) args.push("--settings", settingsFile);
   // Confine file access to the working directory.
   args.push("--add-dir", session.cwd);
   return args;
@@ -102,7 +132,8 @@ export async function runTurn(
 ): Promise<TurnResult> {
   const isGemini = session.provider === "gemini";
   const bin = isGemini ? "gemini" : "claude";
-  const args = isGemini ? geminiArgs(session, prompt) : claudeArgs(session, prompt);
+  const settingsFile = isGemini ? null : buildSettingsFile(session);
+  const args = isGemini ? geminiArgs(session, prompt) : claudeArgs(session, prompt, settingsFile);
 
   const env: NodeJS.ProcessEnv = { ...process.env };
   if (isGemini && apiKey) {
@@ -112,6 +143,13 @@ export async function runTurn(
   if (!isGemini && apiKey) {
     // Optional: allow overriding Claude auth with an explicit key.
     env.ANTHROPIC_API_KEY = apiKey;
+  }
+  // The approval hook (a child of claude) calls back into this server.
+  if (settingsFile) {
+    const host = process.env.HOSTNAME || "127.0.0.1";
+    const port = process.env.PORT || "3000";
+    env.PB_BASE_URL = `http://${host}:${port}`;
+    env.PB_SESSION_ID = session.id;
   }
 
   let child: ChildProcessWithoutNullStreams;
@@ -198,6 +236,7 @@ export async function runTurn(
 
     child.on("close", (code) => {
       procs.delete(session.id);
+      if (settingsFile) { try { unlinkSync(settingsFile); } catch { /* ignore */ } }
 
       if (isGemini) {
         try {

@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db/client";
 import { assistantMessageSchema, formatZodError } from "@/lib/validation/schemas";
 import { runTurn, type NormalizedEvent, type AssistantSessionRow } from "@/lib/assistant/runner";
 import { resolveWorkdir } from "@/lib/assistant/security";
+import { registerEmitter, unregisterEmitter } from "@/lib/assistant/approvals";
 
 export const runtime = "nodejs";
 export const maxDuration = 3600;
@@ -61,6 +62,8 @@ export async function POST(
     cwd: session.cwd,
     permissionMode: session.permissionMode,
     allowedTools: session.allowedTools,
+    approvalMode: session.approvalMode,
+    sandbox: session.sandbox,
   };
 
   const encoder = new TextEncoder();
@@ -75,6 +78,9 @@ export async function POST(
       const send = (e: NormalizedEvent) => {
         try { controller.enqueue(encoder.encode(`data: ${JSON.stringify(e)}\n\n`)); } catch { /* client gone */ }
       };
+
+      // Let the approval hook push approve/deny cards into this live stream.
+      registerEmitter(id, (e) => { try { controller.enqueue(encoder.encode(`data: ${JSON.stringify(e)}\n\n`)); } catch { /* gone */ } });
 
       const emit = (e: NormalizedEvent) => {
         send(e);
@@ -103,6 +109,8 @@ export async function POST(
       } catch (err) {
         send({ type: "error", content: err instanceof Error ? err.message : "Runner failed" });
         result = { externalId: session.externalId, costUsd: 0, isError: true };
+      } finally {
+        unregisterEmitter(id);
       }
 
       // Persist the assistant text first (in order), then tool events.

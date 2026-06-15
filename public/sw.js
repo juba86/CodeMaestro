@@ -1,32 +1,30 @@
-// Minimal service worker — enables PWA install and provides a tiny offline
-// fallback for the app shell. Network-first so the app always gets fresh data.
-const CACHE = "pb-shell-v1";
-const SHELL = ["/", "/builder", "/assistant"];
+const CACHE_NAME = 'gme-runner-cache-v1';
+const urlsToCache = [
+  '/',
+  '/manifest.webmanifest',
+  '/icons/icon-192.png',
+  '/icons/icon-512.png',
+  // Add game assets here once they are created
+];
 
-self.addEventListener("install", (e) => {
-  self.skipWaiting();
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL).catch(() => {})));
-});
-
-self.addEventListener("activate", (e) => {
-  e.waitUntil(
-    caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
-      .then(() => self.clients.claim())
+self.addEventListener('install', event => {
+  event.waitUntil(
+    caches.open(CACHE_NAME)
+      .then(cache => {
+        console.log('Opened cache');
+        return cache.addAll(urlsToCache);
+      })
   );
 });
 
-self.addEventListener("fetch", (e) => {
-  const req = e.request;
-  if (req.method !== "GET") return; // never cache API mutations / streams
-  const url = new URL(req.url);
-  if (url.pathname.startsWith("/api/")) return; // always live for API
-  e.respondWith(
-    fetch(req)
-      .then((res) => {
-        const copy = res.clone();
-        caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
-        return res;
+self.addEventListener('fetch', event => {
+  event.respondWith(
+    caches.match(event.request)
+      .then(response => {
+        if (response) {
+          return response;
+        }
+        return fetch(event.request);
       })
-      .catch(() => caches.match(req).then((m) => m || caches.match("/")))
   );
 });
