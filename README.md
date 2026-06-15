@@ -1,20 +1,20 @@
-# PromptBuilder
+# CodeMaestro
 
-**An all-in-one workbench for building, testing, and operating LLM prompts — with a multi-model code assistant and orchestrator built in.**
+**Conduct a fleet of AI coding agents — from anywhere.** A self-hosted control plane that forges optimized prompts, drives Claude Code and Gemini CLI on a real working directory, and orchestrates multiple models by their strengths — with an approval gate and sandbox so you stay in command.
 
-PromptBuilder turns prompt engineering from guesswork into a workflow: structure prompts with proven techniques, lint and score them, test them across **Claude, Gemini, and local Ollama models** side by side, ground them in your own knowledge base, and — when you're ready to *act* — drive Claude Code and Gemini CLI on a real working directory, with a planner that splits work across the best model for each subtask.
+CodeMaestro turns AI coding from a single-terminal habit into an operable system: structure prompts with proven techniques, lint and score them, test them across **Claude, Gemini, and local Ollama models** side by side, ground them in your own knowledge base, and — when you're ready to *act* — hand the task to a planner that routes each subtask to the best model and applies real file changes, gated by diffs you approve.
 
-It runs entirely on infrastructure you control. Bring API keys, or use your existing Claude/Gemini logins. Run models locally with Ollama for zero marginal cost.
+It runs entirely on infrastructure you control and installs as a phone-friendly PWA, so your whole agent fleet is one tap away over Tailscale/VPN. Bring API keys, or use your existing Claude/Gemini logins. Run models locally with Ollama for zero marginal cost.
 
 ---
 
-## Why PromptBuilder
+## Why CodeMaestro
 
-- **One place for the whole loop** — author → lint → test → compare → save → version → deploy. No copy-pasting between a notepad, three provider playgrounds, and a spreadsheet.
+- **Command a fleet, not a terminal** — drive Claude Code and Gemini CLI from the browser or your phone, with session resume, live tool streaming, and a dev-server launcher. Better than a single remote shell.
+- **Orchestrate by strength** — a planner decomposes big tasks and routes each subtask to the best model: frontier models for hard reasoning, large-context models for sweeps, free local models for isolated work.
+- **You stay in command** — opt-in approval gate shows a diff (or the shell command) before any Edit/Write/Bash, with approve / deny / **deny-with-reason** steering, plus a sandbox that confines writes to the project.
 - **Model-agnostic by design** — Claude, Gemini, and any local Ollama model, with live model lists pulled from each provider so you're never stuck on stale IDs.
-- **Cost-aware** — token and price estimates per run; route cheap work to free local models and reserve frontier models for the hard parts.
 - **Private-first** — self-hosted, SQLite storage, local embeddings. Your prompts, keys, and code never leave your machine/network.
-- **From prompt to action** — a built-in code assistant and multi-model orchestrator take a prompt all the way to real file changes in a sandboxed working directory.
 
 ---
 
@@ -47,8 +47,9 @@ It runs entirely on infrastructure you control. Bring API keys, or use your exis
 ### 🤖 Code Assistant
 - Drive **Claude Code** (`claude -p`) and **Gemini CLI** (`gemini -p`) from the browser, on a real working directory.
 - Live streaming of assistant text and **tool calls** (Read/Grep/Edit/Bash…), persisted transcripts, **session list & resume**, cost tracking.
+- **Approval gate & sandbox**: optionally require approval before every Edit/Write (and Bash) — CodeMaestro streams a **diff** or the **shell command** to the UI; approve, deny, or **deny-with-reason** to steer the model mid-run. An opt-in sandbox confines writes to the working directory.
 - **Hardened**: working-directory allowlist with path-traversal guards, conservative tool allowlist (read-only by default; file edits opt-in), per-session permission mode.
-- Survives mobile standby — work keeps running server-side and the result is shown when you return.
+- **From anywhere**: installable PWA with a maximizable full-screen chat, file upload, and a one-tap dev-server launcher (start the app, get the link/port, stop it). Survives mobile standby — work keeps running server-side and the result is shown when you return.
 
 ### 🧩 Multi-Model Orchestrator
 - Give it a larger task; a **planner** decomposes it and routes each subtask to the **best model for the job** (frontier models for hard reasoning, large-context models for broad sweeps, free local models for isolated work).
@@ -81,8 +82,8 @@ It runs entirely on infrastructure you control. Bring API keys, or use your exis
 
 ### Install & run
 ```bash
-git clone https://github.com/Muchel187/PromptBuilder.git
-cd PromptBuilder
+git clone https://github.com/Muchel187/CodeMaestro.git
+cd CodeMaestro
 npm install
 
 cp .env.example .env          # then edit as needed
@@ -136,7 +137,7 @@ The Code Assistant spawns the provider CLIs per turn and streams their `stream-j
 
 ## Security
 
-PromptBuilder is designed to run in a **trusted, private environment** (e.g. localhost or a private Tailscale/VPN network), not exposed to the public internet.
+CodeMaestro is designed to run in a **trusted, private environment** (e.g. localhost or a private Tailscale/VPN network), not exposed to the public internet.
 
 - **The Code Assistant and Orchestrator execute code and shell commands** on the host. Access is sandboxed to an allowlist of working directories (`ASSISTANT_ALLOWED_DIRS`) with path-traversal guards, and tool permissions default to read-only — but anyone who can reach the app can drive these tools. Keep it private.
 - API keys entered in Settings are stored in the browser's `localStorage`. In a non-HTTPS context (e.g. plain `http://` on a private IP) they are base64-obfuscated rather than encrypted — treat this as obfuscation, not security. Prefer HTTPS (e.g. `tailscale serve`) or server-side keys for stronger protection.
@@ -146,7 +147,7 @@ PromptBuilder is designed to run in a **trusted, private environment** (e.g. loc
 
 ## Roadmap / Ideas
 
-- Approval gates per tool call in the assistant
+- HTTPS via `tailscale serve` for full PWA install + Web Crypto key encryption
 - Prompt A/B testing dashboards and analytics
 - Shareable prompt packs / team library
 - Pluggable vector backends for larger knowledge bases

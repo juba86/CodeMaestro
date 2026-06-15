@@ -40,7 +40,7 @@ export function Sidebar() {
       <div className="flex items-center justify-between p-3 border-b border-border">
         {sidebarOpen && (
           <Link href="/" className="font-semibold text-sm text-sidebar-foreground">
-            PromptBuilder
+            CodeMaestro
           </Link>
         )}
         <button

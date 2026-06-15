@@ -2,9 +2,9 @@ import type { MetadataRoute } from "next";
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: "PromptBuilder",
-    short_name: "PromptBuilder",
-    description: "Prompt workbench + multi-model code assistant",
+    name: "CodeMaestro",
+    short_name: "CodeMaestro",
+    description: "Conduct a fleet of AI coding agents — from anywhere",
     start_url: "/",
     display: "standalone",
     orientation: "any",

@@ -10,7 +10,7 @@ import { uid } from "@/lib/uid";
  * - Attributes are only extracted from swarm-config tags
  * - CDATA sections are not supported
  *
- * This is sufficient for the PromptBuilder XML schema where tags are well-structured.
+ * This is sufficient for the CodeMaestro XML schema where tags are well-structured.
  */
 
 function extractTag(xml: string, tagName: string): string {

@@ -38,10 +38,11 @@ export default function HomePage() {
   return (
     <div className="max-w-4xl mx-auto space-y-8">
       <div className="space-y-2">
-        <h1 className="text-3xl font-bold tracking-tight">PromptBuilder</h1>
+        <h1 className="text-3xl font-bold tracking-tight">CodeMaestro</h1>
         <p className="text-muted-foreground">
-          Build structured Chain-of-Thought prompts with XML tags for AI development.
-          Supports multi-agent Swarm orchestration via ruflo.
+          Conduct a fleet of AI coding agents from anywhere. Forge structured
+          Chain-of-Thought prompts, then drive Claude Code and Gemini CLI on a real
+          working directory — with a planner that routes each subtask to the best model.
         </p>
       </div>
 

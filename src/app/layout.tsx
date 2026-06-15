@@ -16,10 +16,10 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "PromptBuilder",
-  description: "Prompt workbench + multi-model code assistant",
+  title: "CodeMaestro",
+  description: "Conduct a fleet of AI coding agents — from anywhere",
   manifest: "/manifest.webmanifest",
-  appleWebApp: { capable: true, statusBarStyle: "black-translucent", title: "PromptBuilder" },
+  appleWebApp: { capable: true, statusBarStyle: "black-translucent", title: "CodeMaestro" },
   icons: {
     icon: "/icons/icon-192.png",
     apple: "/icons/apple-touch-icon.png",

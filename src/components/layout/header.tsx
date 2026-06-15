@@ -28,7 +28,7 @@ export function Header() {
   return (
     <header className="flex items-center justify-between px-4 h-12 border-b border-border bg-background">
       <div className="text-sm text-muted-foreground">
-        Chain-of-Thought Prompt Builder
+        CodeMaestro · AI coding control plane
       </div>
       <div className="flex items-center gap-2">
         <button
