@@ -30,7 +30,7 @@ Instead, report privately via one of:
 
 - GitHub's [private vulnerability reporting](https://github.com/Muchel187/CodeMaestro/security/advisories/new)
   (Security → Report a vulnerability), or
-- a direct message to the maintainer (<DEIN KONTAKT / E-MAIL>).
+- a direct message to the maintainer, Jurak Bahrambäk (jurak.bahrambaek@noba-experts.de).
 
 Please include:
 

@@ -83,7 +83,7 @@ export function BuilderWorkflow() {
           <Pencil size={12} className="text-primary" />
           Bearbeite gespeichertes Projekt:
           <span className="font-medium text-foreground">{projectMeta?.title || "(unbenannt)"}</span>
-          <span className="text-muted-foreground">— „Update" speichert Änderungen zurück.</span>
+          <span className="text-muted-foreground">— &bdquo;Update&ldquo; speichert Änderungen zurück.</span>
         </div>
       )}
 
