@@ -19,13 +19,11 @@ export function scoringSystem(world: World) {
 
         if (isAABBColliding(playerTransform, damageTransform)) {
             health.current -= damage.amount;
-            console.log(`Player took ${damage.amount} damage. Health: ${health.current}`);
         }
     }
 
 
     if (health.current <= 0) {
-        console.log('Player has been defeated. GAME OVER.');
         // Here you would trigger a game over state
     }
 

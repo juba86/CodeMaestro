@@ -8,6 +8,7 @@ import { PROVIDERS, type ProviderDef } from "@/lib/ai/catalog";
 import type { ModelInfo } from "@/lib/ai/types";
 import { Check, X, Loader2, Eye, EyeOff } from "lucide-react";
 import { toast } from "sonner";
+import { TelegramSettings } from "./telegram-settings";
 
 // Display ordering: dedicated + cloud first, local/custom last.
 const ORDER = ["claude", "gemini", "openai", "openrouter", "groq", "deepseek", "mistral", "xai", "together", "perplexity", "ollama", "lmstudio", "custom"];
@@ -324,6 +325,10 @@ export function SettingsView() {
           ))}
         </select>
       </section>
+
+      <div className="border-t border-border pt-6">
+        <TelegramSettings />
+      </div>
 
       <section className="space-y-3">
         <h2 className="text-lg font-semibold">Theme</h2>

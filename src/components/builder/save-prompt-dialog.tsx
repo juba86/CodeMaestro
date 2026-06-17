@@ -11,7 +11,7 @@ interface SavePromptDialogProps {
 }
 
 export function SavePromptDialog({ open, onClose }: SavePromptDialogProps) {
-  const { xmlContent, structured, currentPromptId, setCurrentPromptId } = useBuilderStore();
+  const { xmlContent, structured, currentPromptId, setCurrentPromptId, projectMeta, setProjectMeta } = useBuilderStore();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [tagsInput, setTagsInput] = useState("");
@@ -20,9 +20,17 @@ export function SavePromptDialog({ open, onClose }: SavePromptDialogProps) {
 
   useEffect(() => {
     if (open) {
+      // Prefill from the loaded project's metadata so an "Update" doesn't force
+      // the user to retype the title/description/tags.
+      if (currentPromptId && projectMeta) {
+        setTitle(projectMeta.title);
+        setDescription(projectMeta.description);
+        setTagsInput(projectMeta.tags.join(", "));
+      }
       // Auto-focus title input when dialog opens
       setTimeout(() => titleRef.current?.focus(), 0);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   if (!open) return null;
@@ -38,6 +46,7 @@ export function SavePromptDialog({ open, onClose }: SavePromptDialogProps) {
         .split(",")
         .map((t) => t.trim())
         .filter(Boolean);
+      const meta = { title, description, tags };
 
       if (currentPromptId) {
         // Update existing
@@ -53,6 +62,7 @@ export function SavePromptDialog({ open, onClose }: SavePromptDialogProps) {
             changelog: `Updated: ${title}`,
           }),
         });
+        setProjectMeta(meta);
         toast.success("Prompt updated!");
       } else {
         // Create new
@@ -69,6 +79,7 @@ export function SavePromptDialog({ open, onClose }: SavePromptDialogProps) {
         });
         const data = await res.json();
         setCurrentPromptId(data.prompt.id);
+        setProjectMeta(meta);
         toast.success("Prompt saved!");
       }
       onClose();

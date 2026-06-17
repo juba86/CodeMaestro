@@ -1,10 +1,27 @@
 # CodeMaestro
 
+> **Conduct a fleet of AI coding agents from anywhere** — forge structured prompts, then drive Claude Code, Gemini CLI, and local models on a real working directory, all from a self-hosted, phone-friendly PWA you control.
+
+![demo](docs/demo.gif)
+
+> ⚠️ **Run it private.** The Code Assistant and Orchestrator execute shell commands on the host. Deploy only on localhost or a trusted private network (e.g. Tailscale/VPN) — never expose it to the public internet. See [Security](#security).
+
 **Conduct a fleet of AI coding agents — from anywhere.** A self-hosted control plane that forges optimized prompts, drives Claude Code and Gemini CLI on a real working directory, and orchestrates multiple models by their strengths — with an approval gate and sandbox so you stay in command.
 
 CodeMaestro turns AI coding from a single-terminal habit into an operable system: structure prompts with proven techniques, lint and score them, test them across **Claude, Gemini, and local Ollama models** side by side, ground them in your own knowledge base, and — when you're ready to *act* — hand the task to a planner that routes each subtask to the best model and applies real file changes, gated by diffs you approve.
 
 It runs entirely on infrastructure you control and installs as a phone-friendly PWA, so your whole agent fleet is one tap away over Tailscale/VPN. Bring API keys, or use your existing Claude/Gemini logins. Run models locally with Ollama for zero marginal cost.
+
+---
+
+## Status & Limitations
+
+CodeMaestro is **early-stage and under active development**. It's useful today, but be aware of what is and isn't there yet:
+
+- **Orchestrator is experimental.** The multi-model planner is **prompt-based** (an LLM decomposes the task and picks a worker) — there is **no learned/trained routing**, and subtasks currently run **sequentially**, not in parallel. Treat plans as a starting point and review them (Hybrid mode) for non-trivial work.
+- **"deny-with-reason" doesn't close the loop yet.** When you deny an action with a reason, the reason is **stored and logged**, but it is **not yet fed back into the model** to steer the next step. The feedback loop is planned, not implemented.
+- **No automated tests yet.** There is currently no test suite or CI. Changes are validated manually. Contributions here are especially welcome.
+- **Security posture is "trusted network only"** — see [Security](#security). This is a deliberate design point, not a temporary gap.
 
 ---
 
@@ -62,6 +79,29 @@ It runs entirely on infrastructure you control and installs as a phone-friendly 
 - **Local:** **Ollama** and **LM Studio** auto-discovered (no key), plus a **Custom OpenAI-compatible endpoint** (set any base URL — Jan, llama.cpp, vLLM, LocalAI, Azure OpenAI…). The real "everything" switch.
 - **Code-Assistant CLI agents:** drive **Claude Code**, **Gemini CLI**, **OpenCode**, **Codex CLI**, and **Aider** on a real working directory (each uses its own login/config; inert with an install hint until present).
 - New providers are catalog-driven — adding one is a few lines in `src/lib/ai/catalog.ts`.
+
+---
+
+## Screenshots
+
+| Prompt Builder | Playground |
+|---|---|
+| ![Prompt Builder](docs/screenshots/builder.png) | ![Playground](docs/screenshots/playground.png) |
+
+| Templates | Prompt Library |
+|---|---|
+| ![Templates](docs/screenshots/templates.png) | ![Library](docs/screenshots/library.png) |
+
+| Code Assistant | Knowledge Base |
+|---|---|
+| ![Assistant](docs/screenshots/assistant.png) | ![Knowledge](docs/screenshots/knowledge.png) |
+
+| Settings & Providers | Home |
+|---|---|
+| ![Settings](docs/screenshots/settings.png) | ![Home](docs/screenshots/home.png) |
+
+> Screenshots are from a running self-hosted instance (dark theme). Replace
+> `docs/demo.gif` above with a short screen recording when you have one.
 
 ---
 
@@ -158,8 +198,8 @@ CodeMaestro is designed to run in a **trusted, private environment** (e.g. local
 
 ## License
 
-**Proprietary — All Rights Reserved.** © 2026. See [`LICENSE`](./LICENSE).
+Released under the GNU Affero General Public License v3.0 (AGPL-3.0).
+© 2026 <DEIN NAME / ENTITÄT>. Free to use, modify, and self-host;
+network/SaaS use must release source changes. Contributions welcome.
 
-This source is shared for viewing/evaluation only. No permission is granted to
-use, copy, modify, or distribute the Software without prior written consent of
-the copyright holder.
+See [`LICENSE`](./LICENSE) for the full text.

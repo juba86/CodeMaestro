@@ -4,6 +4,7 @@ import { assistantMessageSchema, formatZodError } from "@/lib/validation/schemas
 import { runTurn, type NormalizedEvent, type AssistantSessionRow } from "@/lib/assistant/runner";
 import { resolveWorkdir } from "@/lib/assistant/security";
 import { registerEmitter, unregisterEmitter } from "@/lib/assistant/approvals";
+import { augmentPromptWithKnowledge } from "@/lib/knowledge/retrieve";
 
 export const runtime = "nodejs";
 export const maxDuration = 3600;
@@ -24,7 +25,7 @@ export async function POST(
   if (!parsed.success) {
     return NextResponse.json({ error: formatZodError(parsed.error), code: "VALIDATION_ERROR" }, { status: 400 });
   }
-  const { prompt, apiKey } = parsed.data;
+  const { prompt, apiKey, useKnowledge } = parsed.data;
 
   const session = await prisma.assistantSession.findUnique({ where: { id } });
   if (!session) {
@@ -103,9 +104,22 @@ export async function POST(
         }
       };
 
+      // RAG: prepend relevant knowledge-base context (shared retrieval path).
+      // Graceful — a no-op when disabled, the index is empty, or Ollama is down,
+      // so the turn always runs. We persist the raw user prompt above and only
+      // augment what the model receives here.
+      let effectivePrompt = prompt;
+      try {
+        const aug = await augmentPromptWithKnowledge(prompt, { enabled: useKnowledge });
+        if (aug.injected) {
+          effectivePrompt = aug.prompt;
+          emit({ type: "knowledge", sources: aug.sources.map((s) => s.docTitle) });
+        }
+      } catch { /* never let RAG block the turn */ }
+
       let result;
       try {
-        result = await runTurn(sessionRow, prompt, apiKey, emit);
+        result = await runTurn(sessionRow, effectivePrompt, apiKey, emit);
       } catch (err) {
         send({ type: "error", content: err instanceof Error ? err.message : "Runner failed" });
         result = { externalId: session.externalId, costUsd: 0, isError: true };

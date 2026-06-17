@@ -14,6 +14,9 @@ interface BuilderState {
   chatMessages: ChatMessage[];
   isGenerating: boolean;
   currentPromptId: string | null;
+  // Metadata of the currently-loaded saved project (for the save dialog prefill
+  // and the "editing existing project" indicator). Null when starting fresh.
+  projectMeta: { title: string; description: string; tags: string[] } | null;
 
   setStep: (step: BuilderStep) => void;
   setProjectGoal: (goal: string) => void;
@@ -23,10 +26,21 @@ interface BuilderState {
   clearChat: () => void;
   setIsGenerating: (v: boolean) => void;
   setCurrentPromptId: (id: string | null) => void;
+  setProjectMeta: (meta: { title: string; description: string; tags: string[] } | null) => void;
   addExample: (example: PromptExample) => void;
   updateExample: (id: string, example: Partial<PromptExample>) => void;
   removeExample: (id: string) => void;
   setSwarmConfig: (config: SwarmConfig | undefined) => void;
+  // Loads a saved project into the builder, REPLACING the current draft wholesale
+  // (not merging) so no stale fields leak across loads. Saving stays explicit.
+  loadProject: (project: {
+    id: string;
+    title: string;
+    description?: string;
+    tags?: string[];
+    content: string;
+    structured: PromptStructured;
+  }) => void;
   reset: () => void;
 }
 
@@ -49,6 +63,7 @@ const initialState = {
   chatMessages: [] as ChatMessage[],
   isGenerating: false,
   currentPromptId: null as string | null,
+  projectMeta: null as { title: string; description: string; tags: string[] } | null,
 };
 
 export const useBuilderStore = create<BuilderState>()(
@@ -73,6 +88,7 @@ export const useBuilderStore = create<BuilderState>()(
       clearChat: () => set({ chatMessages: [] }),
       setIsGenerating: (isGenerating) => set({ isGenerating }),
       setCurrentPromptId: (currentPromptId) => set({ currentPromptId }),
+      setProjectMeta: (projectMeta) => set({ projectMeta }),
       addExample: (example) =>
         set((s) => ({
           structured: {
@@ -100,6 +116,22 @@ export const useBuilderStore = create<BuilderState>()(
         set((s) => ({
           structured: { ...s.structured, swarmConfig: config },
         })),
+      loadProject: (project) =>
+        set({
+          currentPromptId: project.id,
+          projectMeta: {
+            title: project.title,
+            description: project.description || "",
+            tags: project.tags || [],
+          },
+          // Replace structured wholesale (fill any missing keys from the empty
+          // template so the form never reads undefined).
+          structured: { ...emptyStructured, ...project.structured },
+          xmlContent: project.content,
+          projectGoal: project.title,
+          chatMessages: [],
+          step: "edit",
+        }),
       reset: () => set({ ...initialState, structured: { ...emptyStructured } }),
     }),
     {
@@ -111,6 +143,7 @@ export const useBuilderStore = create<BuilderState>()(
         structured: state.structured,
         xmlContent: state.xmlContent,
         currentPromptId: state.currentPromptId,
+        projectMeta: state.projectMeta,
       }),
     }
   )

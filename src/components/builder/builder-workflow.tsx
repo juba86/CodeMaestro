@@ -7,8 +7,9 @@ import { CotSectionEditor } from "./cot-section-editor";
 import { PromptPreview } from "./prompt-preview";
 import { RefinementChat } from "./refinement-chat";
 import { SavePromptDialog } from "./save-prompt-dialog";
+import { LoadProjectDialog } from "./load-project-dialog";
 import { cn } from "@/lib/utils";
-import { Save, RotateCcw } from "lucide-react";
+import { Save, RotateCcw, FolderOpen, Pencil } from "lucide-react";
 
 const steps = [
   { id: "form" as const, label: "Project Info" },
@@ -18,8 +19,9 @@ const steps = [
 ];
 
 export function BuilderWorkflow() {
-  const { step, setStep, reset, xmlContent } = useBuilderStore();
+  const { step, setStep, reset, xmlContent, currentPromptId, projectMeta } = useBuilderStore();
   const [saveOpen, setSaveOpen] = useState(false);
+  const [loadOpen, setLoadOpen] = useState(false);
 
   function handleReset() {
     if (!window.confirm("Reset all progress? This will clear your current prompt and chat history.")) {
@@ -52,12 +54,19 @@ export function BuilderWorkflow() {
           ))}
         </div>
         <div className="flex gap-2">
+          <button
+            onClick={() => setLoadOpen(true)}
+            className="flex items-center gap-1 px-3 py-1.5 text-sm rounded-md border border-input hover:bg-accent"
+            title="Ein gespeichertes Projekt laden und bearbeiten"
+          >
+            <FolderOpen size={14} /> Load
+          </button>
           {xmlContent && (
             <button
               onClick={() => setSaveOpen(true)}
               className="flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-primary text-primary-foreground hover:bg-primary/90"
             >
-              <Save size={14} /> Save
+              <Save size={14} /> {currentPromptId ? "Update" : "Save"}
             </button>
           )}
           <button
@@ -69,12 +78,22 @@ export function BuilderWorkflow() {
         </div>
       </div>
 
+      {currentPromptId && (
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground -mt-2">
+          <Pencil size={12} className="text-primary" />
+          Bearbeite gespeichertes Projekt:
+          <span className="font-medium text-foreground">{projectMeta?.title || "(unbenannt)"}</span>
+          <span className="text-muted-foreground">— „Update" speichert Änderungen zurück.</span>
+        </div>
+      )}
+
       {step === "form" && <ProjectInfoForm />}
       {step === "edit" && <CotSectionEditor />}
       {step === "preview" && <PromptPreview />}
       {step === "refine" && <RefinementChat />}
 
       <SavePromptDialog open={saveOpen} onClose={() => setSaveOpen(false)} />
+      <LoadProjectDialog open={loadOpen} onClose={() => setLoadOpen(false)} />
     </div>
   );
 }

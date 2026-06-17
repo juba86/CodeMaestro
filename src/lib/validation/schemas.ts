@@ -131,6 +131,9 @@ export const createAssistantSessionSchema = z.object({
 export const assistantMessageSchema = z.object({
   prompt: z.string().min(1).max(100000),
   apiKey: z.string().optional(),
+  // Augment the turn with relevant knowledge-base context (RAG). Optional and
+  // defaults on; the augmentation is a no-op when the index is empty/unreachable.
+  useKnowledge: z.boolean().optional().default(true),
 });
 
 // Cloud/local OpenAI-compatible providers the user has configured client-side,
@@ -161,6 +164,26 @@ export const orchestrateRunSchema = z.object({
   prompt: z.string().min(1).max(100000),
   subtasks: z.array(plannedSubtaskSchema).min(1).max(20),
   clientProviders: z.array(clientProviderSchema).max(20).optional().default([]),
+});
+
+// --- Telegram bridge ---
+
+export const telegramConfigSchema = z.object({
+  enabled: z.boolean().optional(),
+  // Empty string clears the token; a real token looks like 123456:AA... .
+  token: z.string().max(200).optional(),
+  allowedChatIds: z.array(z.number().int()).max(50).optional(),
+  cwd: z.string().max(1000).optional(),
+  permissionMode: z.enum(["default", "acceptEdits", "plan", "bypassPermissions"]).optional(),
+  approvalMode: z.enum(["off", "edits", "all"]).optional(),
+  provider: z.enum(["claude", "gemini", "opencode", "codex", "aider"]).optional(),
+  model: z.string().max(100).optional(),
+  useKnowledge: z.boolean().optional(),
+});
+
+export const telegramControlSchema = z.object({
+  action: z.enum(["start", "stop", "test"]),
+  token: z.string().max(200).optional(),
 });
 
 // --- Helper ---

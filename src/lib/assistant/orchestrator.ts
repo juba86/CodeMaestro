@@ -1,5 +1,6 @@
 import { promises as fs } from "fs";
 import path from "path";
+import os from "node:os";
 import { runTurn, type AssistantSessionRow, type NormalizedEvent } from "./runner";
 import { fetchOllamaModels } from "@/lib/ai/ollama-provider";
 import { createProvider } from "@/lib/ai/provider-factory";
@@ -50,7 +51,7 @@ export interface PlannedSubtask {
 
 async function geminiAvailable(): Promise<boolean> {
   if (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY) return true;
-  const home = process.env.HOME || "/home/noba-experts-server";
+  const home = os.homedir();
   try {
     await fs.access(path.join(home, ".gemini", "oauth_creds.json"));
     return true;

@@ -2,6 +2,29 @@
   "name": "code-maestro",
   "version": "0.1.0",
   "private": true,
+  "description": "Self-hosted control plane to forge structured prompts and conduct a fleet of AI coding agents (Claude Code, Gemini CLI, local models) on a real working directory — with an approval gate, sandbox, and multi-model orchestrator.",
+  "license": "AGPL-3.0-or-later",
+  "author": "Jurak Bahrambäk",
+  "homepage": "https://github.com/Muchel187/CodeMaestro#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Muchel187/CodeMaestro.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Muchel187/CodeMaestro/issues"
+  },
+  "keywords": [
+    "ai",
+    "llm",
+    "prompt-engineering",
+    "claude",
+    "gemini",
+    "ollama",
+    "coding-agent",
+    "agent-orchestration",
+    "self-hosted",
+    "nextjs"
+  ],
   "scripts": {
     "dev": "next dev",
     "build": "next build",

@@ -33,7 +33,7 @@ export function PromptDetail({ promptId, onBack, onDelete, onRefresh }: PromptDe
   const [activeVersion, setActiveVersion] = useState<number | null>(null);
   const [compareVersion, setCompareVersion] = useState<number | null>(null);
   const router = useRouter();
-  const { updateStructured, setXmlContent, setCurrentPromptId, setStep } = useBuilderStore();
+  const { loadProject, setXmlContent, setCurrentPromptId } = useBuilderStore();
 
   useEffect(() => {
     fetch(`/api/prompts/${promptId}`)
@@ -53,11 +53,23 @@ export function PromptDetail({ promptId, onBack, onDelete, onRefresh }: PromptDe
     : undefined;
 
   function handleEdit() {
-    const parsed = parseXml(prompt!.content);
-    updateStructured(parsed);
-    setXmlContent(prompt!.content);
-    setCurrentPromptId(prompt!.id);
-    setStep("edit");
+    // Load the saved project into the builder wholesale (replaces any draft),
+    // preferring the persisted structured JSON over re-parsing the XML.
+    let structured;
+    try {
+      const p = JSON.parse(prompt!.structured || "{}");
+      structured = p && Object.keys(p).length > 0 ? p : parseXml(prompt!.content);
+    } catch {
+      structured = parseXml(prompt!.content);
+    }
+    loadProject({
+      id: prompt!.id,
+      title: prompt!.title,
+      description: prompt!.description,
+      tags: prompt!.tags.map((t) => t.tag),
+      content: prompt!.content,
+      structured,
+    });
     router.push("/builder");
   }
 

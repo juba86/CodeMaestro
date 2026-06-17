@@ -1,0 +1,65 @@
+name: "🐛 Bug report"
+description: Report something that isn't working as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug! Please fill out the sections
+        below so we can reproduce and fix it quickly.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug, including what you expected instead.
+      placeholder: When I click X, Y happens instead of Z.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Go to '...'
+        2. Click on '...'
+        3. See error
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Prompt Builder
+        - Library / Templates
+        - Playground
+        - Knowledge Base (RAG)
+        - Code Assistant
+        - Multi-Model Orchestrator
+        - Providers / Settings
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: Provider / model (if relevant)
+      placeholder: e.g. Claude (API key), Gemini CLI, Ollama llama3.1
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: OS, Node version, browser, and how you run it (dev/prod, Tailscale, etc.)
+      placeholder: |
+        - OS: Ubuntu 24.04
+        - Node: 22.x
+        - Browser: Chrome 148
+        - Run mode: npm run dev, accessed over Tailscale
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      description: Paste relevant server/console output. **Redact any API keys or tokens.**
+      render: shell

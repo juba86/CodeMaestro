@@ -40,7 +40,7 @@ function buildSettingsFile(session: AssistantSessionRow): string | null {
 }
 
 export interface NormalizedEvent {
-  type: "init" | "text" | "thinking" | "tool_use" | "tool_result" | "result" | "error" | "done";
+  type: "init" | "text" | "thinking" | "tool_use" | "tool_result" | "result" | "error" | "done" | "knowledge";
   content?: string;
   name?: string;
   input?: unknown;
@@ -49,6 +49,7 @@ export interface NormalizedEvent {
   sessionId?: string;
   model?: string;
   costUsd?: number;
+  sources?: string[]; // knowledge-base doc titles injected this turn (type "knowledge")
 }
 
 export interface TurnResult {

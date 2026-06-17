@@ -6,7 +6,7 @@ import { PROVIDERS as CHAT_PROVIDERS } from "@/lib/ai/catalog";
 import {
   Plus, Send, Square, Trash2, Loader2, Terminal, Wrench, FileText,
   AlertCircle, FolderGit2, Network, Cpu, Sparkles, FolderPlus, Folder, ChevronUp, ExternalLink, Play,
-  ChevronDown, Maximize2, Minimize2, Paperclip, ShieldCheck, Check, X,
+  ChevronDown, Maximize2, Minimize2, Paperclip, ShieldCheck, Check, X, BookOpen,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -76,6 +76,9 @@ export function AssistantView() {
   const [running, setRunning] = useState(false);
   const [creating, setCreating] = useState(false);
   const [orchestrateMode, setOrchestrateMode] = useState(false);
+  // RAG: augment turns with relevant knowledge-base context (default on; the
+  // server no-ops gracefully when the index is empty or Ollama is unreachable).
+  const [useKnowledge, setUseKnowledge] = useState(true);
   const [orchMode, setOrchMode] = useState<"auto" | "hybrid">("auto");
   const [wizardEnabled, setWizardEnabled] = useState(false);
   const [wizardOpen, setWizardOpen] = useState(false);
@@ -356,7 +359,7 @@ export function AssistantView() {
       const res = await fetch(`/api/assistant/sessions/${activeId}/message`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt, apiKey }),
+        body: JSON.stringify({ prompt, apiKey, useKnowledge }),
         signal: controller.signal,
       });
       if (!res.ok || !res.body) {
@@ -389,6 +392,9 @@ export function AssistantView() {
                 next.push({ role: "assistant", content: assistantBuf, _streaming: true } as Msg & { _streaming: boolean });
                 return next;
               });
+            } else if (e.type === "knowledge") {
+              const sources: string[] = e.sources || [];
+              pushLive({ role: "knowledge", content: `${sources.length} Quelle(n) aus der Wissensbasis`, meta: JSON.stringify({ sources }) });
             } else if (e.type === "tool_use") {
               assistantBuf = "";
               pushLive({ role: "tool_use", content: e.name || "tool", meta: JSON.stringify({ name: e.name, input: e.input }) });
@@ -893,6 +899,15 @@ export function AssistantView() {
               >
                 <Network size={12} /> Orchestrator {orchestrateMode ? "an" : "aus"}
               </button>
+              <button
+                onClick={() => setUseKnowledge((v) => !v)}
+                className={`flex items-center gap-1.5 px-2 py-1 text-xs rounded-md border ${
+                  useKnowledge ? "bg-primary text-primary-foreground border-primary" : "border-input hover:bg-accent"
+                }`}
+                title="Relevanten Kontext aus der Wissensbasis (RAG) automatisch einfügen"
+              >
+                <BookOpen size={12} /> Wissensbasis {useKnowledge ? "an" : "aus"}
+              </button>
               {orchestrateMode && (
                 <>
                   <div className="flex rounded-md border border-input overflow-hidden text-xs">
@@ -1149,6 +1164,19 @@ function MessageBubble({ msg }: { msg: Msg }) {
           </div>
         )}
         <pre className="whitespace-pre-wrap font-sans">{msg.content}</pre>
+      </div>
+    );
+  }
+  if (msg.role === "knowledge") {
+    let sources: string[] = [];
+    try { sources = JSON.parse(msg.meta || "{}").sources || []; } catch { /* */ }
+    return (
+      <div className="max-w-[90%] rounded-lg px-3 py-2 text-xs border border-violet-500/40 bg-violet-500/5 text-violet-300 flex items-start gap-1.5">
+        <BookOpen size={13} className="mt-0.5 shrink-0" />
+        <div>
+          <span className="font-medium">Wissensbasis genutzt</span>
+          {sources.length > 0 && <span className="text-muted-foreground"> · {sources.join(", ")}</span>}
+        </div>
       </div>
     );
   }

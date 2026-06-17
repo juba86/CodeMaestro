@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/db/client";
 import { knowledgeSearchSchema, formatZodError } from "@/lib/validation/schemas";
-import { embedOne, cosineSimilarity, EMBED_MODEL } from "@/lib/ai/embeddings";
+import { retrieveChunks, EMBED_MODEL } from "@/lib/knowledge/retrieve";
 
 export async function POST(req: NextRequest) {
   try {
@@ -22,9 +21,11 @@ export async function POST(req: NextRequest) {
 
     const { query, topK } = parsed.data;
 
-    let queryVec: number[];
+    let scored;
     try {
-      queryVec = await embedOne(query);
+      // Shared retrieval path — identical to what the Code Assistant and the
+      // Telegram bridge use (see src/lib/knowledge/retrieve.ts).
+      scored = await retrieveChunks(query, { topK });
     } catch (err) {
       return NextResponse.json(
         {
@@ -34,27 +35,6 @@ export async function POST(req: NextRequest) {
         { status: 502 }
       );
     }
-
-    // Brute-force cosine over all chunks. Fine for a personal-scale knowledge base;
-    // swap for a vector index (sqlite-vec / libsql vector) if this grows large.
-    const chunks = await prisma.knowledgeChunk.findMany({
-      include: { doc: { select: { title: true } } },
-    });
-
-    const scored = chunks
-      .map((c) => {
-        let vec: number[] = [];
-        try { vec = JSON.parse(c.embedding); } catch { /* skip */ }
-        return {
-          id: c.id,
-          docId: c.docId,
-          docTitle: c.doc.title,
-          content: c.content,
-          score: cosineSimilarity(queryVec, vec),
-        };
-      })
-      .sort((a, b) => b.score - a.score)
-      .slice(0, topK);
 
     return NextResponse.json({ results: scored });
   } catch (err) {

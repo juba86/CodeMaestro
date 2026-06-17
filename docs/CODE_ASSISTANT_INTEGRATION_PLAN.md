@@ -13,6 +13,43 @@
 
 ---
 
+## Addendum (2026-06-16): Hybrid-Fernsteuerung — PWA primär, Telegram-Fallback
+
+> **STATUS: IMPLEMENTED.** Optionaler Telegram-Bot als zweites Frontend auf dieselbe
+> Session-Engine. WhatsApp wurde bewusst zurückgestellt.
+
+**Zielbild.** Die PWA bleibt das primäre Interface (Tailscale-privat). Ist man nicht im
+Tailscale, kann man den Assistant **optional** per Telegram steuern/überwachen — kein Zwang,
+per Toggle. Alles wird im PWA-UI eingestellt (Settings → Telegram).
+
+**Warum Telegram (statt WhatsApp).** Der Server ist privat, ohne öffentliche Webhook-URL.
+Telegram **Long-Polling (`getUpdates`)** funktioniert hinter NAT/privat ohne öffentlichen
+Endpunkt; WhatsApp bräuchte öffentlichen Webhook + Meta-Business-Onboarding.
+
+**Architektur.** In-Process Long-Poll-Loop im Next-Node-Runtime, gestartet aus
+`src/instrumentation.ts` (Boot-Hook), zur Laufzeit per Settings-Toggle steuerbar. Nutzt
+**denselben** `runner.runTurn`-Pfad und dieselbe `approvals.resolveApproval`-Mechanik wie die
+PWA. Telegram ist nur ein weiteres Frontend — kein separater Worker.
+
+**Approval-Gate.** `approvals.ts` lehnt ohne Live-Emitter auto-ab. Die Bridge registriert
+während eines Telegram-Turns einen Emitter, der Freigaben als Telegram-Inline-Buttons
+(Erlauben/Ablehnen) rendert; der Callback löst dasselbe `resolveApproval` aus.
+
+**Sicherheit.** Chat-ID-Allowlist (Pflicht — sonst ist der Bot offen), gleiche
+Workdir-Allowlist (`resolveWorkdir`), Token nur serverseitig (im API-Response maskiert).
+`/whoami` ist für jeden erlaubt (gibt die eigene Chat-ID zurück), alles andere erfordert
+Allowlist.
+
+**Bot-Kommandos.** `/new`, `/sessions`, `/status`, `/stop`, `/whoami`, `/help`; freier Text =
+Aufgabe an die aktive Session.
+
+**Dateien.** `src/lib/assistant/telegram.ts` (Bridge + Loop + reine Helfer),
+`telegram-config.ts` (Setting-Persistenz), `src/app/api/assistant/telegram/{route,control}.ts`
+(Config/Control), `src/components/settings/telegram-settings.tsx` (PWA-UI),
+`src/instrumentation.ts` (Auto-Start), Schemas in `validation/schemas.ts`.
+
+---
+
 
 Ziel: Aus der PromptBuilder-App heraus einen Coding-Assistenten (Claude Code, optional
 gemini-cli) auf dem Server starten und steuern — mit **Live-Streaming**, **persistenter

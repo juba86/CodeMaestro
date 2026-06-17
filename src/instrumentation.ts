@@ -13,5 +13,18 @@ export async function register() {
     } catch {
       /* best effort */
     }
+
+    // Auto-start the optional Telegram bridge if it was enabled in the PWA, so
+    // the assistant stays reachable from Telegram after a server restart.
+    try {
+      const { getTelegramConfig } = await import("@/lib/assistant/telegram-config");
+      const cfg = await getTelegramConfig();
+      if (cfg.enabled && cfg.token) {
+        const { startBridge } = await import("@/lib/assistant/telegram");
+        await startBridge();
+      }
+    } catch {
+      /* bridge is optional — never block boot */
+    }
   }
 }
