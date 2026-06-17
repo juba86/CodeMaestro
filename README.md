@@ -199,7 +199,7 @@ CodeMaestro is designed to run in a **trusted, private environment** (e.g. local
 ## License
 
 Released under the GNU Affero General Public License v3.0 (AGPL-3.0).
-© 2026 <DEIN NAME / ENTITÄT>. Free to use, modify, and self-host;
+© 2026 Jurak Bahrambäk. Free to use, modify, and self-host;
 network/SaaS use must release source changes. Contributions welcome.
 
 See [`LICENSE`](./LICENSE) for the full text.
