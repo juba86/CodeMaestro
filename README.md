@@ -109,6 +109,7 @@ CodeMaestro turns AI coding from a single-terminal habit into an operable system
 
 - **Dedicated:** **Claude** (Anthropic SDK) and **Gemini** (Google GenAI) via API key *or* their logged-in CLI (**OAuth/Login**, no key).
 - **Local:** **Ollama** and **LM Studio** auto-discovered (no key), plus a **Custom OpenAI-compatible endpoint** (any base URL — Jan, llama.cpp, vLLM, LocalAI, Azure OpenAI…).
+- **Ollama Cloud:** hosted Ollama models (`ollama.com`) via API key — live model discovery, or just type a `…-cloud` model id in Settings.
 - **Code-Assistant CLI agents:** drive **Claude Code**, **Gemini CLI**, **OpenCode**, **Codex CLI**, and **Aider** on a real working directory.
 
 <details>

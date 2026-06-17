@@ -11,7 +11,7 @@ import { toast } from "sonner";
 import { TelegramSettings } from "./telegram-settings";
 
 // Display ordering: dedicated + cloud first, local/custom last.
-const ORDER = ["claude", "gemini", "openai", "openrouter", "groq", "deepseek", "mistral", "xai", "together", "perplexity", "ollama", "lmstudio", "custom"];
+const ORDER = ["claude", "gemini", "openai", "openrouter", "groq", "deepseek", "mistral", "xai", "together", "perplexity", "ollama-cloud", "ollama", "lmstudio", "custom"];
 const providerList = [...PROVIDERS].sort((a, b) => ORDER.indexOf(a.id) - ORDER.indexOf(b.id));
 
 function isOllama(def: ProviderDef) { return def.kind === "ollama"; }
@@ -318,12 +318,28 @@ export function SettingsView() {
                 : "Keine Modelle verfügbar"}
             </option>
           )}
+          {/* Ensure a manually-entered model id (not in the discovered list) is still selectable. */}
+          {activeModel && !models.some((m) => m.id === activeModel) && (
+            <option value={activeModel}>{activeModel} (eigene)</option>
+          )}
           {models.map((m) => (
             <option key={m.id} value={m.id}>
               {m.name}
             </option>
           ))}
         </select>
+        <div className="space-y-1">
+          <input
+            type="text"
+            className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+            placeholder="… oder Modell-ID direkt eingeben (z.B. gpt-oss:120b-cloud)"
+            value={activeModel}
+            onChange={(e) => setActiveModel(e.target.value)}
+          />
+          <p className="text-xs text-muted-foreground">
+            Praktisch für Ollama-Cloud-Modelle (Endung <code className="px-1 bg-accent rounded">-cloud</code>) oder neue Modelle, die noch nicht in der Liste erscheinen. Bei gesetztem API-Key wird die Live-Liste von <code className="px-1 bg-accent rounded">ollama.com</code> automatisch geladen.
+          </p>
+        </div>
       </section>
 
       <div className="border-t border-border pt-6">

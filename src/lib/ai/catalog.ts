@@ -132,6 +132,24 @@ export const PROVIDERS: ProviderDef[] = [
     local: true,
   },
   {
+    // Ollama's hosted cloud — OpenAI-compatible API at ollama.com with a key.
+    // Cloud models use a "-cloud" suffix; the live /models list (when a key is
+    // set) supersedes the static fallback below. Models can also be typed in.
+    id: "ollama-cloud",
+    label: "Ollama Cloud",
+    kind: "openai",
+    baseUrl: "https://ollama.com/v1",
+    envKeys: ["OLLAMA_API_KEY"],
+    docs: "https://ollama.com/settings/keys",
+    staticModels: [
+      { id: "gpt-oss:20b-cloud", name: "gpt-oss 20B (cloud)" },
+      { id: "gpt-oss:120b-cloud", name: "gpt-oss 120B (cloud)" },
+      { id: "qwen3-coder:480b-cloud", name: "Qwen3 Coder 480B (cloud)" },
+      { id: "deepseek-v3.1:671b-cloud", name: "DeepSeek V3.1 671B (cloud)" },
+      { id: "kimi-k2:1t-cloud", name: "Kimi K2 1T (cloud)" },
+    ],
+  },
+  {
     id: "lmstudio",
     label: "LM Studio (lokal)",
     kind: "openai-local",
