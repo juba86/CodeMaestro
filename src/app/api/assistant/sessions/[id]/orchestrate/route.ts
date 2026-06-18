@@ -24,7 +24,7 @@ export async function POST(
   if (!parsed.success) {
     return NextResponse.json({ error: formatZodError(parsed.error), code: "VALIDATION_ERROR" }, { status: 400 });
   }
-  const { prompt, preference, clientProviders } = parsed.data;
+  const { prompt, preference, clientProviders, plannerWorkerId } = parsed.data;
 
   const session = await prisma.assistantSession.findUnique({ where: { id } });
   if (!session) {
@@ -73,7 +73,7 @@ export async function POST(
       };
       let result;
       try {
-        result = await orchestrate(sessionRow, prompt, send, preference, clientProviders);
+        result = await orchestrate(sessionRow, prompt, send, preference, clientProviders, plannerWorkerId);
       } catch (err) {
         send({ type: "error", content: err instanceof Error ? err.message : "Orchestration failed" });
         result = { costUsd: 0, isError: true, records: [] };

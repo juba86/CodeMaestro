@@ -41,7 +41,7 @@ export async function POST(
   };
 
   try {
-    const { subtasks } = await planSubtasks(sessionRow, parsed.data.prompt, parsed.data.preference, parsed.data.clientProviders);
+    const { subtasks } = await planSubtasks(sessionRow, parsed.data.prompt, parsed.data.preference, parsed.data.clientProviders, parsed.data.plannerWorkerId);
     // Offer the full pool (incl. every local Ollama model + configured cloud APIs)
     // for manual reassignment.
     const allWorkers = await discoverAllWorkers(parsed.data.clientProviders);

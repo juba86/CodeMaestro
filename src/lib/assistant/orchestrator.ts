@@ -257,6 +257,60 @@ async function runApiWorker(worker: Worker, prompt: string): Promise<{ text: str
   return { text };
 }
 
+// Runs a worker for plain TEXT output (planning / synthesis), routing to the
+// right backend by worker kind. CLI workers run a tool-less turn; Ollama/API
+// workers are a single chat call. This is what lets the planner run on ANY
+// configured model, not just Claude.
+async function runText(
+  session: AssistantSessionRow,
+  worker: Worker,
+  prompt: string,
+  permissionMode = "plan"
+): Promise<{ text: string; costUsd: number; isError: boolean }> {
+  if (worker.kind === "ollama") {
+    const r = await runOllamaWorker(worker, prompt);
+    return { text: r.text, costUsd: 0, isError: false };
+  }
+  if (worker.kind === "api") {
+    const r = await runApiWorker(worker, prompt);
+    return { text: r.text, costUsd: 0, isError: false };
+  }
+  const row: AssistantSessionRow = {
+    id: session.id,
+    externalId: null,
+    provider: worker.kind === "gemini-cli" ? "gemini" : "claude",
+    model: worker.model,
+    cwd: session.cwd,
+    permissionMode, // read-only for planning/synthesis
+    allowedTools: "", // no tools — pure text
+  };
+  let text = "";
+  const res = await runTurn(row, prompt, undefined, (e) => {
+    if (e.type === "text" && e.content) text += e.content;
+  });
+  return { text, costUsd: res.costUsd, isError: res.isError };
+}
+
+// Resolve which worker plans / synthesizes. An explicit id from the UI wins;
+// otherwise "Auto" picks an AVAILABLE model without forcing a Claude account:
+// Gemini (free, large context) > strongest local Ollama > a configured cloud API
+// > Claude (last resort). This is the fix for the orchestrator hard-requiring Claude.
+function resolvePlanner(workers: Worker[], plannerWorkerId?: string): Worker {
+  const id = (plannerWorkerId || "").trim();
+  if (id && id !== "auto") {
+    const found = workers.find((w) => w.id === id);
+    if (found) return found;
+    if (id.startsWith("ollama:")) return buildOllamaWorker(id.slice("ollama:".length));
+  }
+  return (
+    workers.find((w) => w.kind === "gemini-cli") ||
+    workers.find((w) => w.kind === "ollama") ||
+    workers.find((w) => w.kind === "api") ||
+    workers.find((w) => w.kind === "claude-cli") ||
+    workers[0]
+  );
+}
+
 // --- Planner ---
 
 function extractJson(s: string): string {
@@ -271,7 +325,8 @@ async function plan(
   session: AssistantSessionRow,
   task: string,
   workers: Worker[],
-  preference?: string
+  preference?: string,
+  plannerWorkerId?: string
 ): Promise<PlannedSubtask[]> {
   const profile = workers
     .map((w) => `- ${w.id} (${w.label}, editsFiles=${w.editsFiles}): ${w.strengths}`)
@@ -303,28 +358,24 @@ Respond with ONLY this JSON shape:
 Task:
 ${task}`;
 
-  const plannerRow: AssistantSessionRow = {
-    id: session.id,
-    externalId: null,
-    provider: "claude",
-    model: "",
-    cwd: session.cwd,
-    permissionMode: "plan", // read-only
-    allowedTools: "", // no tools — pure JSON output
+  // Run the planner on the chosen (or Auto) model — no longer hardwired to Claude.
+  const planner = resolvePlanner(workers, plannerWorkerId);
+
+  // Fallback: if the planner narrated instead of returning JSON (common for
+  // simple questions), don't fail — run the whole task as a single subtask on a
+  // file-capable worker, which can read the project and answer/act.
+  const fallback = (): PlannedSubtask[] => {
+    const w = workers.find((x) => x.editsFiles) || workers[0];
+    return [{ id: "s1", title: "Aufgabe bearbeiten", description: task, workerId: w?.id || "claude", dependsOn: [], editsFiles: !!w?.editsFiles }];
   };
 
   let raw = "";
-  await runTurn(plannerRow, plannerPrompt, undefined, (e) => {
-    if (e.type === "text" && e.content) raw += e.content;
-  });
-
-  // Fallback: if the planner narrated instead of returning JSON (common for
-  // simple questions), don't fail — run the whole task as a single subtask on the
-  // strongest file-capable worker, which can read the project and answer/act.
-  const fallback = (): PlannedSubtask[] => {
-    const w = workers.find((x) => x.kind === "claude-cli") || workers[0];
-    return [{ id: "s1", title: "Aufgabe bearbeiten", description: task, workerId: w?.id || "claude", dependsOn: [], editsFiles: true }];
-  };
+  try {
+    const r = await runText(session, planner, plannerPrompt, "plan");
+    raw = r.text;
+  } catch {
+    return fallback();
+  }
 
   let parsed: { subtasks?: PlannedSubtask[] };
   try {
@@ -374,10 +425,11 @@ export async function planSubtasks(
   session: AssistantSessionRow,
   task: string,
   preference?: string,
-  clientProviders: ClientProvider[] = []
+  clientProviders: ClientProvider[] = [],
+  plannerWorkerId?: string
 ): Promise<{ workers: Worker[]; subtasks: PlannedSubtask[] }> {
   const workers = await discoverWorkers(clientProviders);
-  const subtasks = orderSubtasks(await plan(session, task, workers, preference));
+  const subtasks = orderSubtasks(await plan(session, task, workers, preference, plannerWorkerId));
   return { workers, subtasks };
 }
 
@@ -391,7 +443,8 @@ export async function executePlan(
   task: string,
   subtasks: PlannedSubtask[],
   emit: (e: OrchEvent) => void,
-  clientProviders: ClientProvider[] = []
+  clientProviders: ClientProvider[] = [],
+  plannerWorkerId?: string
 ): Promise<OrchestrationResult> {
   const records: { role: string; content: string; meta: string }[] = [];
   let totalCost = 0;
@@ -453,16 +506,12 @@ export async function executePlan(
       .join("\n\n");
     const synthPrompt = `You orchestrated multiple AI workers on this task:\n"${task}"\n\nHere is what each worker produced:\n\n${summaryInput}\n\nWrite a concise final summary for the user: what was accomplished across the subtasks, any files changed, and any follow-ups or caveats. Do not use any tools.`;
 
-    const synthRow: AssistantSessionRow = {
-      id: session.id, externalId: null, provider: "claude", model: "",
-      cwd: session.cwd, permissionMode: "plan", allowedTools: "",
-    };
-    let synth = "";
-    const res = await runTurn(synthRow, synthPrompt, undefined, (e) => {
-      if (e.type === "text" && e.content) { synth += e.content; emit({ type: "synthesis", content: e.content }); }
-    });
+    // Synthesize on the same model that planned (or Auto) — not hardwired to Claude.
+    const synthWorker = resolvePlanner(workers, plannerWorkerId);
+    const res = await runText(session, synthWorker, synthPrompt, "plan");
+    const synth = res.text;
     totalCost += res.costUsd;
-    if (synth.trim()) records.push({ role: "synthesis", content: synth.trim(), meta: "{}" });
+    if (synth.trim()) { emit({ type: "synthesis", content: synth }); records.push({ role: "synthesis", content: synth.trim(), meta: "{}" }); }
   } catch (err) {
     emit({ type: "error", content: `Synthesis failed: ${err instanceof Error ? err.message : String(err)}` });
   }
@@ -477,15 +526,16 @@ export async function orchestrate(
   task: string,
   emit: (e: OrchEvent) => void,
   preference?: string,
-  clientProviders: ClientProvider[] = []
+  clientProviders: ClientProvider[] = [],
+  plannerWorkerId?: string
 ): Promise<OrchestrationResult> {
   let subtasks: PlannedSubtask[];
   try {
-    ({ subtasks } = await planSubtasks(session, task, preference, clientProviders));
+    ({ subtasks } = await planSubtasks(session, task, preference, clientProviders, plannerWorkerId));
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Planning failed";
     emit({ type: "error", content: msg });
     return { costUsd: 0, isError: true, records: [{ role: "error", content: msg, meta: "{}" }] };
   }
-  return executePlan(session, task, subtasks, emit, clientProviders);
+  return executePlan(session, task, subtasks, emit, clientProviders, plannerWorkerId);
 }

@@ -1,7 +1,15 @@
 import { diffLines } from "@/lib/diff";
 
+export interface QuestionOption { label: string; description?: string }
+export interface QuestionItem {
+  question: string;
+  header?: string;
+  multiSelect?: boolean;
+  options: QuestionOption[];
+}
+
 export interface ApprovalEvent {
-  type: "approval_request" | "approval_resolved";
+  type: "approval_request" | "approval_resolved" | "question_request" | "question_resolved";
   approvalId: string;
   tool?: string;
   command?: string;
@@ -9,6 +17,16 @@ export interface ApprovalEvent {
   isWrite?: boolean;
   diff?: { op: "equal" | "add" | "del"; text: string }[];
   decision?: "allow" | "deny";
+  // Interactive questions (AskUserQuestion / ExitPlanMode), surfaced to the UI as
+  // clickable options instead of a silent, unanswerable tool call.
+  kind?: "ask" | "plan";
+  questions?: QuestionItem[];
+  plan?: string;
+}
+
+const QUESTION_TOOLS = new Set(["AskUserQuestion", "ExitPlanMode"]);
+export function isQuestionTool(tool: string): boolean {
+  return QUESTION_TOOLS.has(tool);
 }
 
 type Emit = (e: ApprovalEvent) => void;
@@ -39,6 +57,46 @@ interface ToolInput {
   new_string?: string;
   content?: string;
   command?: string;
+  // AskUserQuestion / ExitPlanMode
+  questions?: unknown;
+  plan?: unknown;
+}
+
+// Normalize an AskUserQuestion / ExitPlanMode tool input into a UI-renderable
+// question event (clickable options or a plan to approve).
+function buildQuestionEvent(approvalId: string, tool: string, input: ToolInput): ApprovalEvent {
+  if (tool === "ExitPlanMode") {
+    return {
+      type: "question_request",
+      approvalId,
+      tool,
+      kind: "plan",
+      plan: typeof input.plan === "string" ? input.plan : "",
+    };
+  }
+  // AskUserQuestion
+  const rawQs = Array.isArray(input.questions) ? input.questions : [];
+  const questions: QuestionItem[] = rawQs.slice(0, 10).map((q): QuestionItem => {
+    const obj = (q && typeof q === "object" ? q : {}) as Record<string, unknown>;
+    const rawOpts = Array.isArray(obj.options) ? obj.options : [];
+    const options: QuestionOption[] = rawOpts.slice(0, 12).map((o) =>
+      typeof o === "string"
+        ? { label: o }
+        : {
+            label: String((o as Record<string, unknown>)?.label ?? ""),
+            description: (o as Record<string, unknown>)?.description
+              ? String((o as Record<string, unknown>).description)
+              : undefined,
+          }
+    );
+    return {
+      question: String(obj.question ?? ""),
+      header: obj.header ? String(obj.header) : undefined,
+      multiSelect: !!obj.multiSelect,
+      options,
+    };
+  });
+  return { type: "question_request", approvalId, tool, kind: "ask", questions };
 }
 
 function buildEvent(approvalId: string, tool: string, input: ToolInput): ApprovalEvent {
@@ -70,14 +128,15 @@ export function requestApproval(
     // No live UI listening — be safe and deny so nothing runs unattended.
     return Promise.resolve({ decision: "deny", reason: "Keine aktive UI für die Freigabe." });
   }
+  const question = isQuestionTool(tool);
   return new Promise<Decision>((resolve) => {
     const timer = setTimeout(() => {
       pending.delete(approvalId);
-      emit({ type: "approval_resolved", approvalId, decision: "deny" });
-      resolve({ decision: "deny", reason: "Freigabe-Timeout." });
+      emit({ type: question ? "question_resolved" : "approval_resolved", approvalId, decision: "deny" });
+      resolve({ decision: "deny", reason: question ? "Keine Antwort (Timeout)." : "Freigabe-Timeout." });
     }, timeoutMs);
     pending.set(approvalId, { resolve, timer });
-    emit(buildEvent(approvalId, tool, input));
+    emit(question ? buildQuestionEvent(approvalId, tool, input) : buildEvent(approvalId, tool, input));
   });
 }
 

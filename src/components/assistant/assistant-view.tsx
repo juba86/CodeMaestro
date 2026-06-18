@@ -56,6 +56,15 @@ interface ApprovalCard {
   diff?: DiffPart[];
 }
 
+interface QuestionOpt { label: string; description?: string }
+interface QuestionItemUI { question: string; header?: string; multiSelect?: boolean; options: QuestionOpt[] }
+interface QuestionCard {
+  approvalId: string;
+  kind: "ask" | "plan";
+  questions?: QuestionItemUI[]; // kind "ask"
+  plan?: string;                // kind "plan"
+}
+
 const PROVIDERS = [
   { id: "claude", label: "Claude Code" },
   { id: "gemini", label: "Gemini CLI" },
@@ -85,6 +94,9 @@ export function AssistantView() {
   const [wizard, setWizard] = useState({ stack: "", constraints: "", routing: "balanced", verify: false });
   const [planDraft, setPlanDraft] = useState<{ workers: { id: string; label: string; editsFiles?: boolean }[]; subtasks: PlannedSubtask[] } | null>(null);
   const [pendingPrompt, setPendingPrompt] = useState("");
+  // Which model plans/synthesizes the orchestration. "" = Auto (no Claude required).
+  const [plannerWorkerId, setPlannerWorkerId] = useState("");
+  const [orchWorkers, setOrchWorkers] = useState<{ id: string; label: string }[]>([]);
   const [newFolder, setNewFolder] = useState("");
 
   const [browse, setBrowse] = useState<BrowseState | null>(null);
@@ -114,6 +126,7 @@ export function AssistantView() {
 
   // Pending tool approvals (diff/command gate) awaiting the user's decision.
   const [approvals, setApprovals] = useState<ApprovalCard[]>([]);
+  const [questions, setQuestions] = useState<QuestionCard[]>([]);
 
   const threadRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -146,6 +159,27 @@ export function AssistantView() {
   }, []);
 
   useEffect(() => { loadSessions(); }, [loadSessions]);
+
+  // Load the worker pool for the orchestrator's "planner model" dropdown the
+  // first time the user enables Orchestrator mode.
+  useEffect(() => {
+    if (!orchestrateMode || orchWorkers.length > 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const clientProviders = await gatherClientProviders();
+        const res = await fetch("/api/assistant/orchestrate/workers", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ clientProviders }),
+        });
+        const d = await res.json();
+        if (!cancelled && Array.isArray(d.workers)) setOrchWorkers(d.workers);
+      } catch { /* dropdown just falls back to Auto */ }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orchestrateMode]);
 
   // Open the new-session config by default only when there's nothing to show yet.
   useEffect(() => {
@@ -409,6 +443,12 @@ export function AssistantView() {
               }]);
             } else if (e.type === "approval_resolved") {
               setApprovals((prev) => prev.filter((a) => a.approvalId !== e.approvalId));
+            } else if (e.type === "question_request") {
+              setQuestions((prev) => [...prev, {
+                approvalId: e.approvalId, kind: e.kind, questions: e.questions, plan: e.plan,
+              }]);
+            } else if (e.type === "question_resolved") {
+              setQuestions((prev) => prev.filter((q) => q.approvalId !== e.approvalId));
             }
           } catch { /* ignore */ }
         }
@@ -432,6 +472,22 @@ export function AssistantView() {
       });
     } catch {
       toast.error("Freigabe konnte nicht übermittelt werden.");
+    }
+  }
+
+  // Answer a pending interactive question. For AskUserQuestion we "deny" the tool
+  // with the chosen answer as the reason (the model reads it and continues); for
+  // ExitPlanMode "allow" approves the plan, "deny" sends it back.
+  async function answerQuestion(approvalId: string, decision: "allow" | "deny", reason?: string) {
+    setQuestions((prev) => prev.filter((q) => q.approvalId !== approvalId));
+    try {
+      await fetch(`/api/assistant/approval/${approvalId}/decide`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ decision, reason }),
+      });
+    } catch {
+      toast.error("Antwort konnte nicht übermittelt werden.");
     }
   }
 
@@ -485,7 +541,7 @@ export function AssistantView() {
         const res = await fetch(`/api/assistant/sessions/${activeId}/orchestrate/plan`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt, preference, clientProviders }),
+          body: JSON.stringify({ prompt, preference, clientProviders, plannerWorkerId }),
         });
         const d = await res.json();
         if (!res.ok) { toast.error(d.error || "Planung fehlgeschlagen."); return; }
@@ -495,7 +551,7 @@ export function AssistantView() {
       }
       return;
     }
-    await streamOrchestrate(`/api/assistant/sessions/${activeId}/orchestrate`, { prompt, preference, clientProviders });
+    await streamOrchestrate(`/api/assistant/sessions/${activeId}/orchestrate`, { prompt, preference, clientProviders, plannerWorkerId });
   }
 
   async function runEditedPlan() {
@@ -503,7 +559,7 @@ export function AssistantView() {
     const subtasks = planDraft.subtasks;
     setPlanDraft(null);
     const clientProviders = await gatherClientProviders();
-    await streamOrchestrate(`/api/assistant/sessions/${activeId}/orchestrate/run`, { prompt: pendingPrompt, subtasks, clientProviders });
+    await streamOrchestrate(`/api/assistant/sessions/${activeId}/orchestrate/run`, { prompt: pendingPrompt, subtasks, clientProviders, plannerWorkerId });
   }
 
   async function streamOrchestrate(url: string, body: object) {
@@ -925,6 +981,17 @@ export function AssistantView() {
                     <input type="checkbox" checked={wizardEnabled} onChange={(e) => setWizardEnabled(e.target.checked)} />
                     Wizard
                   </label>
+                  <select
+                    value={plannerWorkerId}
+                    onChange={(e) => setPlannerWorkerId(e.target.value)}
+                    className="rounded-md border border-input bg-background px-2 py-1 text-xs"
+                    title="Modell, das die Aufgabe plant und am Ende zusammenfasst (nicht zwingend Claude)"
+                  >
+                    <option value="">Planer: Auto</option>
+                    {orchWorkers.map((w) => (
+                      <option key={w.id} value={w.id}>Planer: {w.label}</option>
+                    ))}
+                  </select>
                   <span className="text-[11px] text-muted-foreground">
                     {orchMode === "hybrid" ? "Plan vor Ausführung editierbar." : "Voll automatisch."}
                   </span>
@@ -995,6 +1062,15 @@ export function AssistantView() {
               </div>
             )}
 
+            {/* Interactive questions: clickable options / plan approval */}
+            {questions.length > 0 && (
+              <div className="mx-3 mt-2 space-y-2">
+                {questions.map((q) => (
+                  <QuestionGate key={q.approvalId} card={q} onAnswer={answerQuestion} />
+                ))}
+              </div>
+            )}
+
             {/* Approval gate: diff/command cards awaiting the user's decision */}
             {approvals.length > 0 && (
               <div className="mx-3 mt-2 space-y-2">
@@ -1042,6 +1118,76 @@ export function AssistantView() {
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+function QuestionGate({ card, onAnswer }: { card: QuestionCard; onAnswer: (id: string, d: "allow" | "deny", reason?: string) => void }) {
+  const [sel, setSel] = useState<Record<number, string[]>>({});
+
+  if (card.kind === "plan") {
+    return (
+      <div className="rounded-md border border-violet-500/50 bg-violet-500/5 p-3 space-y-2 text-sm">
+        <div className="flex items-center gap-1.5 font-medium text-violet-300">
+          <ShieldCheck size={14} /> Plan freigeben
+        </div>
+        {card.plan && (
+          <pre className="max-h-60 overflow-auto whitespace-pre-wrap rounded bg-black/30 p-2 text-xs text-foreground/90">{card.plan}</pre>
+        )}
+        <div className="flex gap-2">
+          <button onClick={() => onAnswer(card.approvalId, "allow")}
+            className="px-3 py-1.5 text-xs rounded-md bg-primary text-primary-foreground hover:bg-primary/90 flex items-center gap-1">
+            <Check size={13} /> Plan umsetzen
+          </button>
+          <button onClick={() => onAnswer(card.approvalId, "deny", "Der Nutzer hat den Plan abgelehnt. Bitte überarbeite ihn und frage ggf. nach.")}
+            className="px-3 py-1.5 text-xs rounded-md border border-input hover:bg-accent flex items-center gap-1">
+            <X size={13} /> Ablehnen
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const qs = card.questions || [];
+  const toggle = (qi: number, label: string, multi: boolean) => {
+    setSel((prev) => {
+      const cur = prev[qi] || [];
+      if (multi) return { ...prev, [qi]: cur.includes(label) ? cur.filter((l) => l !== label) : [...cur, label] };
+      return { ...prev, [qi]: [label] };
+    });
+  };
+  const allAnswered = qs.length > 0 && qs.every((_, qi) => (sel[qi] || []).length > 0);
+  const submit = () => {
+    const lines = qs.map((q, qi) => `- ${q.header || q.question || `Frage ${qi + 1}`}: ${(sel[qi] || []).join(", ")}`);
+    onAnswer(card.approvalId, "deny", `Der Nutzer hat geantwortet:\n${lines.join("\n")}`);
+  };
+
+  return (
+    <div className="rounded-md border border-violet-500/50 bg-violet-500/5 p-3 space-y-3 text-sm">
+      <div className="flex items-center gap-1.5 font-medium text-violet-300">
+        <AlertCircle size={14} /> Rückfrage
+      </div>
+      {qs.map((q, qi) => (
+        <div key={qi} className="space-y-1.5">
+          {q.header && <div className="text-[11px] uppercase tracking-wide text-muted-foreground">{q.header}</div>}
+          {q.question && <div className="text-sm">{q.question}{q.multiSelect ? " (Mehrfachauswahl)" : ""}</div>}
+          <div className="flex flex-wrap gap-1.5">
+            {q.options.map((o, oi) => {
+              const active = (sel[qi] || []).includes(o.label);
+              return (
+                <button key={oi} onClick={() => toggle(qi, o.label, !!q.multiSelect)} title={o.description}
+                  className={`px-2.5 py-1 text-xs rounded-md border text-left ${active ? "bg-primary text-primary-foreground border-primary" : "border-input hover:bg-accent"}`}>
+                  {o.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+      <button onClick={submit} disabled={!allAnswered}
+        className="px-3 py-1.5 text-xs rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 flex items-center gap-1">
+        <Check size={13} /> Antwort senden
+      </button>
     </div>
   );
 }

@@ -65,6 +65,7 @@ export async function POST(
     allowedTools: session.allowedTools,
     approvalMode: session.approvalMode,
     sandbox: session.sandbox,
+    interactive: true, // live PWA turn — surface AskUserQuestion/ExitPlanMode as clickable options
   };
 
   const encoder = new TextEncoder();

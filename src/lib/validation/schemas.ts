@@ -149,6 +149,10 @@ export const orchestrateSchema = z.object({
   prompt: z.string().min(1).max(100000),
   preference: z.string().max(2000).optional(),
   clientProviders: z.array(clientProviderSchema).max(20).optional().default([]),
+  // Which worker plans (and synthesizes). "" / "auto" = pick an available model
+  // without forcing a Claude account; a worker id (e.g. "gemini", "ollama:...")
+  // pins it explicitly.
+  plannerWorkerId: z.string().max(120).optional(),
 });
 
 const plannedSubtaskSchema = z.object({
@@ -164,6 +168,7 @@ export const orchestrateRunSchema = z.object({
   prompt: z.string().min(1).max(100000),
   subtasks: z.array(plannedSubtaskSchema).min(1).max(20),
   clientProviders: z.array(clientProviderSchema).max(20).optional().default([]),
+  plannerWorkerId: z.string().max(120).optional(),
 });
 
 // --- Telegram bridge ---

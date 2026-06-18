@@ -13,6 +13,10 @@ export interface AssistantSessionRow {
   allowedTools: string;
   approvalMode?: string; // off | edits | all
   sandbox?: boolean;
+  // When true (live PWA turns), install a PreToolUse hook for Claude's interactive
+  // tools (AskUserQuestion / ExitPlanMode) so the UI can surface clickable options.
+  // Left off for orchestrator/Telegram turns that have no question UI.
+  interactive?: boolean;
 }
 
 const HOOK_PATH = path.join(process.cwd(), "scripts", "assistant-approval-hook.mjs");
@@ -21,19 +25,24 @@ const HOOK_PATH = path.join(process.cwd(), "scripts", "assistant-approval-hook.m
 // sandbox) for this turn. Returns the file path, or null if neither is needed.
 function buildSettingsFile(session: AssistantSessionRow): string | null {
   const approval = session.approvalMode && session.approvalMode !== "off";
-  if (!approval && !session.sandbox) return null;
-  const settings: Record<string, unknown> = {};
+  const wantQuestions = !!session.interactive;
+  if (!approval && !session.sandbox && !wantQuestions) return null;
+
+  const hookCmd = `${process.execPath} ${JSON.stringify(HOOK_PATH).slice(1, -1)}`;
+  const preToolUse: Array<Record<string, unknown>> = [];
+  // Always intercept interactive questions on live turns so the UI can show
+  // clickable options (otherwise they appear as an unanswerable tool call).
+  if (wantQuestions) {
+    preToolUse.push({ matcher: "AskUserQuestion|ExitPlanMode", hooks: [{ type: "command", command: hookCmd, timeout: 320 }] });
+  }
   if (approval) {
     const matcher = session.approvalMode === "all" ? "Edit|Write|MultiEdit|Bash" : "Edit|Write|MultiEdit";
-    settings.hooks = {
-      PreToolUse: [
-        { matcher, hooks: [{ type: "command", command: `${process.execPath} ${JSON.stringify(HOOK_PATH).slice(1, -1)}`, timeout: 320 }] },
-      ],
-    };
+    preToolUse.push({ matcher, hooks: [{ type: "command", command: hookCmd, timeout: 320 }] });
   }
-  if (session.sandbox) {
-    settings.sandbox = { enabled: true };
-  }
+  const settings: Record<string, unknown> = {};
+  if (preToolUse.length) settings.hooks = { PreToolUse: preToolUse };
+  if (session.sandbox) settings.sandbox = { enabled: true };
+
   const file = path.join(tmpdir(), `pb-settings-${session.id}-${Date.now()}.json`);
   writeFileSync(file, JSON.stringify(settings));
   return file;
