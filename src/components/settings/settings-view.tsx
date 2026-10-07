@@ -10,6 +10,7 @@ import { Check, X, Loader2, Eye, EyeOff } from "lucide-react";
 import { toast } from "sonner";
 import { TelegramSettings } from "./telegram-settings";
 import { GithubSettings } from "./github-settings";
+import { PiSettings } from "./pi-settings";
 
 // Display ordering: dedicated + cloud first, local/custom last.
 const ORDER = ["claude", "gemini", "openai", "openrouter", "groq", "deepseek", "mistral", "xai", "together", "perplexity", "ollama-cloud", "ollama", "lmstudio", "custom"];
@@ -354,6 +355,10 @@ export function SettingsView() {
           </p>
         </div>
       </section>
+
+      <div className="border-t border-border pt-6">
+        <PiSettings />
+      </div>
 
       <div className="border-t border-border pt-6">
         <GithubSettings />

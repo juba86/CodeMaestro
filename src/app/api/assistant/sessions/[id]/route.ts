@@ -4,6 +4,7 @@ import { stopDev } from "@/lib/assistant/devserver";
 import { getActiveRun } from "@/lib/assistant/run-hub";
 import { listPending } from "@/lib/assistant/approvals";
 import { stopRunNow } from "@/lib/assistant/session-run";
+import { deletePiSessionFiles } from "@/lib/assistant/pi";
 
 export const runtime = "nodejs";
 
@@ -60,7 +61,9 @@ export async function DELETE(
   stopRunNow(id);
   stopDev(id);
   try {
-    await prisma.assistantSession.delete({ where: { id } });
+    const deleted = await prisma.assistantSession.delete({ where: { id } });
+    // pi keeps its own transcript files; drop them with the session.
+    if (deleted.provider === "pi") void deletePiSessionFiles(deleted.externalId);
     return NextResponse.json({ ok: true });
   } catch {
     return NextResponse.json({ error: "Not found", code: "NOT_FOUND" }, { status: 404 });

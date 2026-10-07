@@ -3,7 +3,7 @@ import { prisma } from "@/lib/db/client";
 import { createAssistantSessionSchema, formatZodError } from "@/lib/validation/schemas";
 import { resolveWorkdir } from "@/lib/assistant/security";
 import { isSessionBusy } from "@/lib/assistant/run-hub";
-import { supportsApprovalGate } from "@/lib/assistant/runner";
+import { supportsApprovalGate, supportsSandbox } from "@/lib/assistant/runner";
 
 export const runtime = "nodejs";
 
@@ -52,11 +52,15 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // The approval gate/sandbox are enforced through provider hooks; never
-    // store a gate the provider cannot honor (the runner would refuse to run).
-    const data = supportsApprovalGate(parsed.data.provider)
-      ? { ...parsed.data, cwd }
-      : { ...parsed.data, cwd, approvalMode: "off" as const, sandbox: false };
+    // The approval gate and sandbox are enforced through provider hooks/settings;
+    // never store one the provider cannot honor (the runner would refuse to run).
+    const p = parsed.data.provider;
+    const data = {
+      ...parsed.data,
+      cwd,
+      ...(supportsApprovalGate(p) ? {} : { approvalMode: "off" as const }),
+      ...(supportsSandbox(p) ? {} : { sandbox: false }),
+    };
     const session = await prisma.assistantSession.create({ data });
     return NextResponse.json({ session }, { status: 201 });
   } catch (err) {

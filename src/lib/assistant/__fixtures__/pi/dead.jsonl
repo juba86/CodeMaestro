@@ -1,0 +1,37 @@
+{"type":"session","version":3,"id":"01a117f7-adbc-7693-b6bd-9dde0af6e12d","timestamp":"2026-10-07T20:04:30.269Z","cwd":"/probe/work2"}
+{"type":"agent_start"}
+{"type":"turn_start"}
+{"type":"message_start","message":{"role":"system","content":"","sections":{"preamble":"…","tools":"…","rules":"…","docs":"…","cwd":"…"},"timestamp":1791403470335,"toolsAdded":[]}}
+{"type":"message_end","message":{"role":"system","content":"","sections":{"preamble":"…","tools":"…","rules":"…","docs":"…","cwd":"…"},"timestamp":1791403470335,"toolsAdded":[]}}
+{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"hi"}],"timestamp":1791403470334}}
+{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"hi"}],"timestamp":1791403470334}}
+{"type":"message_start","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"ollama-dead","model":"dead-model","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"error","timestamp":1791403470353,"errorMessage":"Connection error.","thinkingLevel":"off"}}
+{"type":"message_end","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"ollama-dead","model":"dead-model","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"error","timestamp":1791403470353,"errorMessage":"Connection error.","thinkingLevel":"off"}}
+{"type":"turn_end","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"ollama-dead","model":"dead-model","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"error","timestamp":1791403470353,"errorMessage":"Connection error.","thinkingLevel":"off"},"toolResults":[]}
+{"type":"agent_end","messages":[],"willRetry":true}
+{"type":"auto_retry_start","attempt":1,"maxAttempts":3,"delayMs":2000,"errorMessage":"Connection error."}
+{"type":"entry_appended","entry":{"type":"context_edit","id":"e7f5f7ff","parentId":"e84a5d1a","timestamp":"2026-10-07T20:04:30.386Z","targetId":"e84a5d1a","replacement":null}}
+{"type":"agent_start"}
+{"type":"turn_start"}
+{"type":"message_start","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"ollama-dead","model":"dead-model","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"error","timestamp":1791403472390,"errorMessage":"Connection error.","thinkingLevel":"off"}}
+{"type":"message_end","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"ollama-dead","model":"dead-model","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"error","timestamp":1791403472390,"errorMessage":"Connection error.","thinkingLevel":"off"}}
+{"type":"turn_end","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"ollama-dead","model":"dead-model","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"error","timestamp":1791403472390,"errorMessage":"Connection error.","thinkingLevel":"off"},"toolResults":[]}
+{"type":"agent_end","messages":[],"willRetry":true}
+{"type":"auto_retry_start","attempt":2,"maxAttempts":3,"delayMs":4000,"errorMessage":"Connection error."}
+{"type":"entry_appended","entry":{"type":"context_edit","id":"dc3b3a87","parentId":"9682d6c5","timestamp":"2026-10-07T20:04:32.394Z","targetId":"9682d6c5","replacement":null}}
+{"type":"agent_start"}
+{"type":"turn_start"}
+{"type":"message_start","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"ollama-dead","model":"dead-model","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"error","timestamp":1791403476397,"errorMessage":"Connection error.","thinkingLevel":"off"}}
+{"type":"message_end","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"ollama-dead","model":"dead-model","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"error","timestamp":1791403476397,"errorMessage":"Connection error.","thinkingLevel":"off"}}
+{"type":"turn_end","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"ollama-dead","model":"dead-model","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"error","timestamp":1791403476397,"errorMessage":"Connection error.","thinkingLevel":"off"},"toolResults":[]}
+{"type":"agent_end","messages":[],"willRetry":true}
+{"type":"auto_retry_start","attempt":3,"maxAttempts":3,"delayMs":8000,"errorMessage":"Connection error."}
+{"type":"entry_appended","entry":{"type":"context_edit","id":"1246237b","parentId":"6e72d598","timestamp":"2026-10-07T20:04:36.402Z","targetId":"6e72d598","replacement":null}}
+{"type":"agent_start"}
+{"type":"turn_start"}
+{"type":"message_start","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"ollama-dead","model":"dead-model","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"error","timestamp":1791403484410,"errorMessage":"Connection error.","thinkingLevel":"off"}}
+{"type":"message_end","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"ollama-dead","model":"dead-model","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"error","timestamp":1791403484410,"errorMessage":"Connection error.","thinkingLevel":"off"}}
+{"type":"turn_end","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"ollama-dead","model":"dead-model","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"error","timestamp":1791403484410,"errorMessage":"Connection error.","thinkingLevel":"off"},"toolResults":[]}
+{"type":"agent_end","messages":[],"willRetry":false}
+{"type":"auto_retry_end","success":false,"attempt":3,"finalError":"Connection error."}
+{"type":"agent_settled"}

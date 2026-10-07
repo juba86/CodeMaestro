@@ -5,6 +5,22 @@ import { tmpdir } from "os";
 import path from "path";
 import { approvalTimeoutMs, hookToken } from "./approvals";
 import { GITHUB_SANDBOX_DOMAINS, githubEnv } from "@/lib/github";
+import {
+  PI_INSTALL_HINT,
+  PiEventMapper,
+  ensureSettings,
+  findPiModel,
+  isValidPiModelId,
+  mapToolsForPi,
+  piBin,
+  piEnv,
+  piGatedTools,
+  piRequestedModel,
+  piSessionIdFor,
+  piSessionsDir,
+  syncOllamaModels,
+  type PiMapped,
+} from "./pi";
 
 export interface AssistantSessionRow {
   id: string;
@@ -23,6 +39,8 @@ export interface AssistantSessionRow {
 }
 
 const HOOK_PATH = path.join(process.cwd(), "scripts", "assistant-approval-hook.mjs");
+// pi approval gate (a pi extension; pi refuses to start when it fails to load).
+const PI_EXTENSION_PATH = path.join(process.cwd(), "scripts", "pi-approval-extension.ts");
 
 // POSIX single-quote a path for the shell that runs hook commands, so paths
 // with spaces or quotes (e.g. "/Users/Jane Doe/…") can't split the command.
@@ -136,11 +154,17 @@ function killTree(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals)
   }
 }
 
+// First stop signal per child when it isn't SIGINT (process-wide like `procs`).
+// pi runs bash commands in their own process groups and kills them only on
+// SIGTERM/SIGHUP; on SIGINT it dies at once and leaves a running command behind.
+const gs = globalThis as unknown as { __cmStopSignals?: WeakMap<ChildProcessWithoutNullStreams, NodeJS.Signals> };
+const stopSignals: WeakMap<ChildProcessWithoutNullStreams, NodeJS.Signals> = (gs.__cmStopSignals ??= new WeakMap());
+
 // SIGINT first: Claude Code ends an interrupted turn cleanly on SIGINT, while
 // SIGTERM (exit 143) leaves the turn unfinished in its session transcript.
 // Escalate if the process group doesn't exit.
 function terminate(child: ChildProcessWithoutNullStreams) {
-  killTree(child, "SIGINT");
+  killTree(child, stopSignals.get(child) ?? "SIGINT");
   const alive = () => child.exitCode === null && child.signalCode === null;
   const t1 = setTimeout(() => { if (alive()) killTree(child, "SIGTERM"); }, 3000);
   const t2 = setTimeout(() => { if (alive()) killTree(child, "SIGKILL"); }, 8000);
@@ -177,10 +201,15 @@ export function isMarker(externalId: string | null | undefined): boolean {
 }
 
 /**
- * Providers whose approval gate / sandbox CodeMaestro can enforce (through
- * Claude Code's PreToolUse hook + settings). Others run their tools directly.
+ * Providers whose approval gate CodeMaestro can enforce (Claude Code's
+ * PreToolUse hook, pi's approval extension). Others run their tools directly.
  */
 export function supportsApprovalGate(provider: string): boolean {
+  return provider === "claude" || provider === "pi";
+}
+
+/** Providers that can run inside CodeMaestro's sandbox (Claude Code only). */
+export function supportsSandbox(provider: string): boolean {
   return provider === "claude";
 }
 
@@ -283,6 +312,83 @@ function plainArgs(provider: string, session: AssistantSessionRow, prompt: strin
   return args;
 }
 
+// --- pi (every local Ollama model as a file-editing agent) ----------------------
+interface PiTurn {
+  args: string[];
+  env: Record<string, string>;
+  mapper: PiEventMapper;
+}
+
+/**
+ * Resolves model, tools, session id and approval gate for a pi turn. The
+ * prompt goes to stdin (a prompt argument starting with "@" is read as a file).
+ */
+function piTurn(session: AssistantSessionRow, models: Array<{ id: string; toolsOk: boolean }>, syncError?: string): PiTurn | { error: string } {
+  const requested = piRequestedModel(session.model);
+  const model = findPiModel(models, requested)?.id || requested || models.find((m) => m.toolsOk)?.id;
+  if (!model) {
+    return { error: syncError || "Kein Ollama-Modell mit Tool-Unterstützung gefunden — bitte ein Modell installieren oder in der Session angeben." };
+  }
+  if (!isValidPiModelId(model)) return { error: `Ungültige Modell-ID für pi: ${model}` };
+  if (!models.length && syncError) return { error: syncError };
+  // A fresh sync is authoritative: fail with a clear hint instead of letting
+  // pi send an unknown id (Ollama would only answer "model not found").
+  if (!syncError && !models.some((m) => m.id === model)) {
+    return { error: `Das Modell „${model}“ ist auf dem KI-Server (Ollama) nicht installiert oder kein Chat-Modell. Installieren mit: ollama pull ${model}` };
+  }
+  // Models without tool calling (per Ollama) run as plain chat.
+  const toolsOk = models.find((m) => m.id === model)?.toolsOk ?? true;
+  const tools = toolsOk ? mapToolsForPi(session.allowedTools || "", session.permissionMode) : [];
+  const gated = piGatedTools(session.approvalMode);
+  // Fail closed: the gate the session asked for must be loadable.
+  if (gated.length && !existsSync(PI_EXTENSION_PATH)) {
+    return { error: `Freigabe-Erweiterung fehlt (${PI_EXTENSION_PATH}). Ohne sie kann die Freigabe nicht erzwungen werden — Ausführung abgebrochen.` };
+  }
+
+  const args = [
+    "--mode", "json",
+    "--model", `ollama/${model}`,
+    "--session-dir", piSessionsDir(),
+    "--session-id", piSessionIdFor(session.id, session.externalId),
+  ];
+  if (tools.length) args.push("--tools", tools.join(","));
+  else args.push("--no-tools");
+  // Only our own gate: no discovered/built-in extensions, MCP, skills, prompt
+  // templates or themes, and nothing trust-gated from the project's .pi/.
+  args.push("--no-extensions");
+  if (gated.length) args.push("-e", PI_EXTENSION_PATH);
+  args.push("--no-mcp", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-approve");
+
+  const env: Record<string, string> = { ...piEnv() };
+  if (gated.length) {
+    env.PB_BASE_URL = internalBaseUrl();
+    env.PB_SESSION_ID = session.id;
+    env.PB_HOOK_TOKEN = hookToken();
+    env.PB_APPROVAL_TIMEOUT_MS = String(approvalTimeoutMs());
+    env.CM_PI_GATED = gated.join(",");
+  }
+  return { args, env, mapper: new PiEventMapper(model) };
+}
+
+// Token deltas are coalesced (~80 ms) so a long answer doesn't flood the run
+// buffer with one event per token; anything else flushes pending text first.
+function deltaCoalescer(emit: (e: NormalizedEvent) => void) {
+  let pending: { type: "text" | "thinking"; content: string } | null = null;
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+  const flush = () => {
+    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+    if (pending) { const p = pending; pending = null; emit({ type: p.type, content: p.content }); }
+  };
+  const delta = (type: "text" | "thinking", content: string) => {
+    if (pending && pending.type !== type) flush();
+    pending = pending ? { type, content: pending.content + content } : { type, content };
+    if (pending.content.length >= 2000) flush();
+    else if (!flushTimer) flushTimer = setTimeout(flush, 80);
+  };
+  const now = (e: NormalizedEvent) => { flush(); emit(e); };
+  return { delta, flush, now };
+}
+
 interface ClaudeStreamLine {
   type: string;
   subtype?: string;
@@ -314,7 +420,8 @@ export async function runTurn(
 ): Promise<TurnResult> {
   const plain = isPlainAgent(session.provider);
   const isGemini = session.provider === "gemini";
-  const kind: "claude" | "gemini" | "plain" = plain ? "plain" : isGemini ? "gemini" : "claude";
+  const isPi = session.provider === "pi";
+  const kind: "claude" | "gemini" | "plain" | "pi" = plain ? "plain" : isGemini ? "gemini" : isPi ? "pi" : "claude";
 
   // Connected GitHub account (Settings → GitHub): token + git credential
   // helper for every provider, so the agent can push and use gh. Empty when
@@ -323,12 +430,30 @@ export async function runTurn(
   const ghEnv = await githubEnv();
   const github = Object.keys(ghEnv).length > 0;
 
+  // pi: refresh the Ollama model list + pi's models.json/settings.json (cached;
+  // never throws — an outage keeps the last good list).
+  let piSync: Awaited<ReturnType<typeof syncOllamaModels>> | null = null;
+  let piSetupError: string | null = null;
+  if (kind === "pi") {
+    piSync = await syncOllamaModels();
+    // A model pulled after the cached sync: look again before reporting it missing.
+    const requested = piRequestedModel(session.model);
+    if (requested && !piSync.error && !findPiModel(piSync.models, requested)) {
+      piSync = await syncOllamaModels({ force: true });
+    }
+    try {
+      await ensureSettings();
+    } catch (err) {
+      piSetupError = `pi-Konfiguration konnte nicht geschrieben werden: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+
   if (opts.signal?.aborted) {
     return { externalId: session.externalId, costUsd: 0, isError: true };
   }
 
   // Fail closed: never run a provider without the approval gate the session
-  // asked for (only Claude Code's hooks can enforce it today).
+  // asked for (Claude Code's hooks / pi's extension can enforce it).
   if (session.approvalMode && session.approvalMode !== "off" && !supportsApprovalGate(session.provider)) {
     emit({
       type: "error",
@@ -336,6 +461,24 @@ export async function runTurn(
     });
     emit({ type: "done" });
     return { externalId: session.externalId, costUsd: 0, isError: true };
+  }
+
+  // pi: resolve model/tools/gate. pi has no sandbox, so a sandboxed session
+  // fails closed (read-only Gemini workers of sandboxed sessions are restricted
+  // by the orchestrator instead and keep running).
+  let pi: PiTurn | null = null;
+  if (kind === "pi" && piSync) {
+    const prep: PiTurn | { error: string } = session.sandbox && !supportsSandbox(session.provider)
+      ? { error: "Die Sandbox wird für pi nicht unterstützt. Bitte eine Session ohne Sandbox anlegen oder Claude Code verwenden." }
+      : piSetupError
+        ? { error: piSetupError }
+        : piTurn(session, piSync.models, piSync.error);
+    if ("error" in prep) {
+      emit({ type: "error", content: prep.error });
+      emit({ type: "done" });
+      return { externalId: session.externalId, costUsd: 0, isError: true };
+    }
+    pi = prep;
   }
 
   // Approval hook + sandbox are Claude-Code-specific (PreToolUse settings).
@@ -349,12 +492,14 @@ export async function runTurn(
       return { externalId: session.externalId, costUsd: 0, isError: true };
     }
   }
-  const bin = plain ? PLAIN_AGENTS[session.provider].bin : isGemini ? "gemini" : "claude";
+  const bin = plain ? PLAIN_AGENTS[session.provider].bin : isGemini ? "gemini" : pi ? piBin() : "claude";
   const args = plain
     ? plainArgs(session.provider, session, prompt)
     : isGemini
       ? geminiArgs(session, prompt)
-      : claudeArgs(session, prompt, settingsFile);
+      : pi
+        ? pi.args
+        : claudeArgs(session, prompt, settingsFile);
 
   const env: NodeJS.ProcessEnv = { ...process.env, ...ghEnv };
   if (isGemini && apiKey) {
@@ -373,8 +518,11 @@ export async function runTurn(
     env.PB_HOOK_TOKEN = hookToken();
     env.PB_APPROVAL_TIMEOUT_MS = String(approvalTimeoutMs());
   }
+  if (pi) Object.assign(env, pi.env);
 
-  const installHint = plain ? ` (nicht installiert? ${PLAIN_AGENTS[session.provider].install})` : "";
+  const installHint = plain
+    ? ` (nicht installiert? ${PLAIN_AGENTS[session.provider].install})`
+    : pi ? ` (nicht installiert? ${PI_INSTALL_HINT})` : "";
 
   let child: ChildProcessWithoutNullStreams;
   try {
@@ -385,9 +533,19 @@ export async function runTurn(
     return { externalId: session.externalId, costUsd: 0, isError: true };
   }
 
-  // The prompt is passed as an argument; close stdin so no CLI waits for
-  // piped input.
-  child.stdin.end();
+  if (pi) {
+    // pi reads the prompt from stdin until EOF (an argument starting with "@"
+    // would be read as a file). Ignore EPIPE when pi exits early.
+    child.stdin.on("error", () => {});
+    child.stdin.end(prompt);
+    // Stop with SIGTERM: pi then also kills a running bash tool (the session
+    // file stays resumable).
+    stopSignals.set(child, "SIGTERM");
+  } else {
+    // The prompt is passed as an argument; close stdin so no CLI waits for
+    // piped input.
+    child.stdin.end();
+  }
 
   trackProc(session.id, child);
   const onAbort = () => terminate(child);
@@ -402,21 +560,7 @@ export async function runTurn(
   const outDecoder = new StringDecoder("utf8");
   const errDecoder = new StringDecoder("utf8");
 
-  // Token deltas are coalesced (~80 ms) so a long answer doesn't flood the run
-  // buffer with one event per token; anything else flushes pending text first.
-  let pending: { type: "text" | "thinking"; content: string } | null = null;
-  let flushTimer: ReturnType<typeof setTimeout> | null = null;
-  const flushPending = () => {
-    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
-    if (pending) { const p = pending; pending = null; emit({ type: p.type, content: p.content }); }
-  };
-  const emitDelta = (type: "text" | "thinking", content: string) => {
-    if (pending && pending.type !== type) flushPending();
-    pending = pending ? { type, content: pending.content + content } : { type, content };
-    if (pending.content.length >= 2000) flushPending();
-    else if (!flushTimer) flushTimer = setTimeout(flushPending, 80);
-  };
-  const emitNow = (e: NormalizedEvent) => { flushPending(); emit(e); };
+  const { delta: emitDelta, flush: flushPending, now: emitNow } = deltaCoalescer(emit);
 
   // Messages whose text/thinking already streamed as deltas; their final
   // "assistant" event must not repeat it.
@@ -485,6 +629,20 @@ export async function runTurn(
     }
   };
 
+  const routePi = (mapped: PiMapped[]) => {
+    if (!pi) return;
+    for (const m of mapped) {
+      if (m.kind === "delta") emitDelta(m.type, m.content);
+      else emitNow(m.event);
+    }
+    if (pi.mapper.externalId) externalId = pi.mapper.externalId;
+    if (pi.mapper.isError) isError = true;
+  };
+  const handleLine = (line: string) => {
+    if (pi) routePi(pi.mapper.handleLine(line));
+    else handleClaudeLine(line);
+  };
+
   return await new Promise<TurnResult>((resolve) => {
     child.stdout.on("data", (chunk: Buffer) => {
       const text = outDecoder.write(chunk);
@@ -501,7 +659,7 @@ export async function runTurn(
       stdoutBuffer += text;
       const lines = stdoutBuffer.split("\n");
       stdoutBuffer = lines.pop() || "";
-      for (const line of lines) handleClaudeLine(line);
+      for (const line of lines) handleLine(line);
     });
 
     child.stderr.on("data", (chunk: Buffer) => {
@@ -542,6 +700,21 @@ export async function runTurn(
         // Mark the session started so follow-up turns can continue it (opencode).
         externalId = externalId || markerFor(session.provider, session.id);
         emit({ type: "result", content: "", costUsd: 0, isError });
+      } else if (pi) {
+        if (stdoutBuffer.trim()) handleLine(stdoutBuffer);
+        const stopped = !!opts.signal?.aborted || signal === "SIGINT" || signal === "SIGTERM" || signal === "SIGKILL" || code === 130 || code === 143;
+        // pi exits 0 even when the provider failed; a run that ended without
+        // its end-of-run records is reported as an error, not as success. A
+        // crash (non-zero exit) is reported before the turn's result so the
+        // result never claims success.
+        if (!stopped && !isError && (code !== 0 || !pi.mapper.sawEnd)) {
+          routePi(pi.mapper.incomplete(stderr.trim().slice(-2000) || (code !== 0 ? `${bin} exited with code ${code}` : "")));
+        }
+        routePi(pi.mapper.finish({ stopped }));
+        if (stopped && code === 0 && !isError) {
+          isError = true;
+          emitNow({ type: "error", content: "Gestoppt." });
+        }
       } else if (stdoutBuffer.trim()) {
         handleClaudeLine(stdoutBuffer);
       }

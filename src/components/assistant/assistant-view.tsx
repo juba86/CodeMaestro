@@ -7,7 +7,7 @@ import { PROVIDERS as CHAT_PROVIDERS } from "@/lib/ai/catalog";
 import {
   Plus, Send, Square, Trash2, Loader2, Terminal, FolderGit2, Network, Sparkles, FolderPlus, Folder,
   ChevronUp, ExternalLink, Play, ChevronDown, Maximize2, Minimize2, Paperclip, ShieldCheck, BookOpen,
-  Repeat, WifiOff,
+  Repeat, WifiOff, RefreshCw,
 } from "lucide-react";
 import { toast } from "sonner";
 import { MessageBubble } from "./message-bubble";
@@ -15,6 +15,7 @@ import { PendingGates } from "./approval-cards";
 import { LoopControls, loopBody } from "./loop-controls";
 import { runningLabel } from "./run-events";
 import { storedSessionId, useSessionRun } from "./use-session-run";
+import { PI_PROVIDER_LABEL, PiInstallHint, SMALL_CONTEXT, formatContext, sortPiModels, usePiStatus } from "./pi-status";
 import {
   DEFAULT_LOOP_OPTIONS,
   type BrowseState, type DevStatus, type LoopOptions, type PlannedSubtask, type SessionSummary,
@@ -26,10 +27,13 @@ const PROVIDERS = [
   { id: "opencode", label: "OpenCode" },
   { id: "codex", label: "Codex CLI" },
   { id: "aider", label: "Aider" },
+  { id: "pi", label: PI_PROVIDER_LABEL },
 ];
 
-// Approval-gate + sandbox are Claude-Code-specific (PreToolUse hooks).
-const APPROVAL_CAPABLE = new Set(["claude"]);
+// Approval gate: Claude Code (PreToolUse hook) and pi (tool_call extension).
+const APPROVAL_CAPABLE = new Set(["claude", "pi"]);
+// The sandbox is Claude Code's own settings feature.
+const SANDBOX_CAPABLE = new Set(["claude"]);
 
 type Mode = "chat" | "orchestrate" | "loop";
 
@@ -128,6 +132,15 @@ export function AssistantView() {
     approvalMode: "off" as "off" | "edits" | "all",
     sandbox: false,
   });
+
+  // pi runs the local AI server's models: pick from the synced list instead of
+  // typing an id. Defaults to the first file-editing model; a pick that is no
+  // longer synced falls back the same way.
+  const isPi = draft.provider === "pi";
+  const pi = usePiStatus(isPi && configOpen);
+  const piModels = pi.status ? sortPiModels(pi.status.models) : [];
+  const piModel = piModels.find((m) => m.id === draft.model) ?? piModels[0] ?? null;
+  const piBlocked = isPi && (!pi.status?.installed || !piModel);
 
   const threadRef = useRef<HTMLDivElement>(null);
   // Auto-scroll only while the user is at the bottom (not while reading back).
@@ -314,7 +327,13 @@ export function AssistantView() {
       const res = await fetch("/api/assistant/sessions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...draft, allowedTools: draft.allowedTools.join(",") }),
+        body: JSON.stringify({
+          ...draft,
+          model: isPi ? piModel?.id ?? "" : draft.model,
+          // Only Claude Code can sandbox; never store a flag the provider ignores.
+          sandbox: SANDBOX_CAPABLE.has(draft.provider) && draft.sandbox,
+          allowedTools: draft.allowedTools.join(","),
+        }),
       });
       const d = await res.json().catch(() => ({}));
       if (!res.ok) { toast.error(d.error || "Konnte Session nicht anlegen."); return; }
@@ -486,7 +505,12 @@ export function AssistantView() {
             aria-label="Provider"
             className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm"
             value={draft.provider}
-            onChange={(e) => setDraft({ ...draft, provider: e.target.value })}
+            onChange={(e) => {
+              const provider = e.target.value;
+              // pi model ids and free-text ids of the other CLIs don't carry over.
+              const keepModel = (provider === "pi") === (draft.provider === "pi");
+              setDraft({ ...draft, provider, model: keepModel ? draft.model : "" });
+            }}
           >
             {PROVIDERS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
           </select>
@@ -544,13 +568,70 @@ export function AssistantView() {
               <FolderPlus size={14} />
             </button>
           </div>
-          <input
-            className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm"
-            placeholder="Modell (optional, z.B. opus / sonnet)"
-            aria-label="Modell"
-            value={draft.model}
-            onChange={(e) => setDraft({ ...draft, model: e.target.value })}
-          />
+          {isPi ? (
+            <div className="space-y-1.5">
+              <div className="flex gap-1.5">
+                <select
+                  aria-label="Lokales Modell"
+                  className="flex-1 min-w-0 rounded-md border border-input bg-background px-2 py-1.5 text-sm disabled:opacity-60"
+                  value={piModel?.id ?? ""}
+                  onChange={(e) => setDraft({ ...draft, model: e.target.value })}
+                  disabled={piModels.length === 0}
+                >
+                  {piModels.length === 0 && (
+                    <option value="">{pi.loading ? "Lade lokale Modelle …" : "Keine lokalen Modelle gefunden"}</option>
+                  )}
+                  {piModels.some((m) => m.toolsOk) && (
+                    <optgroup label="Kann Dateien bearbeiten">
+                      {piModels.filter((m) => m.toolsOk).map((m) => (
+                        <option key={m.id} value={m.id}>{m.name} · {formatContext(m.contextWindow)}</option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {piModels.some((m) => !m.toolsOk) && (
+                    <optgroup label="Nur Text (keine Tools)">
+                      {piModels.filter((m) => !m.toolsOk).map((m) => (
+                        <option key={m.id} value={m.id}>{m.name} · {formatContext(m.contextWindow)} — nur Text</option>
+                      ))}
+                    </optgroup>
+                  )}
+                </select>
+                <button
+                  onClick={() => void pi.refresh(true)}
+                  disabled={pi.loading}
+                  className="px-2 py-1.5 rounded-md border border-input hover:bg-accent disabled:opacity-50 shrink-0"
+                  title="Modelle vom KI-Server neu synchronisieren"
+                  aria-label="Lokale Modelle neu synchronisieren"
+                >
+                  {pi.loading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                </button>
+              </div>
+              {pi.error && <p className="text-[11px] text-red-500">{pi.error}</p>}
+              {pi.status && !pi.status.installed && <PiInstallHint hint={pi.status.installHint} compact />}
+              {pi.status?.error && <p className="text-[11px] text-amber-500">{pi.status.error}</p>}
+              {piModel && (
+                <p className="text-[11px] text-muted-foreground">
+                  {piModel.toolsOk
+                    ? "Kann Dateien bearbeiten"
+                    : <span className="text-amber-500">Ohne Tool-Unterstützung — antwortet nur in Text, keine Datei-Edits</span>}
+                  {piModel.reasoning && " · Thinking"}
+                  {piModel.vision && " · Vision"}
+                  {" · "}
+                  <span className={piModel.contextWindow > 0 && piModel.contextWindow < SMALL_CONTEXT ? "text-amber-500" : undefined}>
+                    Kontext {formatContext(piModel.contextWindow)}
+                  </span>
+                </p>
+              )}
+            </div>
+          ) : (
+            <input
+              className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+              placeholder="Modell (optional, z.B. opus / sonnet)"
+              aria-label="Modell"
+              value={draft.model}
+              onChange={(e) => setDraft({ ...draft, model: e.target.value })}
+            />
+          )}
           <select
             aria-label="Permission-Mode"
             className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm"
@@ -578,6 +659,11 @@ export function AssistantView() {
           <p className="text-[11px] text-muted-foreground">
             Nur erlaubte Tools werden ausgeführt. Edit/Write/Bash nur aktivieren, wenn der Assistent Dateien ändern / Befehle ausführen soll.
           </p>
+          {isPi && (
+            <p className="text-[11px] text-muted-foreground">
+              pi: Bash(git *), Bash(gh *), WebSearch und WebFetch haben keine Wirkung (für git/gh „Bash“ aktivieren). Vom Permission-Mode wirkt nur „plan“ (nur lesende Tools).
+            </p>
+          )}
           {APPROVAL_CAPABLE.has(draft.provider) ? (
           <div className="space-y-1.5 rounded-md border border-border p-2">
             <label className="flex items-center gap-1.5 text-xs font-medium">
@@ -593,26 +679,33 @@ export function AssistantView() {
               <option value="edits">Datei-Änderungen bestätigen (Diff)</option>
               <option value="all">Änderungen + Befehle bestätigen</option>
             </select>
-            <label className="flex items-center gap-1.5 text-xs cursor-pointer">
-              <input
-                type="checkbox"
-                checked={draft.sandbox}
-                onChange={(e) => setDraft({ ...draft, sandbox: e.target.checked })}
-              />
-              Sandbox (Schreibzugriff auf Projekt begrenzen)
-            </label>
+            {SANDBOX_CAPABLE.has(draft.provider) ? (
+              <label className="flex items-center gap-1.5 text-xs cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={draft.sandbox}
+                  onChange={(e) => setDraft({ ...draft, sandbox: e.target.checked })}
+                />
+                Sandbox (Schreibzugriff auf Projekt begrenzen)
+              </label>
+            ) : (
+              <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-not-allowed">
+                <input type="checkbox" checked={false} disabled readOnly />
+                Sandbox nur mit Claude Code
+              </label>
+            )}
             <p className="text-[11px] text-muted-foreground">
               Bei aktivierter Freigabe zeigt der Assistent vor jedem Edit/Write{draft.approvalMode === "all" ? "/Bash" : ""} einen Diff bzw. Befehl, den du freigeben oder mit Hinweis ablehnen kannst.
             </p>
           </div>
           ) : (
             <p className="text-[11px] text-muted-foreground rounded-md border border-border p-2">
-              Freigabe-Gate &amp; Sandbox sind aktuell nur für Claude Code verfügbar. {PROVIDERS.find((p) => p.id === draft.provider)?.label} führt Dateiänderungen direkt im Projektordner aus.
+              Das Freigabe-Gate gibt es aktuell nur für Claude Code und pi, die Sandbox nur für Claude Code. {PROVIDERS.find((p) => p.id === draft.provider)?.label} führt Dateiänderungen direkt im Projektordner aus.
             </p>
           )}
           <button
             onClick={createSession}
-            disabled={creating || !draft.cwd}
+            disabled={creating || !draft.cwd || piBlocked}
             className="w-full flex items-center justify-center gap-1 px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-sm hover:bg-primary/90 disabled:opacity-50"
           >
             {creating ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />} Session starten

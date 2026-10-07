@@ -146,8 +146,8 @@ export const knowledgeSearchSchema = z.object({
 // --- Assistant (code-assistant) Routes ---
 
 export const createAssistantSessionSchema = z.object({
-  provider: z.enum(["claude", "gemini", "opencode", "codex", "aider"]).optional().default("claude"),
-  model: z.string().max(100).optional().default(""),
+  provider: z.enum(["claude", "gemini", "pi", "opencode", "codex", "aider"]).optional().default("claude"),
+  model: z.string().max(200).optional().default(""),
   title: z.string().max(200).optional().default(""),
   cwd: z.string().max(1000).optional().default(""),
   permissionMode: z.enum(["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"]).optional().default("default"),
@@ -294,8 +294,8 @@ export const telegramConfigSchema = z.object({
   cwd: z.string().max(1000).optional(),
   permissionMode: z.enum(["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"]).optional(),
   approvalMode: z.enum(["off", "edits", "all"]).optional(),
-  provider: z.enum(["claude", "gemini", "opencode", "codex", "aider"]).optional(),
-  model: z.string().max(100).optional(),
+  provider: z.enum(["claude", "gemini", "pi", "opencode", "codex", "aider"]).optional(),
+  model: z.string().max(200).optional(),
   useKnowledge: z.boolean().optional(),
 });
 
