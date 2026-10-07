@@ -1,13 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
 import { orchestrateRunSchema, formatZodError } from "@/lib/validation/schemas";
-import { executePlan, type OrchEvent } from "@/lib/assistant/orchestrator";
+import { orchestrateRun } from "@/lib/assistant/orchestrator";
 import { resolveWorkdir } from "@/lib/assistant/security";
-import type { AssistantSessionRow } from "@/lib/assistant/runner";
+import { SessionBusyError, isSessionBusy } from "@/lib/assistant/run-hub";
+import { launchRun, persistUserMessage, toSessionRow } from "@/lib/assistant/session-run";
 
 export const runtime = "nodejs";
-export const maxDuration = 3600;
 
+/**
+ * Hybrid orchestration: executes a (user-edited) plan as a server-side run
+ * (202 + runId); events via GET /api/assistant/sessions/[id]/events.
+ */
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -30,55 +34,34 @@ export async function POST(
   if (!session) {
     return NextResponse.json({ error: "Not found", code: "NOT_FOUND" }, { status: 404 });
   }
-  if (session.status === "running") {
-    return NextResponse.json(
-      { error: "In dieser Session läuft bereits eine Aufgabe. Bitte erst stoppen.", code: "SESSION_BUSY" },
-      { status: 409 }
-    );
+  if (isSessionBusy(id)) {
+    return NextResponse.json({ error: new SessionBusyError().message, code: "SESSION_BUSY" }, { status: 409 });
   }
   try {
     await resolveWorkdir(session.cwd);
   } catch (err) {
-    return NextResponse.json({ error: err instanceof Error ? err.message : "Invalid cwd", code: "INVALID_CWD" }, { status: 400 });
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Invalid working directory", code: "INVALID_CWD" },
+      { status: 400 }
+    );
   }
 
-  await prisma.assistantMessage.create({ data: { sessionId: id, role: "user", content: prompt } });
-  await prisma.assistantSession.update({
-    where: { id },
-    data: { status: "running", title: session.title || `[orchestrate] ${prompt.slice(0, 60)}` },
-  });
-
-  const sessionRow: AssistantSessionRow = {
-    id: session.id, externalId: session.externalId, provider: session.provider,
-    model: session.model, cwd: session.cwd, permissionMode: session.permissionMode, allowedTools: session.allowedTools, sandbox: session.sandbox,
-  };
-
-  const encoder = new TextEncoder();
-  const stream = new ReadableStream({
-    async start(controller) {
-      const send = (e: OrchEvent) => {
-        try { controller.enqueue(encoder.encode(`data: ${JSON.stringify(e)}\n\n`)); } catch { /* client gone */ }
-      };
-      let result;
-      try {
-        result = await executePlan(sessionRow, prompt, subtasks, send, clientProviders, plannerWorkerId);
-      } catch (err) {
-        send({ type: "error", content: err instanceof Error ? err.message : "Run failed" });
-        result = { costUsd: 0, isError: true, records: [] };
-      }
-      if (result.records.length) {
-        await prisma.assistantMessage.createMany({ data: result.records.map((r) => ({ sessionId: id, ...r })) });
-      }
-      await prisma.assistantSession.update({
-        where: { id },
-        data: { status: result.isError ? "error" : "idle", totalCostUsd: { increment: result.costUsd || 0 } },
-      });
-      try { controller.enqueue(encoder.encode("data: [DONE]\n\n")); } catch { /* client gone */ }
-      try { controller.close(); } catch { /* already closed */ }
-    },
-  });
-
-  return new Response(stream, {
-    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" },
-  });
+  try {
+    await persistUserMessage(id, prompt);
+    const row = toSessionRow(session);
+    const run = await launchRun({
+      sessionId: id,
+      kind: "orchestrate",
+      origin: "pwa",
+      title: `[orchestrate] ${prompt}`,
+      work: (ctx) => orchestrateRun(ctx, row, prompt, { subtasks, clientProviders, plannerWorkerId }),
+    });
+    return NextResponse.json({ runId: run.info.runId, startedAt: run.info.startedAt }, { status: 202 });
+  } catch (err) {
+    if (err instanceof SessionBusyError) {
+      return NextResponse.json({ error: err.message, code: "SESSION_BUSY" }, { status: 409 });
+    }
+    console.error("[POST orchestrate/run]", err);
+    return NextResponse.json({ error: "Internal server error", code: "INTERNAL_ERROR" }, { status: 500 });
+  }
 }

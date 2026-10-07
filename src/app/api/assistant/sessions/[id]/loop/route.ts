@@ -1,18 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
-import { orchestrateSchema, formatZodError } from "@/lib/validation/schemas";
-import { orchestrateRun } from "@/lib/assistant/orchestrator";
+import { assistantLoopSchema, formatZodError } from "@/lib/validation/schemas";
 import { resolveWorkdir } from "@/lib/assistant/security";
 import { SessionBusyError, isSessionBusy } from "@/lib/assistant/run-hub";
-import { launchRun, persistUserMessage, toSessionRow } from "@/lib/assistant/session-run";
+import { startLoopRun } from "@/lib/assistant/loop";
 
 export const runtime = "nodejs";
 
 /**
- * Auto orchestration: plans the task, runs the subtasks on the routed workers
- * and synthesizes — as a server-side run (202 + runId). Clients follow it via
- * GET /api/assistant/sessions/[id]/events; Stop aborts it between and within
- * subtasks.
+ * Starts Loop mode: the task is repeated server-side until the agent outputs
+ * <promise>TEXT</promise>, the iteration cap is hit, or the user stops it.
+ * Returns 202 + runId immediately; clients follow the run via
+ * GET /api/assistant/sessions/[id]/events, so closing the window never stops it.
  */
 export async function POST(
   req: NextRequest,
@@ -26,11 +25,10 @@ export async function POST(
   } catch {
     return NextResponse.json({ error: "Invalid JSON body", code: "INVALID_JSON" }, { status: 400 });
   }
-  const parsed = orchestrateSchema.safeParse(body);
+  const parsed = assistantLoopSchema.safeParse(body);
   if (!parsed.success) {
     return NextResponse.json({ error: formatZodError(parsed.error), code: "VALIDATION_ERROR" }, { status: 400 });
   }
-  const { prompt, preference, clientProviders, plannerWorkerId } = parsed.data;
 
   const session = await prisma.assistantSession.findUnique({ where: { id } });
   if (!session) {
@@ -51,21 +49,13 @@ export async function POST(
   }
 
   try {
-    await persistUserMessage(id, prompt);
-    const row = toSessionRow(session);
-    const run = await launchRun({
-      sessionId: id,
-      kind: "orchestrate",
-      origin: "pwa",
-      title: `[orchestrate] ${prompt}`,
-      work: (ctx) => orchestrateRun(ctx, row, prompt, { preference, clientProviders, plannerWorkerId }),
-    });
+    const run = await startLoopRun(id, parsed.data, "pwa");
     return NextResponse.json({ runId: run.info.runId, startedAt: run.info.startedAt }, { status: 202 });
   } catch (err) {
     if (err instanceof SessionBusyError) {
       return NextResponse.json({ error: err.message, code: "SESSION_BUSY" }, { status: 409 });
     }
-    console.error("[POST orchestrate]", err);
+    console.error("[POST loop]", err);
     return NextResponse.json({ error: "Internal server error", code: "INTERNAL_ERROR" }, { status: 500 });
   }
 }
