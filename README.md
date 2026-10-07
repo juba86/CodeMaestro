@@ -16,6 +16,7 @@ working directory — from a self-hosted, phone-friendly PWA you control, with a
 [![Tailwind v4](https://img.shields.io/badge/Tailwind-v4-38bdf8?logo=tailwindcss&logoColor=white)](https://tailwindcss.com)
 [![PWA](https://img.shields.io/badge/PWA-installable-5a0fc8?logo=pwa&logoColor=white)](#-code-assistant)
 [![Self-hosted](https://img.shields.io/badge/Self--hosted-private--first-2ea44f)](#-security)
+[![CI](https://img.shields.io/badge/CI-lint%20·%20typecheck%20·%20tests%20·%20build-2ea44f)](./.github/workflows/ci.yml)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](./CONTRIBUTING.md)
 
 <br>
@@ -25,9 +26,9 @@ working directory — from a self-hosted, phone-friendly PWA you control, with a
 </div>
 
 > [!WARNING]
-> **Run it private.** The Code Assistant, Orchestrator, and Telegram bridge execute shell commands on the host. Deploy only on `localhost` or a trusted private network (e.g. Tailscale/VPN) — **never** expose it to the public internet. See [Security](#-security).
+> **Run it private.** The Code Assistant, Orchestrator, and Telegram bridge execute shell commands on the host. Deploy only on `localhost` or a trusted private network — ideally your tailnet over HTTPS (see [docs/TAILSCALE_HTTPS.md](./docs/TAILSCALE_HTTPS.md)) — **never** expose it to the public internet. See [Security](#-security).
 
-CodeMaestro turns AI coding from a single-terminal habit into an operable system: structure prompts with proven techniques, lint and score them, test them across **Claude, Gemini, and local Ollama models** side by side, ground them in your own knowledge base, and — when you're ready to *act* — hand the task to a planner that routes each subtask to the best model and applies real file changes, gated by diffs you approve. It runs entirely on infrastructure you control, installs as a phone-friendly PWA, and can even be driven from **Telegram** when you're away from your network.
+CodeMaestro turns AI coding from a single-terminal habit into an operable system: structure prompts with current Anthropic-recommended techniques, lint them for the model you target, test them across **Claude, Gemini, and local Ollama models** side by side, ground them in your own knowledge base, and — when you're ready to *act* — hand the task to an orchestra of agents whose roles you assign in an org chart, or let one agent **loop** on it until it's verifiably done. Work runs on the server, so you can close the window or lock your phone and pick up where it is — approvals and questions included. It runs entirely on infrastructure you control, installs as an HTTPS PWA on every device in your tailnet, notifies you by push, and can be driven from **Telegram** when you're away.
 
 ---
 
@@ -49,68 +50,68 @@ CodeMaestro turns AI coding from a single-terminal habit into an operable system
 
 ## Why CodeMaestro
 
-- **Command a fleet, not a terminal** — drive Claude Code and Gemini CLI from the browser or your phone, with session resume, live tool streaming, and a dev-server launcher. Better than a single remote shell.
-- **Reachable from anywhere** — installable PWA over Tailscale/VPN, plus an optional **Telegram bridge** so you can kick off and approve work from your phone with no network access at all.
-- **Orchestrate by strength** — a planner decomposes big tasks and routes each subtask to the best model: frontier models for hard reasoning, large-context models for sweeps, free local models for isolated work.
-- **You stay in command** — opt-in approval gate shows a diff (or the shell command) before any Edit/Write/Bash, with approve / deny / **deny-with-reason** steering, plus a sandbox that confines writes to the project.
-- **Model-agnostic by design** — Claude, Gemini, and any local Ollama model, with live model lists pulled from each provider so you're never stuck on stale IDs.
-- **Private-first** — self-hosted, SQLite storage, local embeddings. Your prompts, keys, and code never leave your machine/network.
+- **Command a fleet, not a terminal** — drive Claude Code, Gemini CLI and **local models (via pi)** from the browser or your phone, with live streaming, session resume and a dev-server launcher.
+- **Close the window, keep working** — every turn, loop and orchestration runs on the server; the UI re-attaches when you come back and restores pending approvals and questions. Push notifications tell you when a decision is needed.
+- **Orchestrate by roles** — an interactive **org chart** decides which model plays which role (conductor, architect, coder, reviewer, tester, …), with presets and an automatic review loop.
+- **Loops that know when to stop** — repeat a task until the agent prints a completion promise, hits an iteration cap, or reports it's blocked.
+- **You stay in command** — approval gate with diffs (or the shell command) before Edit/Write/Bash, deny-with-reason steering, sandbox, CSRF protection and an optional Tailscale identity allowlist.
+- **Private-first** — self-hosted, SQLite storage, local embeddings, secrets encrypted at rest. Your prompts, keys and code stay on your machines.
 
 ---
 
 ## Features
 
 ### 🛠️ Prompt Builder
-- Structured, XML-based prompt model (instructions, context, constraints, examples, task, audience, output format).
-- **14 prompting techniques** with guidance and auto-recommendation — Chain-of-Thought, Zero-/Few-Shot CoT, Self-Consistency, Tree-of-Thoughts, ReAct, Self-Refine, Role Prompting, Structured Output, Meta-Prompting, Constitutional, Step-Back, Analogical, Decomposition.
-- **Multi-agent "swarm" config** for designing hierarchical/mesh/ring/star agent topologies.
-- Live **XML editor** with tag palette and two-way sync to the structured model.
-- **Load & update saved projects** in place — open a library entry back into the builder, edit, and save changes back as a new version.
+- Structured, XML-based prompt model (instructions, context, constraints, examples, task, audience, output format) with a live XML editor and two-way sync.
+- **24 techniques**, grouped and sourced from Anthropic's current guidance — including agentic **Verification Loop**, **Explore → Plan → Code → Commit**, **Evaluator-Optimizer**, **Completion-Promise Loop (Ralph)**, **Definition of Done**, **Context Engineering**, **Long-Context Grounding**, **Subagent Orchestration**, **Interview → Spec** and **Scoped Autonomy** — each with an insertable snippet and a source link. Legacy techniques (e.g. "think step by step") are marked for models with adaptive thinking.
+- **Model-aware**: recommendations, linter and the AI generator/refiner adapt to the target model (Claude 5 family, prefill/sampling support, reasoning-extraction risk).
+- 23 built-in templates, including 8 for agentic coding with Claude Code (TDD loop, repro-first bug fix, refactor with verification, autonomous loop with a progress file, CLAUDE.md generator, …).
+- Hand a prompt to the Code Assistant — as a single task or **as a loop**.
 
 ### ✅ Prompt Quality Linter
-- Deterministic scoring (A–F + 0–100) on completeness, specificity, example quality, technique alignment, and XML well-formedness.
-- Actionable warnings (missing constraints, vague wording, no output format, examples without reasoning) and a live token/word estimate — no API calls, runs on every keystroke.
+- Deterministic score (A–F, 0–100) on every keystroke — no API calls.
+- Modern rules with sources: unsupported request params (prefill, sampling on Claude 5), reasoning-extraction risk, obsolete "think step by step", emphasis overload, negative-only instructions, rules without reasons, missing definition of done / verification step, long input after the query, example variety, length guidance, unbounded loops.
 
 ### 🧪 Playground & Evaluation
-- Run a prompt against any provider/model; **Compare Mode** runs it across Claude, Gemini, and local Ollama at once.
-- Per-run **latency, token, and cost** readout.
-- **Test-case framework**: define inputs + expected outputs (contains / regex / equals), run them as a regression suite, see pass/fail.
+- Run a prompt against any provider/model, compare several side by side, with latency, token and cost readout.
+- **Test cases** (contains / regex / equals) as a regression suite.
 
 ### 📚 Library, Versions & Export
-- Save prompts with tags; full **version history** with a colored **diff viewer** between versions.
-- One-click **export** to Text, Markdown, JSON, YAML, **Python**, and **TypeScript** (with a ready-to-use `buildPrompt()` function).
-- Built-in and custom **templates** with `{{placeholder}}` substitution.
+- Tags, full version history with a diff viewer, export to Text, Markdown, JSON, YAML, Python and TypeScript.
 
 ### 🧠 Knowledge Base (RAG)
-- Drop in documents; they're chunked and embedded **locally via Ollama (bge-m3)** — nothing leaves the server.
-- Semantic search over your knowledge, **"Insert relevant context"** straight into a prompt's context field, and an opt-in **RAG toggle** that auto-augments Code Assistant (and Telegram) turns with the most relevant chunks.
-- One shared retrieval path for every channel (search UI, Code Assistant, Telegram) — same model, same scoring, graceful no-op when the index is empty or Ollama is down.
+- Documents are chunked and embedded **locally via Ollama** (bge-m3); semantic search, "insert relevant context", and an opt-in RAG toggle for assistant and Telegram turns.
 
 ### 🤖 Code Assistant
-- Drive **Claude Code** (`claude -p`) and **Gemini CLI** (`gemini -p`) from the browser, on a real working directory.
-- Live streaming of assistant text and **tool calls** (Read/Grep/Edit/Bash…), persisted transcripts, **session list & resume**, cost tracking.
-- **Approval gate & sandbox**: optionally require approval before every Edit/Write (and Bash) — CodeMaestro streams a **diff** or the **shell command** to the UI; approve, deny, or **deny-with-reason** to steer the model mid-run. An opt-in sandbox confines writes to the working directory.
-- **Hardened**: working-directory allowlist with path-traversal guards, conservative tool allowlist (read-only by default; file edits opt-in), per-session permission mode.
-- **From anywhere**: installable PWA with a maximizable full-screen chat, file upload, and a one-tap dev-server launcher (start the app, get the link/port, stop it). Survives mobile standby — work keeps running server-side and the result is shown when you return.
+- Drive **Claude Code**, **Gemini CLI**, **pi** (local models), OpenCode, Codex CLI and Aider on a real working directory, with token-by-token streaming of text and tool calls.
+- **Resumable runs**: work runs server-side; the UI re-attaches after closing the window, reloads, standby or network changes and replays everything it missed (see [docs/ASSISTANT_RUNS.md](./docs/ASSISTANT_RUNS.md)).
+- **Approval gate**: diff or shell command before Edit/Write/Bash, overwrite warnings, expiry countdown, approve / deny / deny-with-reason (the reason goes to the model). Interactive questions and plan approval as clickable cards. Pending decisions wait up to 30 minutes and survive a closed window.
+- **Loop mode**: repeat a task until the agent prints `<promise>DONE</promise>`, hits the iteration cap, or reports `<promise>BLOCKED</promise>`; optional pause between iterations; fresh context per iteration with a progress file ("Ralph") or a continued conversation.
+- Permission modes incl. `auto` and `dontAsk`, tool presets (incl. `Git` / `GitHub CLI` only), sandbox, file upload, dev-server launcher (optionally exposed over HTTPS via `tailscale serve`).
+
+### 🧩 Orchestra — role-based multi-model orchestration
+- An **interactive org chart** (`/orchestra`): the conductor plans and summarizes; roles — Architekt, Coder, Reviewer, Tester, Recherche, Doku, or your own — each get a model by drag & drop or tap, with instructions and a file-edit capability.
+- Presets **Qualität / Ausgewogen / Lokal & günstig** are computed from the models actually available; live validation flags e.g. a file-editing role assigned to a text-only model.
+- The planner assigns every subtask a role; an **evaluator-optimizer review loop** lets the reviewer check the coder's work and request fixes (up to three rounds). Auto, Hybrid (review the plan first) and Wizard modes; live view of which role is working.
+
+### 🦙 Local models via pi
+- With the [pi coding agent](https://pi.dev) installed, **every model on your Ollama server** is synced automatically (tools, thinking, vision and the real context window) and can **edit files** — in the assistant and as orchestra workers — with the same approval gate. CodeMaestro keeps its own pi config; `~/.pi` is untouched.
+
+### 🐙 GitHub
+- Connect your account in Settings (device flow or token). Assistant runs get working `git push` / `gh` credentials (token encrypted at rest, never sent to the browser), SSH remotes are rewritten to HTTPS, commits can use your GitHub identity, and sandboxed runs are allowed to reach GitHub.
 
 ### 📲 Telegram Bridge *(optional)*
-- Drive the Code Assistant from **Telegram** when you're away from your Tailscale/VPN — same runner, sessions, and approval engine as the PWA, no public webhook required (uses long-polling).
-- **Configured entirely in the app** (Settings → Telegram): bot token (kept **server-side**, never in the browser), an **allowed-chat-ID allowlist**, working directory, permission/approval mode, provider/model, and the RAG toggle. Off by default.
-- **Inline approval buttons** — approve or deny an edit/Bash command right from the chat, with the diff previewed inline.
-- **Per-chat sessions**, **image upload** (send a photo and the assistant reads/processes it), and commands: `/new`, `/sessions`, `/kb <query>`, `/status`, `/stop`, `/whoami`, `/help`.
-- Auto-starts on server boot when enabled, so the assistant stays reachable after a restart.
+- Drive the assistant from Telegram via long-polling (no public webhook): approvals, questions and plan approval as inline buttons, `/loop`, `/stop`, `/kb`, image upload. Turns run detached, so buttons and `/stop` work while a turn runs.
 
-### 🧩 Multi-Model Orchestrator
-- Give it a larger task; a **planner** decomposes it and routes each subtask to the **best model for the job** (frontier models for hard reasoning, large-context models for broad sweeps, free local models for isolated work).
-- Three modes: **Auto** (fully automatic), **Hybrid** (review the plan and reassign models before running), and **Wizard** (answer a few project questions that bias the plan).
-- Executes across the shared working directory and synthesizes a final summary.
+### 📱 PWA over HTTPS
+- `npm run start:tailnet` + `npm run tailscale:up` serve CodeMaestro at `https://<machine>.<tailnet>.ts.net` with a real certificate, so it installs as an app on desktop, Android and iOS. Offline page, update toast, **Web Push** for approvals, questions and finished runs.
 
 ### 🔌 Providers & Auth — *a tool for everything*
 
-- **Dedicated:** **Claude** (Anthropic SDK) and **Gemini** (Google GenAI) via API key *or* their logged-in CLI (**OAuth/Login**, no key).
-- **Local:** **Ollama** and **LM Studio** auto-discovered (no key), plus a **Custom OpenAI-compatible endpoint** (any base URL — Jan, llama.cpp, vLLM, LocalAI, Azure OpenAI…).
-- **Ollama Cloud:** hosted Ollama models (`ollama.com`) via API key — live model discovery, or just type a `…-cloud` model id in Settings.
-- **Code-Assistant CLI agents:** drive **Claude Code**, **Gemini CLI**, **OpenCode**, **Codex CLI**, and **Aider** on a real working directory.
+- **Dedicated:** **Claude** (Anthropic SDK; current models incl. Opus 5.5 with effort, prompt caching and refusal fallback) and **Gemini** — via API key *or* their logged-in CLI.
+- **Local:** **Ollama** (chat + pi agents) and **LM Studio**, plus a **custom OpenAI-compatible endpoint**.
+- **Ollama Cloud** via API key.
+- **Code-Assistant CLI agents:** Claude Code, Gemini CLI, pi, OpenCode, Codex CLI, Aider.
 
 <details>
 <summary><b>Full provider matrix</b> (8 cloud APIs + locals + CLI agents)</summary>
@@ -123,7 +124,7 @@ CodeMaestro turns AI coding from a single-terminal habit into an operable system
 | **OpenAI-compatible** | OpenAI, OpenRouter, Groq, DeepSeek, Mistral, xAI/Grok, Together, Perplexity | API key, with live `/models` discovery |
 | **Local** | Ollama, LM Studio | auto-discovered, no key |
 | **Custom** | any OpenAI-compatible base URL (Jan, llama.cpp, vLLM, LocalAI, Azure OpenAI…) | base URL (+ optional key) |
-| **CLI agents** | Claude Code, Gemini CLI, OpenCode, Codex CLI, Aider | each uses its own login/config; inert with an install hint until present |
+| **CLI agents** | Claude Code, Gemini CLI, pi, OpenCode, Codex CLI, Aider | each uses its own login/config; inert with an install hint until present |
 
 New providers are catalog-driven — adding one is a few lines in `src/lib/ai/catalog.ts`.
 
@@ -156,9 +157,10 @@ New providers are catalog-driven — adding one is a few lines in `src/lib/ai/ca
 ## Getting Started
 
 ### Prerequisites
-- Node.js **≥ 20.9** (Node 22 recommended)
-- For local models: [Ollama](https://ollama.com) running (default `http://localhost:11434`)
+- Node.js **≥ 20.9** (Node 22 recommended; pi needs ≥ 22.19)
+- For local models: [Ollama](https://ollama.com) (default `http://localhost:11434`), optionally the [pi coding agent](https://pi.dev): `npm install -g --ignore-scripts @earendil-works/pi-coding-agent`
 - For the Code Assistant: [Claude Code](https://claude.com/claude-code) and/or [Gemini CLI](https://github.com/google-gemini/gemini-cli) installed and authenticated
+- For HTTPS/PWA on your devices: [Tailscale](https://tailscale.com) with MagicDNS and HTTPS certificates enabled
 - For the Telegram bridge *(optional)*: a bot token from [@BotFather](https://t.me/BotFather)
 
 ### Install & run
@@ -167,7 +169,7 @@ git clone https://github.com/Muchel187/CodeMaestro.git
 cd CodeMaestro
 npm install
 
-cp .env.example .env          # then edit as needed
+cp .env.example .env          # DATABASE_URL="file:./dev.db" = <project root>/dev.db
 npx prisma migrate deploy     # create the SQLite schema
 npx prisma generate
 
@@ -176,86 +178,108 @@ npm run dev                   # http://localhost:3000
 npm run build && npm start
 ```
 
-API keys can be entered in the in-app **Settings** page (stored client-side) or set in `.env` — no key is required for Ollama or for Claude/Gemini when using CLI logins.
+### HTTPS on your tailnet (installable PWA)
+```bash
+npm run build
+npm run start:tailnet         # binds 127.0.0.1 — only tailscale serve + local processes reach it
+npm run tailscale:up          # tailscale serve --bg --https=443 http://127.0.0.1:3000
+# → https://<machine>.<tailnet>.ts.net — open it on any device and install the app
+```
+Step-by-step guide incl. systemd units, iOS/Android install and push notifications: [docs/TAILSCALE_HTTPS.md](./docs/TAILSCALE_HTTPS.md).
+
+API keys can be entered in **Settings** (stored client-side, encrypted with Web Crypto over HTTPS) or set in `.env` — no key is required for Ollama or for Claude/Gemini when using CLI logins.
 
 ---
 
 ## Configuration
 
-All environment variables are optional; sensible defaults apply.
+All environment variables are optional; sensible defaults apply. Put them in `.env` (Prisma and the seed read `.env`, not `.env.local`). See [`.env.example`](./.env.example) for comments.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DATABASE_URL` | `file:./dev.db` | SQLite database location |
-| `ANTHROPIC_API_KEY` | — | Claude API key (fallback if not set in Settings) |
-| `GOOGLE_API_KEY` | — | Gemini API key (fallback) |
-| `GEMINI_API_KEY` | — | Used by the Gemini CLI worker when not using OAuth login |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama daemon endpoint |
+| `DATABASE_URL` | `file:./dev.db` | SQLite database (relative to the project root) |
+| `ANTHROPIC_API_KEY` / `GOOGLE_API_KEY` / `GEMINI_API_KEY` | — | Server-side fallback keys |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama endpoint (chat, embeddings, pi model sync) |
 | `OLLAMA_EMBED_MODEL` | `bge-m3:latest` | Embedding model for the knowledge base |
-| `ASSISTANT_ALLOWED_DIRS` | parent of the app dir | Colon-separated roots the Code Assistant may operate in |
+| `OLLAMA_API_KEY` | — | Ollama Cloud |
+| `ASSISTANT_ALLOWED_DIRS` | parent of the app dir | Colon-separated roots the assistant may work in (restart after changes) |
+| `ASSISTANT_APPROVAL_TIMEOUT_SEC` | `1800` | How long approvals/questions wait before auto-deny |
+| `CODEMAESTRO_TAILSCALE_USERS` | — | Identity allowlist for `/api` (Tailscale logins, `*` = any tailnet user) |
+| `CODEMAESTRO_ALLOWED_ORIGINS` | — | Extra origins allowed to send state-changing API requests |
+| `CODEMAESTRO_PUSH_SUBJECT` | project URL | VAPID contact for Web Push |
+| `CODEMAESTRO_DEV_TAILSCALE_SERVE` | — | `1` = expose launched dev servers via `tailscale serve` (HTTPS links) |
+| `CODEMAESTRO_DEV_ORIGINS` | — | Extra hosts `next dev` accepts HMR from |
+| `CODEMAESTRO_INTERNAL_URL` | `http://127.0.0.1:$PORT` | URL the approval hook calls back |
+| `CODEMAESTRO_SECRET` | auto key file | Key for encrypting stored secrets (else `.codemaestro/secret.key` — back it up) |
+| `GITHUB_OAUTH_CLIENT_ID` | — | OAuth App client ID for "Mit GitHub verbinden" (device flow) |
+| `PI_BIN` / `PI_OLLAMA_CONTEXT_LENGTH` / `CODEMAESTRO_PI_AGENT_DIR` | `pi` / `32768` / `.codemaestro/pi-agent` | pi binary, assumed Ollama context, pi config dir |
 
-> The **Telegram bridge** needs no environment variables — it's configured entirely in **Settings → Telegram**, and the bot token is stored server-side only.
+> The **Telegram bridge** and the **GitHub connection** are configured in **Settings**; tokens are stored server-side only.
 
 ---
 
 ## Architecture
 
 ```
-Next.js App (App Router)
-├─ UI: Builder · Library · Templates · Playground · Knowledge · Assistant · Settings
+Next.js App (App Router, React 19, Tailwind v4)
+├─ UI: Start · Assistant · Orchester · Builder · Bibliothek · Vorlagen · Playground · Wissensbasis · Einstellungen
+│      (design system in docs/DESIGN.md; ⌘K palette, mobile tab bar, activity center)
+├─ src/proxy.ts                  CSRF guard + optional Tailscale identity allowlist for /api
 ├─ API routes
-│  ├─ /api/ai/*                  chat · models · validate   (Claude / Gemini / Ollama)
-│  ├─ /api/prompts, /templates, /test-results, /knowledge
-│  └─ /api/assistant/*           sessions · message (SSE) · orchestrate · workspaces · telegram
+│  ├─ /api/ai/*                  chat · models · validate
+│  ├─ /api/assistant/*           sessions · message/loop/orchestrate (202 + runId) · events (SSE) · approvals · pi · activity
+│  ├─ /api/orchestra             org chart config + presets
+│  ├─ /api/github · /api/push    account connection · Web Push
+│  └─ /api/prompts, /templates, /test-results, /knowledge
 ├─ lib
+│  ├─ assistant/                 run hub (resumable runs) · runner (Claude/Gemini/pi/…) · approvals · loop · orchestrator + orchestra · telegram
+│  ├─ prompt-engine/             techniques · model profiles · linter · XML build/parse · generator/refiner prompts
 │  ├─ ai/                        provider factory, model discovery, pricing, embeddings
-│  ├─ prompt-engine/             XML build/parse, techniques, linter, CoT generator
-│  ├─ knowledge/                 shared RAG retrieval (embed + cosine)
-│  └─ assistant/                 CLI runner, orchestrator, approvals, sandbox, telegram bridge
-└─ Prisma + SQLite               prompts, versions, tags, test results/cases, knowledge, sessions, settings
+│  └─ knowledge/                 shared RAG retrieval
+└─ Prisma + SQLite               prompts, versions, tests, knowledge, sessions, settings
 ```
 
-The Code Assistant spawns the provider CLIs per turn and streams their `stream-json` output to the browser over SSE; continuity is handled via the CLIs' own session resume. The Telegram bridge reuses that same runner and approval machinery behind a long-poll loop.
+Assistant work runs detached from HTTP requests in a process-wide **run hub**: browsers attach over SSE (`EventSource`, resumable via `Last-Event-ID`), the transcript is persisted progressively, and approvals are published into the run so any client — or Telegram — can answer them. Details: [docs/ASSISTANT_RUNS.md](./docs/ASSISTANT_RUNS.md).
 
 ---
 
 ## Status & Limitations
 
-CodeMaestro is **early-stage and under active development**. It's useful today, but be aware of what is and isn't there yet:
+CodeMaestro is under active development. Things to know:
 
-- **Orchestrator is experimental.** The multi-model planner is **prompt-based** (an LLM decomposes the task and picks a worker) — there is **no learned/trained routing**, and subtasks currently run **sequentially**, not in parallel. Review plans (Hybrid mode) for non-trivial work.
-- **"deny-with-reason" doesn't close the loop yet.** The reason is **stored and logged**, but **not yet fed back into the model** to steer the next step. Planned, not implemented.
-- **Telegram runs one turn at a time.** The bridge processes updates on a single poll loop, so a long turn occupies the bridge until it finishes; for unattended Telegram use, prefer permission mode `acceptEdits` (or the approval gate off) until the turn loop is made concurrent.
-- **No automated tests yet.** There is currently no test suite or CI. Changes are validated manually. Contributions here are especially welcome.
-- **Security posture is "trusted network only"** — see [Security](#-security). A deliberate design point, not a temporary gap.
+- **Orchestrator subtasks run sequentially** (dependency order, shared working directory). Planning is prompt-based, not learned routing — review plans in Hybrid mode for non-trivial work.
+- **The approval gate is enforced for Claude Code and pi.** Gemini CLI, OpenCode, Codex and Aider run their tools directly; sessions for them can't enable the gate (and the orchestrator runs Gemini read-only in gated sessions). The sandbox is Claude-Code-only.
+- **A server restart ends running work** (CLI processes don't survive it); everything streamed so far is in the transcript, and the session can continue.
+- **Tests**: a Vitest suite covers the run hub, runner, approvals, loop, orchestrator/orchestra, pi, prompt engine and UI logic; CI runs lint, typecheck, tests and build. End-to-end flows with real CLIs are still validated manually.
+- **Security posture is "trusted network only"** — see below.
 
 ---
 
 ## 🔒 Security
 
-CodeMaestro is designed to run in a **trusted, private environment** (e.g. localhost or a private Tailscale/VPN network), not exposed to the public internet.
+CodeMaestro is designed for a **trusted, private environment** (localhost or your tailnet), not the public internet.
 
-- **The Code Assistant, Orchestrator, and Telegram bridge execute code and shell commands** on the host. Access is sandboxed to an allowlist of working directories (`ASSISTANT_ALLOWED_DIRS`) with path-traversal guards, and tool permissions default to read-only — but anyone who can reach the app can drive these tools. Keep it private.
-- **Telegram access is allowlisted** by chat ID (empty allowlist = nobody), and the bot token is stored server-side only — never sent to the browser. Still, treat the bridge as remote shell access and only allowlist chats you trust.
-- API keys entered in Settings are stored in the browser's `localStorage`. In a non-HTTPS context they are base64-obfuscated rather than encrypted — treat this as obfuscation, not security. Prefer HTTPS (e.g. `tailscale serve`) or server-side keys for stronger protection.
-- No telemetry. Prompts, keys, embeddings, and transcripts stay in your local SQLite DB and browser.
+- **The assistant, orchestrator and Telegram bridge execute code and shell commands** on the host — anyone who can reach the app can drive them. Working directories are confined to `ASSISTANT_ALLOWED_DIRS` (realpath-checked, symlink-safe uploads); tools default to read-only; the approval gate fails closed (a missing or crashing hook denies).
+- **Run it behind `tailscale serve`** bound to `127.0.0.1` (`npm run start:tailnet`); optionally restrict `/api` to specific tailnet users with `CODEMAESTRO_TAILSCALE_USERS`.
+- **CSRF protection**: state-changing API requests from other origins are rejected (`src/proxy.ts`), so a web page you visit can't drive your instance.
+- **Secrets**: GitHub tokens are AES-256-GCM encrypted at rest and never returned to the browser; the Telegram token stays server-side; API keys entered in Settings live in the browser, encrypted with Web Crypto in a secure (HTTPS) context — over plain HTTP they are only obfuscated. The approval hook authenticates with a per-process token.
+- **Telegram** is allowlisted by chat ID (empty = nobody). Treat it like remote shell access.
+- No telemetry.
 
 ---
 
 ## Roadmap / Ideas
 
-- HTTPS via `tailscale serve` for full PWA install + Web Crypto key encryption
-- Concurrent Telegram turn handling + closing the deny-with-reason feedback loop
-- Parallel subtask execution in the Orchestrator
-- Prompt A/B testing dashboards and analytics
+- Parallel subtask execution in the orchestrator (independent subtasks, worktrees)
+- Structured outputs for the prompt generator; a target-model selector in the builder
+- Evals: build-eval / hill-climb workflows for saved prompts
 - Shareable prompt packs / team library
-- Pluggable vector backends for larger knowledge bases
 
 ---
 
 ## Contributing
 
-Issues and PRs are welcome — see [`CONTRIBUTING.md`](./CONTRIBUTING.md) and [`SECURITY.md`](./SECURITY.md). There's no CI yet, so please describe how you tested your change.
+Issues and PRs are welcome — see [`CONTRIBUTING.md`](./CONTRIBUTING.md) and [`SECURITY.md`](./SECURITY.md). CI runs `npm run lint`, `npm run typecheck`, `npm test` and `npm run build` on every pull request.
 
 ---
 
