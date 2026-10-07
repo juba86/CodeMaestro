@@ -1,0 +1,79 @@
+/* Mockup-only helpers. Each recipe mirrors a CVA variant of the planned primitives. */
+.screen-label { @apply flex h-7 items-center gap-2 overflow-hidden whitespace-nowrap border-y border-border bg-surface-2 px-3 font-mono text-xs text-muted-foreground; }
+section.screen { position: relative; height: 100vh; overflow: hidden; }
+
+@layer components {
+/* Button — src/components/ui/button.tsx */
+.btn { @apply inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md text-ui font-medium transition-colors duration-150 select-none h-10 px-3.5 md:h-8 md:px-3; }
+.btn-sm { @apply h-9 px-3 md:h-7 md:px-2.5 text-xs; }
+.btn-lg { @apply h-11 px-4 text-sm md:h-10; }
+.btn-primary { @apply bg-primary text-primary-foreground shadow-xs hover:bg-primary/90; }
+.btn-outline { @apply border border-border-strong bg-card text-foreground hover:bg-accent; }
+.btn-ghost { @apply text-muted-foreground hover:bg-accent hover:text-foreground; }
+.btn-danger-outline { @apply border border-danger-border bg-transparent text-danger hover:bg-danger-subtle; }
+.btn-icon { @apply inline-flex size-10 md:size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground; }
+.btn-icon-sm { @apply inline-flex size-8 md:size-7 shrink-0 items-center justify-center rounded-md text-subtle-foreground hover:bg-accent hover:text-foreground; }
+.kbd { @apply inline-flex h-5 min-w-5 items-center justify-center rounded-sm border border-border-strong bg-surface-2 px-1 font-mono text-xs leading-none text-muted-foreground; }
+.btn-primary .kbd { @apply border-white/25 bg-white/10 text-primary-foreground; }
+
+/* Badge / StatusBadge — src/components/ui/badge.tsx, status-badge.tsx */
+.badge { @apply inline-flex h-5 shrink-0 items-center gap-1 whitespace-nowrap rounded-full border px-2 text-xs font-medium leading-none; }
+.badge-neutral { @apply border-border-strong bg-surface-2 text-muted-foreground; }
+.badge-brand { @apply border-primary-border bg-primary-subtle text-primary-text; }
+.badge-success { @apply border-success-border bg-success-subtle text-success; }
+.badge-warning { @apply border-warning-border bg-warning-subtle text-warning; }
+.badge-danger { @apply border-danger-border bg-danger-subtle text-danger; }
+.badge-info { @apply border-info-border bg-info-subtle text-info; }
+.badge-lg { @apply h-6 px-2.5; }
+
+/* Nav */
+.nav-item { @apply flex h-8 items-center gap-2.5 rounded-md px-2 text-ui text-muted-foreground hover:bg-accent hover:text-foreground; }
+.nav-item[aria-current="page"] { @apply bg-accent font-medium text-foreground; }
+.nav-item[aria-current="page"] svg { @apply text-primary-text; }
+.group-label { @apply px-2 pb-1 pt-3 text-xs font-medium text-subtle-foreground; }
+
+/* Inputs — input.tsx / select.tsx */
+.field-label { @apply mb-1.5 block text-ui font-medium; }
+.input { @apply flex h-11 w-full items-center gap-2 rounded-md border border-input bg-background px-3 text-base md:h-8 md:text-ui; }
+.hint { @apply mt-1.5 text-xs text-muted-foreground; }
+
+/* Switch */
+.switch { @apply relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border border-input bg-muted; }
+.switch::after { content: ""; @apply absolute left-0.5 size-3.5 rounded-full bg-muted-foreground transition-transform; }
+.switch[aria-checked="true"] { @apply border-primary bg-primary; }
+.switch[aria-checked="true"]::after { @apply translate-x-4 bg-white; }
+
+/* Segmented control — toggle-group.tsx */
+.seg { @apply inline-flex h-10 md:h-8 items-center gap-0.5 rounded-md border border-border bg-surface-2 p-0.5; }
+.seg > button { @apply inline-flex whitespace-nowrap h-full items-center gap-1.5 rounded-[5px] px-3 md:px-2.5 text-ui font-medium text-muted-foreground hover:text-foreground; }
+.seg > button[aria-pressed="true"], .seg > button[aria-checked="true"] { @apply bg-card text-foreground shadow-sm; }
+
+/* Chips (toggle chip / model chip) */
+.chip { @apply inline-flex whitespace-nowrap h-9 md:h-7 items-center gap-1.5 rounded-md border border-border bg-transparent px-2.5 md:px-2 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground; }
+.chip[aria-pressed="true"] { @apply border-primary-border bg-primary-subtle text-primary-text; }
+.model-chip { @apply flex w-full items-center gap-2 rounded-md border border-border bg-card px-2 py-1.5 text-left text-ui hover:border-border-strong hover:bg-accent; cursor: grab; }
+.dot { @apply inline-block size-2 shrink-0 rounded-full; }
+
+/* Cards */
+.card { @apply rounded-lg border border-border bg-card shadow-xs; }
+
+/* Diff */
+.diff-row { @apply flex md:min-w-max; }
+.diff-row > .ln { @apply w-9 shrink-0 select-none pr-2 text-right text-subtle-foreground; }
+.diff-row > .op { @apply w-5 shrink-0 select-none text-center; }
+.diff-row > .code { @apply min-w-0 whitespace-pre-wrap break-words pr-3 md:whitespace-pre; }
+.diff-row.add { @apply bg-diff-add; }
+.diff-row.add > .op, .diff-row.add > .code { @apply text-diff-add-strong; }
+.diff-row.del { @apply bg-diff-del; }
+.diff-row.del > .op, .diff-row.del > .code { @apply text-diff-del-strong; }
+
+/* Org chart canvas */
+.canvas-grid { background-image: radial-gradient(var(--grid-dot) 1px, transparent 1px); background-size: 16px 16px; }
+.wire { @apply bg-border-strong; }
+.wire-live { @apply bg-primary; }
+
+code.inline { @apply rounded-sm border border-border bg-surface-2 px-1 py-px font-mono text-[0.92em]; }
+.scrollbar-none { scrollbar-width: none; }
+.scrollbar-none::-webkit-scrollbar { display: none; }
+
+}
