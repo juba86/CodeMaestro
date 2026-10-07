@@ -31,8 +31,16 @@ export interface RetrieveOptions {
  * Brute-force cosine over all chunks — fine for a personal-scale knowledge base;
  * swap for a vector index (sqlite-vec / libsql vector) if this grows large.
  *
+ * Only chunks embedded with the CURRENT embedding model are compared: vectors
+ * from different models live in different spaces, so mixing them yields
+ * meaningless scores. Chunks of another model (after OLLAMA_EMBED_MODEL
+ * changed) are ignored until their document is re-indexed. The index has
+ * always recorded the model, so model "" has no legitimate source and is
+ * excluded too.
+ *
  * Throws only on embedding failure (so callers that want to surface "is Ollama
- * running?" can). Returns an empty array when the knowledge base is empty.
+ * running?" can). Returns an empty array — without calling Ollama — when there
+ * is nothing to search.
  */
 export async function retrieveChunks(
   query: string,
@@ -41,28 +49,35 @@ export async function retrieveChunks(
   const trimmed = query.trim();
   if (!trimmed) return [];
 
+  // Cheap existence check first: every assistant/Telegram turn calls this, and
+  // an embedding is a full Ollama round trip even when the KB is empty.
+  const where = { model: { in: modelAliases(EMBED_MODEL) } };
+  if ((await prisma.knowledgeChunk.count({ where })) === 0) return [];
+
   const queryVec = await embedOne(trimmed);
 
   const chunks = await prisma.knowledgeChunk.findMany({
-    include: { doc: { select: { title: true } } },
+    where,
+    select: { id: true, docId: true, content: true, embedding: true, doc: { select: { title: true } } },
   });
-  if (chunks.length === 0) return [];
 
-  return chunks
-    .map((c) => {
-      let vec: number[] = [];
-      try { vec = JSON.parse(c.embedding); } catch { /* skip malformed */ }
-      return {
-        id: c.id,
-        docId: c.docId,
-        docTitle: c.doc.title,
-        content: c.content,
-        score: cosineSimilarity(queryVec, vec),
-      };
-    })
-    .filter((c) => c.score >= minScore)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, topK);
+  const scored: RetrievedChunk[] = [];
+  for (const c of chunks) {
+    let vec: unknown;
+    try { vec = JSON.parse(c.embedding); } catch { continue; /* skip malformed */ }
+    // Same model ⇒ same dimension; anything else is corrupt, not comparable.
+    if (!Array.isArray(vec) || vec.length !== queryVec.length) continue;
+    const score = cosineSimilarity(queryVec, vec as number[]);
+    if (score < minScore) continue;
+    scored.push({ id: c.id, docId: c.docId, docTitle: c.doc.title, content: c.content, score });
+  }
+  return scored.sort((a, b) => b.score - a.score).slice(0, topK);
+}
+
+/** Ollama treats "name" and "name:latest" as the same model. */
+function modelAliases(model: string): string[] {
+  if (model.endsWith(":latest")) return [model, model.slice(0, -":latest".length)];
+  return model.includes(":") ? [model] : [model, `${model}:latest`];
 }
 
 export interface KnowledgeContext {

@@ -1,5 +1,6 @@
 import type { PromptStructured, ProviderName, PromptTechnique } from "@/lib/ai/types";
 import { techniques } from "./techniques";
+import { getBaseUrl } from "@/lib/ai/client-keys";
 
 const techniqueGuidance: Record<PromptTechnique, string> = {
   "chain-of-thought": "Use classic Chain-of-Thought: guide the model through intermediate reasoning steps with examples showing step-by-step thinking.",
@@ -67,6 +68,8 @@ export async function generateCoTPrompt(
       provider,
       model,
       apiKey,
+      // Needed by the configurable (custom) OpenAI-compatible endpoint.
+      baseUrl: getBaseUrl(provider),
     }),
   });
 

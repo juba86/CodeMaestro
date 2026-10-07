@@ -5,6 +5,18 @@ import { useBuilderStore } from "@/stores/builder-store";
 import { toast } from "sonner";
 import { X } from "lucide-react";
 
+async function errorMessage(res: Response, fallback: string): Promise<string> {
+  const e = await res.json().catch(() => null);
+  return typeof e?.error === "string" ? `${fallback}: ${e.error}` : `${fallback} (HTTP ${res.status}).`;
+}
+
+// Tags as the server stored them (it trims and de-duplicates), falling back to
+// what was sent.
+function savedTags(data: { prompt?: { tags?: { tag: string }[] } }, sent: string[]): string[] {
+  const stored = data.prompt?.tags;
+  return Array.isArray(stored) ? stored.map((t) => t.tag) : sent;
+}
+
 interface SavePromptDialogProps {
   open: boolean;
   onClose: () => void;
@@ -46,45 +58,47 @@ export function SavePromptDialog({ open, onClose }: SavePromptDialogProps) {
         .split(",")
         .map((t) => t.trim())
         .filter(Boolean);
-      const meta = { title, description, tags };
+      const body = {
+        title,
+        description,
+        content: xmlContent,
+        structured: JSON.stringify(structured),
+        tags,
+      };
 
       if (currentPromptId) {
         // Update existing
-        await fetch(`/api/prompts/${currentPromptId}`, {
+        const res = await fetch(`/api/prompts/${currentPromptId}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            title,
-            description,
-            content: xmlContent,
-            structured: JSON.stringify(structured),
-            tags,
-            changelog: `Updated: ${title}`,
-          }),
+          body: JSON.stringify({ ...body, changelog: `Updated: ${title}` }),
         });
-        setProjectMeta(meta);
+        if (res.status === 404) {
+          // Deleted elsewhere: detach so the next save creates a new prompt.
+          setCurrentPromptId(null);
+          setProjectMeta(null);
+          throw new Error("This prompt no longer exists in the library. Click Save again to store it as a new prompt.");
+        }
+        if (!res.ok) throw new Error(await errorMessage(res, "Update failed"));
+        const data = await res.json();
+        setProjectMeta({ title, description, tags: savedTags(data, tags) });
         toast.success("Prompt updated!");
       } else {
         // Create new
         const res = await fetch("/api/prompts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            title,
-            description,
-            content: xmlContent,
-            structured: JSON.stringify(structured),
-            tags,
-          }),
+          body: JSON.stringify(body),
         });
+        if (!res.ok) throw new Error(await errorMessage(res, "Save failed"));
         const data = await res.json();
         setCurrentPromptId(data.prompt.id);
-        setProjectMeta(meta);
+        setProjectMeta({ title, description, tags: savedTags(data, tags) });
         toast.success("Prompt saved!");
       }
       onClose();
-    } catch {
-      toast.error("Save failed.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Save failed.");
     } finally {
       setSaving(false);
     }

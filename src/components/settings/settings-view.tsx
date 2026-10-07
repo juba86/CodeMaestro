@@ -53,7 +53,8 @@ export function SettingsView() {
     if (activeProvider === provider) {
       const m = await fetchModelsForProvider(provider, undefined, apiKeys[provider]);
       setModels(m);
-      if (m.length > 0 && !m.some((x) => x.id === activeModel)) setActiveModel(m[0].id);
+      // Keep a manually entered id even if it isn't listed; only fill a gap.
+      if (m.length > 0 && !useSettingsStore.getState().activeModel) setActiveModel(m[0].id);
     }
     toast.success(mode === "oauth" ? `${provider === "claude" ? "Claude" : "Gemini"} nutzt jetzt Login.` : `${provider === "claude" ? "Claude" : "Gemini"} nutzt jetzt API-Key.`);
   }
@@ -87,7 +88,10 @@ export function SettingsView() {
     fetchModelsForProvider(activeProvider, controller.signal, apiKeys[activeProvider], baseUrls[activeProvider])
       .then((m) => {
         setModels(m);
-        if (m.length > 0 && !m.some((model) => model.id === activeModel)) {
+        // Only fall back to the first listed model when none is set: an id
+        // missing from the list is usually typed on purpose (new/cloud models).
+        // Switching providers clears the model, see selectProvider.
+        if (m.length > 0 && !useSettingsStore.getState().activeModel) {
           setActiveModel(m[0].id);
         }
       })
@@ -98,6 +102,14 @@ export function SettingsView() {
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeProvider, apiKeys[activeProvider], baseUrls[activeProvider]]);
+
+  function selectProvider(provider: string) {
+    if (provider === activeProvider) return;
+    setActiveProvider(provider);
+    // The previous provider's model id is meaningless here; the model-list
+    // effect picks this provider's first model.
+    setActiveModel("");
+  }
 
   function handleKeyChange(provider: string, value: string) {
     setApiKeys((prev) => ({ ...prev, [provider]: value }));
@@ -168,7 +180,7 @@ export function SettingsView() {
           {providerList.map((p) => (
             <button
               key={p.id}
-              onClick={() => setActiveProvider(p.id)}
+              onClick={() => selectProvider(p.id)}
               className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
                 activeProvider === p.id
                   ? "bg-primary text-primary-foreground"
@@ -227,7 +239,7 @@ export function SettingsView() {
                   {p.id === "claude" ? (
                     <>Nutzt den Login der lokalen <code className="px-1 bg-accent rounded">claude</code>-CLI (Claude Code, kein API-Key). Auf dem Server einmalig <code className="px-1 bg-accent rounded">claude</code> einloggen.</>
                   ) : (
-                    <>Nutzt den Google-Login der lokalen <code className="px-1 bg-accent rounded">gemini</code>-CLI (kein API-Key). Einmalig auf dem Server <code className="px-1 bg-accent rounded">gemini</code> ausführen und „Login with Google" wählen.</>
+                    <>Nutzt den Google-Login der lokalen <code className="px-1 bg-accent rounded">gemini</code>-CLI (kein API-Key). Einmalig auf dem Server <code className="px-1 bg-accent rounded">gemini</code> ausführen und „Login with Google“ wählen.</>
                   )}
                 </p>
                 <button

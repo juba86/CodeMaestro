@@ -3,13 +3,13 @@ import { ClaudeProvider } from "./claude-provider";
 import { GeminiProvider } from "./gemini-provider";
 import { OllamaProvider } from "./ollama-provider";
 import { OpenAICompatibleProvider } from "./openai-compatible-provider";
-import { getProvider, PROVIDERS } from "./catalog";
+import { getProvider, PROVIDERS, resolveBaseUrl } from "./catalog";
 
 // Re-export from models.ts for backwards compatibility
 export { getStaticModels } from "./models";
 
 export interface CreateProviderOpts {
-  baseUrl?: string; // required for the "custom" provider; overrides catalog baseUrl
+  baseUrl?: string; // required for the "custom" provider; ignored for fixed-host providers
 }
 
 export function createProvider(
@@ -29,8 +29,9 @@ export function createProvider(
       return new OllamaProvider(apiKey);
     case "openai":
     case "openai-local": {
-      const baseUrl = opts.baseUrl || def.baseUrl;
-      if (!baseUrl) throw new Error(`Provider ${name} requires a base URL`);
+      // Only configurableBaseUrl providers may be pointed elsewhere (see resolveBaseUrl).
+      const baseUrl = resolveBaseUrl(def, opts.baseUrl);
+      if (!baseUrl) throw new Error(`Provider ${name} requires a valid http(s) base URL`);
       return new OpenAICompatibleProvider({
         providerId: def.id,
         baseUrl,

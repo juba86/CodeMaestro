@@ -5,10 +5,10 @@
 // client-side-only encryption. For production use, consider server-side key storage.
 //
 // IMPORTANT: Web Crypto's SubtleCrypto (crypto.subtle) is only available in
-// "secure contexts" — HTTPS or http://localhost. This app is commonly served
-// over plain http:// on a Tailscale IP (an insecure context), where
-// crypto.subtle is undefined. In that case AES would throw and keys could
-// neither be saved nor read. We therefore fall back to a base64 obfuscation
+// "secure contexts" — HTTPS (e.g. the Tailscale MagicDNS https:// URL) or
+// http://localhost. When the app is opened over plain http:// on a Tailscale IP
+// (an insecure context), crypto.subtle is undefined. In that case AES would
+// throw and keys could neither be saved nor read. We therefore fall back to a base64 obfuscation
 // scheme, marked with a prefix so decrypt knows which scheme was used. For a
 // Tailscale-private tool whose keys never leave the user's browser, this is an
 // acceptable trade-off that keeps key persistence working over http.
@@ -28,7 +28,7 @@ function fromB64(s: string): string {
   return decodeURIComponent(escape(atob(s)));
 }
 
-async function getKey(password: string): Promise<CryptoKey> {
+async function deriveKey(password: string): Promise<CryptoKey> {
   const enc = new TextEncoder();
   const keyMaterial = await crypto.subtle.importKey(
     "raw",
@@ -46,12 +46,27 @@ async function getKey(password: string): Promise<CryptoKey> {
   );
 }
 
+// The password and salt are constants, so the derived key never changes. Derive
+// it once per page load (600k PBKDF2 iterations is ~100ms+ per call and every
+// getApiKey used to pay it). A failed derivation is not cached.
+let keyPromise: Promise<CryptoKey> | null = null;
+
+function getKey(): Promise<CryptoKey> {
+  if (!keyPromise) {
+    keyPromise = deriveKey(SALT).catch((err) => {
+      keyPromise = null;
+      throw err;
+    });
+  }
+  return keyPromise;
+}
+
 export async function encryptApiKey(apiKey: string): Promise<string> {
   if (!hasSubtle()) {
     // Insecure context (http:// on a non-localhost host) — fall back to base64.
     return FALLBACK_PREFIX + toB64(apiKey);
   }
-  const key = await getKey(SALT);
+  const key = await getKey();
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const enc = new TextEncoder();
   const encrypted = await crypto.subtle.encrypt(
@@ -74,7 +89,7 @@ export async function decryptApiKey(encoded: string): Promise<string> {
     // Stored as AES but we're now in an insecure context — cannot decrypt.
     throw new Error("crypto.subtle unavailable in this (insecure) context");
   }
-  const key = await getKey(SALT);
+  const key = await getKey();
   const combined = Uint8Array.from(atob(encoded), (c) => c.charCodeAt(0));
   const iv = combined.slice(0, 12);
   const data = combined.slice(12);

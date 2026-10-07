@@ -1,9 +1,10 @@
 import { World, getEntitiesWithComponents, getComponent } from '../ecs';
-import { C, PhysicsComponent, TransformComponent, PlayerComponent, SolidComponent } from '../components';
+import { C, PhysicsComponent, TransformComponent, PlayerComponent } from '../components';
 
 const GRAVITY = 0.5;
 
-export function physicsSystem(world: World, dt: number) {
+// Velocities are per fixed tick (the page steps this at 60 Hz).
+export function physicsSystem(world: World) {
     const movingEntities = getEntitiesWithComponents(world, [C.Physics, C.Transform]);
     const solidEntities = getEntitiesWithComponents(world, [C.Solid, C.Transform]);
 

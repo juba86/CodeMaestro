@@ -1,7 +1,7 @@
 import { World, getEntitiesWithComponents, getComponent } from '../ecs';
-import { C, FallingHazardComponent, PhysicsComponent, TransformComponent } from '../components';
+import { C, FallingHazardComponent, PhysicsComponent } from '../components';
 
-export function aiSystem(world: World, dt: number) {
+export function aiSystem(world: World) {
     const fallingHazards = getEntitiesWithComponents(world, [C.FallingHazard, C.Physics, C.Transform]);
 
     for (const entity of fallingHazards) {

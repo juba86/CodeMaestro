@@ -29,8 +29,10 @@ const MATCH_LABELS: Record<MatchType, string> = {
   equals: "exakt gleich",
 };
 
+// An empty `expected` is deliberate only for "equals" (the UI requires a value
+// otherwise) and then means "the output must be empty"; for the substring and
+// regex matchers it trivially matches, as "" / an empty pattern always do.
 function evaluateMatch(output: string, matchType: MatchType, expected: string): boolean {
-  if (!expected) return true;
   switch (matchType) {
     case "contains": return output.includes(expected);
     case "icontains": return output.toLowerCase().includes(expected.toLowerCase());

@@ -83,23 +83,18 @@ export class OllamaProvider implements AIProvider {
     return options;
   }
 
+  // Consumes the streaming endpoint and concatenates the chunks. A non-streaming
+  // call only sends response headers once the WHOLE generation is done, so long
+  // local generations (orchestrator planner/worker/synthesis) died on undici's
+  // default 300s headersTimeout. Streamed, headers arrive with the first token
+  // and each chunk resets the body timeout.
   async sendMessage(params: SendMessageParams): Promise<string> {
-    const res = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      cache: "no-store",
-      body: JSON.stringify({
-        model: params.model || "llama3",
-        messages: this.buildMessages(params),
-        stream: false,
-        options: this.buildOptions(params),
-      }),
-    });
-    if (!res.ok) {
-      throw new Error(`Ollama error ${res.status}: ${await res.text()}`);
+    let out = "";
+    for await (const chunk of this.streamMessage(params)) {
+      if (chunk.type === "text") out += chunk.content;
+      else if (chunk.type === "error") throw new Error(chunk.content);
     }
-    const data = (await res.json()) as { message?: { content?: string } };
-    return data.message?.content || "";
+    return out;
   }
 
   async *streamMessage(params: SendMessageParams): AsyncGenerator<StreamChunk> {
@@ -129,29 +124,39 @@ export class OllamaProvider implements AIProvider {
         const obj = JSON.parse(trimmed) as {
           message?: { content?: string };
           done?: boolean;
+          error?: string;
         };
         if (obj.message?.content) {
           yield { type: "text", content: obj.message.content };
+        }
+        // Ollama reports failures after the 200 headers as an {"error": …} line.
+        if (obj.error) {
+          yield { type: "error", content: `Ollama error: ${obj.error}` };
         }
       } catch {
         // Ignore malformed partial lines.
       }
     };
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-      for (const line of lines) {
-        yield* emit(line);
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          yield* emit(line);
+        }
       }
-    }
-    // Flush any trailing JSON object that arrived without a closing newline,
-    // so the final tokens of the response are never dropped.
-    if (buffer.trim()) {
-      yield* emit(buffer);
+      // Flush any trailing JSON object that arrived without a closing newline,
+      // so the final tokens of the response are never dropped.
+      if (buffer.trim()) {
+        yield* emit(buffer);
+      }
+    } finally {
+      // Stop the generation if the consumer bailed out early (error / abort).
+      reader.cancel().catch(() => {});
     }
     yield { type: "done", content: "" };
   }

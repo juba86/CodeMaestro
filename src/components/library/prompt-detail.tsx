@@ -24,16 +24,16 @@ interface PromptFull {
 interface PromptDetailProps {
   promptId: string;
   onBack: () => void;
+  // The parent confirms before deleting (PromptLibrary.handleDelete).
   onDelete: () => void;
-  onRefresh: () => void;
 }
 
-export function PromptDetail({ promptId, onBack, onDelete, onRefresh }: PromptDetailProps) {
+export function PromptDetail({ promptId, onBack, onDelete }: PromptDetailProps) {
   const [prompt, setPrompt] = useState<PromptFull | null>(null);
   const [activeVersion, setActiveVersion] = useState<number | null>(null);
   const [compareVersion, setCompareVersion] = useState<number | null>(null);
   const router = useRouter();
-  const { loadProject, setXmlContent, setCurrentPromptId } = useBuilderStore();
+  const loadProject = useBuilderStore((s) => s.loadProject);
 
   useEffect(() => {
     fetch(`/api/prompts/${promptId}`)
@@ -52,9 +52,10 @@ export function PromptDetail({ promptId, onBack, onDelete, onRefresh }: PromptDe
     ? prompt.versions.find((v) => v.version === compareVersion)
     : undefined;
 
-  function handleEdit() {
-    // Load the saved project into the builder wholesale (replaces any draft),
-    // preferring the persisted structured JSON over re-parsing the XML.
+  // Loads the saved project into the builder wholesale (replaces any draft, so
+  // id, metadata, structured and XML always belong to the same prompt),
+  // preferring the persisted structured JSON over re-parsing the XML.
+  function loadIntoBuilder() {
     let structured;
     try {
       const p = JSON.parse(prompt!.structured || "{}");
@@ -70,6 +71,10 @@ export function PromptDetail({ promptId, onBack, onDelete, onRefresh }: PromptDe
       content: prompt!.content,
       structured,
     });
+  }
+
+  function handleEdit() {
+    loadIntoBuilder();
     router.push("/builder");
   }
 
@@ -103,14 +108,10 @@ export function PromptDetail({ promptId, onBack, onDelete, onRefresh }: PromptDe
     }
   }
 
-  function handleDelete() {
-    if (!window.confirm("Delete this prompt? This action cannot be undone.")) return;
-    onDelete();
-  }
-
   function handleTest() {
-    setXmlContent(prompt!.content);
-    setCurrentPromptId(prompt!.id);
+    // The playground saves test results against currentPromptId, and a later
+    // builder "Update" writes the loaded metadata — so load all of it together.
+    loadIntoBuilder();
     router.push("/playground");
   }
 
@@ -158,7 +159,7 @@ export function PromptDetail({ promptId, onBack, onDelete, onRefresh }: PromptDe
               <option key={f.id} value={f.id}>{f.label}</option>
             ))}
           </select>
-          <button onClick={handleDelete} className="p-1.5 rounded-md border border-input hover:bg-accent text-destructive" aria-label="Delete prompt">
+          <button onClick={onDelete} className="p-1.5 rounded-md border border-input hover:bg-accent text-destructive" aria-label="Delete prompt">
             <Trash2 size={14} />
           </button>
         </div>

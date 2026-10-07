@@ -6,7 +6,7 @@ import { fetchGeminiModels } from "@/lib/ai/gemini-provider";
 import { geminiCliModels } from "@/lib/ai/gemini-cli-provider";
 import { claudeCliModels } from "@/lib/ai/claude-cli-provider";
 import { fetchOpenAICompatModels } from "@/lib/ai/openai-compatible-provider";
-import { getProvider, envKeyFor, staticModelInfos, PROVIDERS } from "@/lib/ai/catalog";
+import { getProvider, envKeyFor, resolveBaseUrl, staticModelInfos, PROVIDERS } from "@/lib/ai/catalog";
 import { getSetting } from "@/lib/settings";
 import type { ModelInfo } from "@/lib/ai/types";
 
@@ -42,7 +42,9 @@ async function liveModels(
 
     case "openai":
     case "openai-local": {
-      const baseUrl = (def.configurableBaseUrl ? headerBase : def.baseUrl) || "";
+      // Client base URL only for configurableBaseUrl providers; envKeyFor() never
+      // pairs a server key with such a caller-chosen host.
+      const baseUrl = resolveBaseUrl(def, headerBase);
       if (!baseUrl) return staticModelInfos(def);
       const key = headerKey || envKeyFor(def);
       const live = def.noModelsEndpoint ? [] : await fetchOpenAICompatModels(def.id, baseUrl, key);

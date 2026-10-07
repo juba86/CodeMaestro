@@ -2,12 +2,12 @@
 
 import { useEffect, useRef } from 'react';
 import * as PIXI from 'pixi.js';
-import { createWorld, createEntity, addComponent, registerComponent, World, Entity } from '@/game/ecs';
+import { createWorld, createEntity, addComponent, registerComponent } from '@/game/ecs';
 import { C, TransformComponent, PhysicsComponent, PlayerComponent, SpriteComponent, SolidComponent, HealthComponent, DamageComponent, FallingHazardComponent, ChasePlayerComponent } from '@/game/components';
 import { createInput } from '@/game/input';
 import { playerSystem } from '@/game/systems/player';
 import { physicsSystem } from '@/game/systems/physics';
-import { renderSystem, initRenderSystem } from '@/game/systems/render';
+import { renderSystem, initRenderSystem, resetRenderSystem } from '@/game/systems/render';
 import { terrainSystem } from '@/game/systems/terrain';
 import { aiSystem } from '@/game/systems/ai';
 import { scoringSystem } from '@/game/systems/scoring';
@@ -15,26 +15,30 @@ import { loadChartData } from '@/game/chart-data';
 
 const GamePage = () => {
     const gameContainer = useRef<HTMLDivElement>(null);
-    const pixiApp = useRef<PIXI.Application | null>(null);
-    const world = useRef<World | null>(null);
 
     useEffect(() => {
-        if (pixiApp.current || !gameContainer.current) return;
+        const container = gameContainer.current;
+        if (!container) return;
 
-        pixiApp.current = new PIXI.Application();
-        const app = pixiApp.current;
+        // Everything below is owned by THIS effect run. Under StrictMode the
+        // effect mounts, unmounts and mounts again; each run must tear down
+        // exactly what it created, even if init() has not resolved yet.
+        let disposed = false;
+        let rafId = 0;
+        let removeInput: (() => void) | null = null;
+        const app = new PIXI.Application();
 
-        async function init() {
+        const ready = (async () => {
             await app.init({
                 width: 800,
                 height: 600,
                 backgroundColor: 0x1099bb,
             });
-            gameContainer.current?.appendChild(app.view as unknown as Node);
+            if (disposed) return;
+            container.appendChild(app.canvas);
 
             // ECS World
-            world.current = createWorld();
-            const w = world.current;
+            const w = createWorld();
 
             // Register components
             registerComponent<TransformComponent>(w, C.Transform);
@@ -49,7 +53,7 @@ const GamePage = () => {
 
             // Render System
             initRenderSystem(w, app.stage);
-            
+
             // Chart Data
             const chartData = loadChartData();
             terrainSystem(w, chartData);
@@ -59,44 +63,58 @@ const GamePage = () => {
             addComponent<TransformComponent>(w, player, C.Transform, { x: 100, y: 100, width: 32, height: 32 });
             addComponent<PhysicsComponent>(w, player, C.Physics, { vx: 0, vy: 0, gravity: true });
             addComponent<PlayerComponent>(w, player, C.Player, { isGrounded: false, jumpForce: 10, speed: 5 });
-            addComponent<SpriteComponent>(w, player, C.Sprite, { texture: 'player', pixiSprite: new PIXI.Sprite(PIXI.Texture.WHITE) });
+            // pixiSprite is created (and added to the stage) by the render system.
+            addComponent<SpriteComponent>(w, player, C.Sprite, { texture: 'player', pixiSprite: null });
             addComponent<HealthComponent>(w, player, C.Health, { current: 100, max: 100 });
-            
+
             // Input
-            createInput(w, player);
-            
+            removeInput = createInput(w, player);
+
             // Game Loop
             const FIXED_TIMESTEP = 1000 / 60;
             let accumulator = 0;
             let lastTime = performance.now();
 
             const gameLoop = (currentTime: number) => {
+                if (disposed) return;
                 const deltaTime = currentTime - lastTime;
                 lastTime = currentTime;
-                accumulator += deltaTime;
+                // Clamp so a long pause (background tab) doesn't trigger a
+                // catch-up spiral of thousands of fixed steps.
+                accumulator += Math.min(deltaTime, 250);
 
                 while (accumulator >= FIXED_TIMESTEP) {
-                    aiSystem(w, FIXED_TIMESTEP);
+                    aiSystem(w);
                     playerSystem(w, player);
-                    physicsSystem(w, FIXED_TIMESTEP);
+                    physicsSystem(w);
                     scoringSystem(w);
                     accumulator -= FIXED_TIMESTEP;
                 }
 
-                const alpha = accumulator / FIXED_TIMESTEP;
-                renderSystem(w, alpha);
+                renderSystem(w);
 
-                requestAnimationFrame(gameLoop);
+                rafId = requestAnimationFrame(gameLoop);
             };
 
-            requestAnimationFrame(gameLoop);
-        }
-
-        init();
+            rafId = requestAnimationFrame(gameLoop);
+        })();
 
         return () => {
-            app.destroy(true, true);
-            pixiApp.current = null;
+            disposed = true;
+            cancelAnimationFrame(rafId);
+            removeInput?.();
+            resetRenderSystem();
+            // Pixi v8 can't destroy an Application whose init() is still
+            // pending, so wait for it; removeView detaches the canvas.
+            ready
+                .catch(() => {})
+                .then(() => {
+                    try {
+                        app.destroy({ removeView: true }, { children: true });
+                    } catch {
+                        /* init failed — nothing to release */
+                    }
+                });
         };
     }, []);
 

@@ -2,7 +2,7 @@ import { World, getEntitiesWithComponents, getComponent } from '../ecs';
 import { C, SpriteComponent, TransformComponent, SolidComponent, DamageComponent } from '../components';
 import * as PIXI from 'pixi.js';
 
-let stage: PIXI.Container;
+let stage: PIXI.Container | null = null;
 
 export function initRenderSystem(world: World, pixiStage: PIXI.Container) {
     stage = pixiStage;
@@ -34,7 +34,12 @@ export function initRenderSystem(world: World, pixiStage: PIXI.Container) {
     }
 }
 
-export function renderSystem(world: World, alpha: number) {
+/** Drops the stage reference (call before destroying the Pixi app). */
+export function resetRenderSystem() {
+    stage = null;
+}
+
+export function renderSystem(world: World) {
     if (!stage) return;
 
     const entities = getEntitiesWithComponents(world, [C.Sprite, C.Transform]);

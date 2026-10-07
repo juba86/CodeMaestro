@@ -48,9 +48,13 @@ export const PROVIDERS: ProviderDef[] = [
     baseUrl: "https://api.openai.com/v1",
     envKeys: ["OPENAI_API_KEY"],
     docs: "https://platform.openai.com/api-keys",
+    // gpt-4o stays first: the orchestrator uses staticModels[0] as its default
+    // worker, and streaming GPT-5 requires a verified OpenAI organization.
     staticModels: [
       { id: "gpt-4o", name: "GPT-4o" },
       { id: "gpt-4o-mini", name: "GPT-4o mini" },
+      { id: "gpt-5", name: "GPT-5" },
+      { id: "gpt-5-mini", name: "GPT-5 mini" },
       { id: "o4-mini", name: "o4-mini" },
     ],
   },
@@ -177,13 +181,35 @@ export function isKnownProvider(id: string): boolean {
   return byId.has(id);
 }
 
-/** Resolve a provider's server-side env key fallback, if any is set. */
+/**
+ * Resolve a provider's server-side env key fallback, if any is set.
+ * Never returned for configurableBaseUrl providers: their host comes from the
+ * caller, and a server key must only ever travel to the catalog's own host.
+ */
 export function envKeyFor(def: ProviderDef): string {
+  if (def.configurableBaseUrl) return "";
   for (const k of def.envKeys || []) {
     const v = process.env[k];
     if (v) return v;
   }
   return "";
+}
+
+/**
+ * The base URL a request may use for this provider. Only configurableBaseUrl
+ * providers honour a caller-supplied URL (http/https only); every other provider
+ * is pinned to its catalog URL so a client can't redirect it (and its key) elsewhere.
+ */
+export function resolveBaseUrl(def: ProviderDef, clientBase?: string | null): string | undefined {
+  if (!def.configurableBaseUrl) return def.baseUrl;
+  const raw = (clientBase || "").trim();
+  if (!raw) return undefined;
+  try {
+    const { protocol } = new URL(raw);
+    return protocol === "http:" || protocol === "https:" ? raw : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** A provider needs an API key unless it's local or explicitly key-optional. */

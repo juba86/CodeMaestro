@@ -3,6 +3,8 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { PromptCard } from "./prompt-card";
 import { PromptDetail } from "./prompt-detail";
+import { useBuilderStore } from "@/stores/builder-store";
+import { toast } from "sonner";
 import { Search, Plus } from "lucide-react";
 import Link from "next/link";
 
@@ -58,11 +60,23 @@ export function PromptLibrary() {
   async function handleDelete(id: string) {
     if (!window.confirm("Delete this prompt? This action cannot be undone.")) return;
     try {
-      await fetch(`/api/prompts/${id}`, { method: "DELETE" });
+      const res = await fetch(`/api/prompts/${id}`, { method: "DELETE" });
+      if (!res.ok && res.status !== 404) {
+        const e = await res.json().catch(() => ({}));
+        toast.error(e.error || `Delete failed (HTTP ${res.status}).`);
+        return;
+      }
+      // If the builder still has this prompt loaded, detach it so a later save
+      // creates a new prompt instead of updating one that no longer exists.
+      const builder = useBuilderStore.getState();
+      if (builder.currentPromptId === id) {
+        builder.setCurrentPromptId(null);
+        builder.setProjectMeta(null);
+      }
       setSelectedId(null);
       fetchPrompts();
     } catch {
-      setError("Failed to delete prompt.");
+      toast.error("Failed to delete prompt.");
     }
   }
 
@@ -72,7 +86,6 @@ export function PromptLibrary() {
         promptId={selectedId}
         onBack={() => setSelectedId(null)}
         onDelete={() => handleDelete(selectedId)}
-        onRefresh={fetchPrompts}
       />
     );
   }

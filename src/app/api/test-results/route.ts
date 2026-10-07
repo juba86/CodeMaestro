@@ -34,7 +34,7 @@ export async function POST(req: NextRequest) {
     }
 
     const result = await prisma.testResult.create({
-      data: { promptId, provider, model, input, output, latencyMs },
+      data: { promptId, provider, model, input, output, latencyMs, inputTokens, outputTokens, costUsd },
     });
 
     return NextResponse.json({ result }, { status: 201 });

@@ -8,14 +8,43 @@ import { promises as fs } from "fs";
 export function allowedRoots(): string[] {
   const env = process.env.ASSISTANT_ALLOWED_DIRS;
   if (env && env.trim()) {
-    return env.split(":").map((p) => path.resolve(p.trim())).filter(Boolean);
+    // Drop empty segments BEFORE resolving: path.resolve("") is the process
+    // cwd, so "a::b" or a trailing ":" would silently allow the app directory.
+    return env.split(":").map((p) => p.trim()).filter(Boolean).map((p) => path.resolve(p));
   }
   return [path.resolve(process.cwd(), "..")];
 }
 
+// Configured root → its real path, resolved ONCE per process. Re-resolving on
+// every check would let anything that can later swap a root (or a missing
+// root's path) for a symlink — e.g. an agent with nested roots — silently widen
+// the allowlist to the link target. Pinned, a swapped root just stops matching.
+const realRootCache = new Map<string, string>();
+
+/**
+ * The allowed roots with symlinks resolved. Targets are compared by their real
+ * path, so the roots must be too — otherwise a symlinked root (e.g. macOS
+ * /tmp → /private/tmp, or a symlinked projects folder) rejects everything
+ * inside it. A root that does not exist at first use keeps its resolved path
+ * (until restart).
+ */
+export async function realAllowedRoots(): Promise<string[]> {
+  const roots = await Promise.all(
+    allowedRoots().map(async (r) => {
+      let real = realRootCache.get(r);
+      if (real === undefined) {
+        real = await fs.realpath(r).catch(() => r);
+        realRootCache.set(r, real);
+      }
+      return real;
+    })
+  );
+  return [...new Set(roots)];
+}
+
 function isInside(child: string, parent: string): boolean {
   const rel = path.relative(parent, child);
-  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
 }
 
 /**
@@ -25,7 +54,7 @@ function isInside(child: string, parent: string): boolean {
  * may only run the assistant inside approved directories.
  */
 export async function resolveWorkdir(requested?: string): Promise<string> {
-  const roots = allowedRoots();
+  const roots = await realAllowedRoots();
   const target = requested && requested.trim()
     ? path.resolve(requested.trim())
     : roots[0];
@@ -55,7 +84,7 @@ export async function resolveWorkdir(requested?: string): Promise<string> {
  * re-checked against the allowlist. Returns the new absolute path.
  */
 export async function createWorkspace(parent: string, name: string): Promise<string> {
-  const roots = allowedRoots();
+  const roots = await realAllowedRoots();
   let parentReal: string;
   try {
     parentReal = await fs.realpath(path.resolve(parent && parent.trim() ? parent : roots[0]));
@@ -74,7 +103,13 @@ export async function createWorkspace(parent: string, name: string): Promise<str
     throw new Error("Target is outside the allowed roots.");
   }
   await fs.mkdir(target, { recursive: true });
-  return target;
+  // The name may already exist as a symlink pointing elsewhere: re-check the
+  // real path of what we are about to hand out.
+  const real = await fs.realpath(target);
+  if (!roots.some((r) => isInside(real, r))) {
+    throw new Error("Target is outside the allowed roots.");
+  }
+  return real;
 }
 
 /**
@@ -87,7 +122,7 @@ export async function browseDir(requested?: string): Promise<{
   parent: string | null;
   dirs: { name: string; path: string }[];
 }> {
-  const roots = allowedRoots();
+  const roots = await realAllowedRoots();
   const target = requested && requested.trim() ? path.resolve(requested.trim()) : roots[0];
 
   let real: string;
@@ -121,7 +156,7 @@ export async function browseDir(requested?: string): Promise<{
 
 /** Lists the allowed roots and their immediate subdirectories as pickable workspaces. */
 export async function listWorkspaces(): Promise<{ path: string; label: string }[]> {
-  const roots = allowedRoots();
+  const roots = await realAllowedRoots();
   const out: { path: string; label: string }[] = [];
   const seen = new Set<string>();
 

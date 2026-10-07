@@ -17,40 +17,37 @@ const categories = [
   { id: "techniques", label: "Techniques" },
 ];
 
+const BUILT_IN: TemplateEntry[] = builtInTemplates.map((t) => ({ ...t, isBuiltIn: true }));
+
 export function TemplateGallery() {
-  const [templates, setTemplates] = useState<TemplateEntry[]>([]);
+  // Built-ins render immediately; custom templates are merged in once fetched.
+  const [templates, setTemplates] = useState<TemplateEntry[]>(BUILT_IN);
   const [category, setCategory] = useState("all");
   const [preview, setPreview] = useState<TemplateEntry | null>(null);
   const router = useRouter();
-  const { updateStructured, setXmlContent, setStep } = useBuilderStore();
+  const loadDraft = useBuilderStore((s) => s.loadDraft);
 
   useEffect(() => {
-    // Load built-in templates immediately
-    const builtIn: TemplateEntry[] = builtInTemplates.map((t) => ({
-      ...t,
-      isBuiltIn: true,
-    }));
-    setTemplates(builtIn);
-
-    // Also try fetching from API for custom templates
-    fetch("/api/templates")
-      .then((r) => r.json())
+    const controller = new AbortController();
+    fetch("/api/templates", { signal: controller.signal })
+      .then((r) => (r.ok ? r.json() : { templates: [] }))
       .then((d) => {
         const custom = (d.templates || []) as TemplateEntry[];
+        if (custom.length === 0) return;
         const customSlugs = new Set(custom.map((t) => t.slug));
         setTemplates([
-          ...builtIn.filter((t) => !customSlugs.has(t.slug)),
+          ...BUILT_IN.filter((t) => !customSlugs.has(t.slug)),
           ...custom,
         ]);
       })
       .catch(() => {});
+    return () => controller.abort();
   }, []);
 
   function handleUseTemplate(template: TemplateEntry) {
-    const parsed = parseXml(template.content);
-    updateStructured(parsed);
-    setXmlContent(template.content);
-    setStep("edit");
+    // A template starts a fresh, unsaved draft — never an edit of whatever
+    // saved project was loaded before (a later "Update" would overwrite it).
+    loadDraft({ content: template.content, structured: parseXml(template.content) });
     toast.success(`Loaded template: ${template.name}`);
     router.push("/builder");
   }

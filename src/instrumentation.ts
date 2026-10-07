@@ -1,7 +1,9 @@
-// Runs once when the server process starts. Assistant CLI processes never
-// survive a restart, so any session left in "running" (e.g. the server was
-// restarted mid-turn) is stale — reset it to "idle" so the status is accurate
-// and the concurrency guard works.
+// Runs once when the server process starts. Assistant runs live in the
+// in-memory run hub (src/lib/assistant/run-hub.ts) and their CLI processes never
+// survive a restart, so the hub starts empty and any session the DB still shows
+// as "running" (server restarted mid-run) is stale — reset it to "idle" so the
+// session list is accurate. This happens before the Telegram bridge starts and
+// before any request is served, so it can't clobber a live run's status.
 export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") {
     try {

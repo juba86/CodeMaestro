@@ -71,7 +71,10 @@ export class GeminiProvider implements AIProvider {
       model: params.model || "gemini-2.5-flash",
       contents,
       config: {
-        maxOutputTokens: params.maxTokens || 4096,
+        // Unset = the API default, i.e. the model's own output limit. A fixed
+        // default truncated thinking models (2.5+/3 count thinking tokens against
+        // it; 4096 often left an empty answer) or exceeded 8K-output models.
+        maxOutputTokens: params.maxTokens || undefined,
         temperature: params.temperature,
         systemInstruction: params.systemPrompt || undefined,
       },
@@ -92,7 +95,7 @@ export class GeminiProvider implements AIProvider {
       model: params.model || "gemini-2.5-flash",
       contents,
       config: {
-        maxOutputTokens: params.maxTokens || 4096,
+        maxOutputTokens: params.maxTokens || undefined,
         temperature: params.temperature,
         systemInstruction: params.systemPrompt || undefined,
       },

@@ -41,6 +41,10 @@ interface BuilderState {
     content: string;
     structured: PromptStructured;
   }) => void;
+  // Starts a NEW, unsaved draft (e.g. from a template), replacing the current
+  // one wholesale and detaching it from any loaded saved project, so a later
+  // save creates a new prompt instead of overwriting the previously loaded one.
+  loadDraft: (draft: { content: string; structured: PromptStructured }) => void;
   reset: () => void;
 }
 
@@ -129,6 +133,16 @@ export const useBuilderStore = create<BuilderState>()(
           structured: { ...emptyStructured, ...project.structured },
           xmlContent: project.content,
           projectGoal: project.title,
+          chatMessages: [],
+          step: "edit",
+        }),
+      loadDraft: (draft) =>
+        set({
+          currentPromptId: null,
+          projectMeta: null,
+          structured: { ...emptyStructured, ...draft.structured },
+          xmlContent: draft.content,
+          projectGoal: "",
           chatMessages: [],
           step: "edit",
         }),

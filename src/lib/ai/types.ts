@@ -23,8 +23,12 @@ export interface SendMessageParams {
   messages: ChatMessage[];
   model?: string;
   maxTokens?: number;
+  // Ignored by models that reject sampling params (Claude 4.7+ / 5.x).
   temperature?: number;
   systemPrompt?: string;
+  // Reasoning depth for providers that support it (Claude: output_config.effort).
+  // Clamped to what the model accepts; ignored elsewhere.
+  effort?: "low" | "medium" | "high" | "xhigh" | "max";
 }
 
 export interface AIProvider {

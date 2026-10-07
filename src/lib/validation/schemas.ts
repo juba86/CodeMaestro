@@ -41,12 +41,34 @@ export const validateRequestSchema = z.object({
 
 // --- Prompt Routes ---
 
+/** Trims tags, drops empty ones and de-duplicates case-insensitively (first spelling wins). */
+export function normalizeTags(tags: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of tags) {
+    const tag = raw.trim();
+    const key = tag.toLowerCase();
+    if (!tag || seen.has(key)) continue;
+    seen.add(key);
+    out.push(tag);
+  }
+  return out;
+}
+
+// Normalised before the limits apply, so input like ["ai", "AI ", ""] can't
+// hit PromptTag's @@unique([promptId, tag]) (a P2002 → 500) or be rejected.
+export const promptTagsSchema = z
+  .array(z.string().max(200))
+  .max(100)
+  .transform(normalizeTags)
+  .pipe(z.array(z.string().min(1).max(50)).max(20));
+
 export const createPromptSchema = z.object({
   title: z.string().min(1).max(200),
   description: z.string().max(2000).optional().default(""),
   content: z.string().min(1),
   structured: z.string().optional().default("{}"),
-  tags: z.array(z.string().min(1).max(50)).max(20).optional().default([]),
+  tags: promptTagsSchema.optional().default([]),
 });
 
 export const updatePromptSchema = z.object({
@@ -54,7 +76,7 @@ export const updatePromptSchema = z.object({
   description: z.string().max(2000).optional(),
   content: z.string().min(1).optional(),
   structured: z.string().optional(),
-  tags: z.array(z.string().min(1).max(50)).max(20).optional(),
+  tags: promptTagsSchema.optional(),
   changelog: z.string().max(500).optional(),
 });
 

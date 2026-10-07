@@ -1,5 +1,5 @@
-import { World, getEntitiesWithComponents, getComponent, Entity } from '../ecs';
-import { C, HealthComponent, DamageComponent, PlayerComponent } from '../components';
+import { World, getEntitiesWithComponents, getComponent } from '../ecs';
+import { C, HealthComponent, DamageComponent, TransformComponent } from '../components';
 
 export function scoringSystem(world: World) {
     const playerEntity = getEntitiesWithComponents(world, [C.Player, C.Health])[0];
@@ -10,11 +10,12 @@ export function scoringSystem(world: World) {
 
     // Apply damage
     const damageEntities = getEntitiesWithComponents(world, [C.Damage, C.Transform]);
-    const playerTransform = getComponent<any>(world, playerEntity, C.Transform);
+    const playerTransform = getComponent<TransformComponent>(world, playerEntity, C.Transform);
+    if (!playerTransform) return;
 
     for (const de of damageEntities) {
         const damage = getComponent<DamageComponent>(world, de, C.Damage);
-        const damageTransform = getComponent<any>(world, de, C.Transform);
+        const damageTransform = getComponent<TransformComponent>(world, de, C.Transform);
         if(!damage || !damageTransform) continue;
 
         if (isAABBColliding(playerTransform, damageTransform)) {
@@ -30,7 +31,7 @@ export function scoringSystem(world: World) {
     // Win condition would be checked here
 }
 
-function isAABBColliding(a: any, b: any): boolean {
+function isAABBColliding(a: TransformComponent, b: TransformComponent): boolean {
     return a.x < b.x + b.width &&
            a.x + a.width > b.x &&
            a.y < b.y + b.height &&

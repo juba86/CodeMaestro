@@ -5,7 +5,7 @@ export type Entity = number;
 export interface World {
   entities: Set<Entity>;
   nextEntityId: number;
-  components: Map<string, Map<Entity, any>>;
+  components: Map<string, Map<Entity, unknown>>;
 }
 
 export function createWorld(): World {
@@ -44,7 +44,8 @@ export function addComponent<T>(world: World, entity: Entity, componentName: str
 
 export function getComponent<T>(world: World, entity: Entity, componentName: string): T | undefined {
     const componentMap = world.components.get(componentName);
-    return componentMap ? componentMap.get(entity) : undefined;
+    // The component name decides the stored type; callers name T accordingly.
+    return componentMap ? (componentMap.get(entity) as T | undefined) : undefined;
 }
 
 export function removeComponent(world: World, entity: Entity, componentName: string) {

@@ -50,9 +50,10 @@ export function PlaygroundView() {
     fetchModelsForProvider(selectedProvider, controller.signal)
       .then((m) => {
         setModels(m);
-        setSelectedModel((prev) =>
-          m.some((model) => model.id === prev) ? prev : m[0]?.id || ""
-        );
+        // Only fill an empty selection: an unlisted id is usually typed on
+        // purpose (new/cloud models, see Settings). Switching providers clears
+        // the selection, see selectProvider.
+        setSelectedModel((prev) => prev || m[0]?.id || "");
       })
       .catch((err) => {
         if (err instanceof DOMException && err.name === "AbortError") return;
@@ -60,6 +61,13 @@ export function PlaygroundView() {
 
     return () => controller.abort();
   }, [selectedProvider]);
+
+  function selectProvider(provider: ProviderName) {
+    setSelectedProvider(provider);
+    // Back on the default provider, restore its configured (possibly typed)
+    // model; any other provider starts with its first listed model.
+    setSelectedModel(provider === activeProvider ? activeModel : "");
+  }
 
   async function runTest(provider: ProviderName, model: string) {
     const apiKey = await getApiKey(provider);
@@ -240,7 +248,7 @@ export function PlaygroundView() {
                 aria-label="Provider"
                 className="rounded-md border border-input bg-background px-3 py-2 text-sm"
                 value={selectedProvider}
-                onChange={(e) => setSelectedProvider(e.target.value as ProviderName)}
+                onChange={(e) => selectProvider(e.target.value as ProviderName)}
               >
                 {PROVIDER_OPTIONS.map((p) => (
                   <option key={p.id} value={p.id}>{p.label}</option>
@@ -258,6 +266,10 @@ export function PlaygroundView() {
                       ? "Keine Ollama-Modelle — läuft der Daemon?"
                       : "Keine Modelle verfügbar"}
                   </option>
+                )}
+                {/* Keep a manually entered model id (not in the list) selectable. */}
+                {selectedModel && !models.some((m) => m.id === selectedModel) && (
+                  <option value={selectedModel}>{selectedModel} (eigene)</option>
                 )}
                 {models.map((m) => (
                   <option key={m.id} value={m.id}>{m.name}</option>

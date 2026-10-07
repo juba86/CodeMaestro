@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createProvider } from "@/lib/ai/provider-factory";
 import { GeminiCliProvider } from "@/lib/ai/gemini-cli-provider";
 import { ClaudeCliProvider } from "@/lib/ai/claude-cli-provider";
+import { getProvider, resolveBaseUrl } from "@/lib/ai/catalog";
 import { validateRequestSchema, formatZodError } from "@/lib/validation/schemas";
 
 export async function POST(req: NextRequest) {
@@ -25,12 +26,16 @@ export async function POST(req: NextRequest) {
     }
 
     const { provider: providerName, apiKey, authMode, baseUrl } = result.data;
+    const def = getProvider(providerName);
+    if (!def) return NextResponse.json({ valid: false });
+    // Only the caller's own key is validated (no env fallback here), and a
+    // client base URL is honoured only for configurableBaseUrl providers.
     const provider =
       authMode === "oauth" && providerName === "gemini"
         ? new GeminiCliProvider()
         : authMode === "oauth" && providerName === "claude"
           ? new ClaudeCliProvider()
-          : createProvider(providerName, apiKey, { baseUrl });
+          : createProvider(providerName, apiKey, { baseUrl: resolveBaseUrl(def, baseUrl) });
     const valid = await provider.validateCredentials(apiKey);
 
     return NextResponse.json({ valid });

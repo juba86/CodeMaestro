@@ -74,8 +74,13 @@ export class OpenAICompatibleProvider implements AIProvider {
       messages,
       stream,
     };
-    if (params.maxTokens != null) body.max_tokens = params.maxTokens;
-    if (params.temperature != null) body.temperature = params.temperature;
+    // OpenAI's own API deprecated max_tokens (reasoning models reject it with a
+    // 400) and its o-series / gpt-5 reasoning models reject custom temperature.
+    // Other compatible servers still expect the classic fields.
+    const isOpenAI = this.cfg.providerId === "openai";
+    const reasoning = isOpenAI && /^(o\d|gpt-5)/.test(String(body.model));
+    if (params.maxTokens != null) body[isOpenAI ? "max_completion_tokens" : "max_tokens"] = params.maxTokens;
+    if (params.temperature != null && !reasoning) body.temperature = params.temperature;
     return body;
   }
 

@@ -1,5 +1,7 @@
 // Component data structures
 
+import type { Sprite } from 'pixi.js';
+
 export const C = {
     Transform: 'transform',
     Physics: 'physics',
@@ -29,7 +31,8 @@ export interface PhysicsComponent {
 
 export interface SpriteComponent {
   texture: string;
-  pixiSprite: any; // PIXI.Sprite
+  /** Created lazily by the render system when null. */
+  pixiSprite: Sprite | null;
 }
 
 export interface PlayerComponent {
@@ -66,6 +69,5 @@ export interface FallingHazardComponent {
     fallSpeed: number;
 }
 
-export interface SolidComponent {
-    // a tag for solid objects for collision
-}
+// A tag for solid objects for collision (carries no data).
+export type SolidComponent = Record<string, never>;

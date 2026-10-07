@@ -8,7 +8,36 @@ import { getApiKey } from "@/lib/ai/client-keys";
 import { SwarmConfigPanel } from "./swarm-config-panel";
 import { TechniqueRecommender } from "./technique-recommender";
 import { KnowledgeInsert } from "@/components/knowledge/knowledge-insert";
+import type { PromptStructured } from "@/lib/ai/types";
 import { toast } from "sonner";
+
+/**
+ * Merges a generated prompt into the user's draft. The model only writes the
+ * sections it produced: a section it left empty keeps the user's value, and
+ * the technique (never echoed as <technique>) and swarm config (unless it
+ * returned one) are preserved.
+ */
+function mergeGenerated(current: PromptStructured, generated: PromptStructured): PromptStructured {
+  return {
+    instructions: generated.instructions || current.instructions,
+    context: generated.context || current.context,
+    constraints: generated.constraints || current.constraints,
+    targetAudience: generated.targetAudience || current.targetAudience,
+    outputFormat: generated.outputFormat || current.outputFormat,
+    task: generated.task || current.task,
+    examples: generated.examples.length > 0 ? generated.examples : current.examples,
+    technique: generated.technique ?? current.technique,
+    swarmConfig: generated.swarmConfig ?? current.swarmConfig,
+  };
+}
+
+/** Whether a parsed reply has any prompt text (a lone <technique> doesn't count). */
+function hasPromptContent(p: PromptStructured): boolean {
+  return (
+    [p.instructions, p.context, p.constraints, p.targetAudience, p.outputFormat, p.task].some((v) => v.trim()) ||
+    p.examples.length > 0
+  );
+}
 
 export function ProjectInfoForm() {
   const { structured, updateStructured, setXmlContent, setStep, setIsGenerating, isGenerating } =
@@ -24,9 +53,13 @@ export function ProjectInfoForm() {
     try {
       const apiKey = await getApiKey(activeProvider);
       const result = await generateCoTPrompt(structured, activeProvider, activeModel, apiKey);
-      if (result) {
-        updateStructured(result);
-        setXmlContent(buildXml(result));
+      if (!result || !hasPromptContent(result)) {
+        toast.error("The AI reply contained no usable prompt XML. Try again or another model.");
+      } else {
+        // Merge into the latest draft (the form stays editable while generating).
+        const merged = mergeGenerated(useBuilderStore.getState().structured, result);
+        updateStructured(merged);
+        setXmlContent(buildXml(merged));
         setStep("edit");
         toast.success("CoT prompt generated!");
       }

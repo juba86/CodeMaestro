@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createProvider } from "@/lib/ai/provider-factory";
 import { GeminiCliProvider } from "@/lib/ai/gemini-cli-provider";
 import { ClaudeCliProvider } from "@/lib/ai/claude-cli-provider";
-import { getProvider, envKeyFor, requiresKey } from "@/lib/ai/catalog";
+import { getProvider, envKeyFor, requiresKey, resolveBaseUrl } from "@/lib/ai/catalog";
 import { getSetting } from "@/lib/settings";
 import { chatRequestSchema, formatZodError } from "@/lib/validation/schemas";
 
@@ -45,6 +45,17 @@ export async function POST(req: NextRequest) {
     // Local providers, key-optional servers, and CLI-login providers run without a key.
     const needsKey = requiresKey(def) && !geminiOauth && !claudeLogin;
 
+    // A client-supplied base URL is honoured ONLY for configurableBaseUrl providers
+    // (mirrors /api/ai/models); everyone else is pinned to the catalog host.
+    // envKeyFor() never returns a server key for configurable providers, so a
+    // caller can't route the server's env key to a host they control.
+    if (def.configurableBaseUrl && !resolveBaseUrl(def, baseUrl)) {
+      return NextResponse.json(
+        { error: "A valid http(s) base URL is required for this provider.", code: "INVALID_BASE_URL" },
+        { status: 400 }
+      );
+    }
+
     // Get API key from request or the provider's env fallback.
     const apiKey = clientApiKey || envKeyFor(def) || "";
 
@@ -59,7 +70,7 @@ export async function POST(req: NextRequest) {
       ? new GeminiCliProvider()
       : claudeLogin
         ? new ClaudeCliProvider()
-        : createProvider(providerName, apiKey, { baseUrl });
+        : createProvider(providerName, apiKey, { baseUrl: resolveBaseUrl(def, baseUrl) });
 
     if (stream) {
       const encoder = new TextEncoder();

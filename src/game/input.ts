@@ -2,7 +2,8 @@ import { World, Entity } from './ecs';
 import { getComponent, addComponent, registerComponent } from './ecs';
 import { C, InputComponent } from './components';
 
-export function createInput(world: World, player: Entity) {
+/** Registers keyboard input for `player`; returns a function that removes the listeners. */
+export function createInput(world: World, player: Entity): () => void {
     registerComponent<InputComponent>(world, C.Input);
     addComponent<InputComponent>(world, player, C.Input, {
         left: false,
@@ -10,8 +11,14 @@ export function createInput(world: World, player: Entity) {
         jump: false,
     });
 
-    window.addEventListener('keydown', e => handleKeyEvent(e, true, world, player));
-    window.addEventListener('keyup', e => handleKeyEvent(e, false, world, player));
+    const onKeyDown = (e: KeyboardEvent) => handleKeyEvent(e, true, world, player);
+    const onKeyUp = (e: KeyboardEvent) => handleKeyEvent(e, false, world, player);
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    return () => {
+        window.removeEventListener('keydown', onKeyDown);
+        window.removeEventListener('keyup', onKeyUp);
+    };
 }
 
 function handleKeyEvent(e: KeyboardEvent, isDown: boolean, world: World, player: Entity) {
