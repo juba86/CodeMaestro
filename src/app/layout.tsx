@@ -3,7 +3,11 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { AppShell } from "@/components/layout/app-shell";
 import { PwaRegister } from "@/components/pwa-register";
-import { Toaster } from "sonner";
+import { ThemeController } from "@/components/theme/theme-controller";
+import { ThemeScript } from "@/components/theme/theme-script";
+import { ConfirmHost } from "@/components/ui/confirm";
+import { Toaster } from "@/components/ui/toaster";
+import { cn } from "@/lib/utils";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -31,7 +35,7 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#111113",
+  themeColor: "#0d0d0f",
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
@@ -43,12 +47,18 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="de" className="dark">
-      <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
-      >
+    // The font variables live on <html> so Tailwind's font stack (resolved on
+    // html) can see them. `dark` is the default; ThemeScript corrects it
+    // before first paint, hence suppressHydrationWarning.
+    <html lang="de" className={cn(geistSans.variable, geistMono.variable, "dark")} suppressHydrationWarning>
+      <head>
+        <ThemeScript />
+      </head>
+      <body className="font-sans antialiased">
+        <ThemeController />
         <AppShell>{children}</AppShell>
-        <Toaster richColors position="bottom-right" />
+        <Toaster />
+        <ConfirmHost />
         <PwaRegister />
       </body>
     </html>
