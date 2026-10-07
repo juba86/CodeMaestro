@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
 import { orchestrateRunSchema, formatZodError } from "@/lib/validation/schemas";
 import { orchestrateRun } from "@/lib/assistant/orchestrator";
+import { resolveOrchestra } from "@/lib/assistant/orchestra";
 import { resolveWorkdir } from "@/lib/assistant/security";
 import { SessionBusyError, isSessionBusy } from "@/lib/assistant/run-hub";
 import { launchRun, persistUserMessage, toSessionRow } from "@/lib/assistant/session-run";
@@ -47,6 +48,9 @@ export async function POST(
   }
 
   try {
+    // Roles frame the subtasks and drive the review loops; unsaved chart edits
+    // from the request win over the saved orchestra.
+    const orchestra = await resolveOrchestra(parsed.data.orchestra);
     await persistUserMessage(id, prompt);
     const row = toSessionRow(session);
     const run = await launchRun({
@@ -54,7 +58,7 @@ export async function POST(
       kind: "orchestrate",
       origin: "pwa",
       title: `[orchestrate] ${prompt}`,
-      work: (ctx) => orchestrateRun(ctx, row, prompt, { subtasks, clientProviders, plannerWorkerId }),
+      work: (ctx) => orchestrateRun(ctx, row, prompt, { subtasks, clientProviders, plannerWorkerId, orchestra }),
     });
     return NextResponse.json({ runId: run.info.runId, startedAt: run.info.startedAt }, { status: 202 });
   } catch (err) {

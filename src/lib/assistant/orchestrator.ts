@@ -11,6 +11,23 @@ import { createProvider } from "@/lib/ai/provider-factory";
 import { getProvider } from "@/lib/ai/catalog";
 import { fetchOpenAICompatModels } from "@/lib/ai/openai-compatible-provider";
 import type { AIProvider, ModelInfo } from "@/lib/ai/types";
+import {
+  CODER_MODEL,
+  ORCHESTRA_LIMITS,
+  bestFileWorker,
+  clampRounds,
+  isLocalWorker,
+  paramBillions,
+  parseVerdict,
+  resolveConductor,
+  resolveRoleWorker,
+  reviewerFor,
+  strongestGeneral,
+  type OrchestraConfig,
+  type OrchestraRole,
+  type OrchestraWorkerInfo,
+  type ReviewVerdict,
+} from "./orchestra-types";
 
 // A configured OpenAI-compatible provider passed from the client (key/base URL
 // live in the browser). Offered to the planner as an optional text worker.
@@ -28,21 +45,47 @@ export interface Worker {
   label: string;
   strengths: string;
   editsFiles: boolean;
+  /** Runs on this machine / the local network (see orchestra-types isLocalWorker). */
+  local?: boolean;
   providerId?: string; // for kind "api" — catalog id
   apiKey?: string; // for kind "api"
   baseUrl?: string; // for kind "api" (custom endpoint)
 }
 
-// Published into the session's run as-is (see run-hub). `synthesis` carries an
-// incremental chunk — clients append.
+/** A worker's client-visible capabilities (never the API key or base URL). */
+export function toWorkerInfo(w: Worker): OrchestraWorkerInfo {
+  return { id: w.id, kind: w.kind, label: w.label, editsFiles: w.editsFiles, local: isLocalWorker(w), model: w.model, strengths: w.strengths };
+}
+
+// Published into the session's run as-is (see run-hub). `synthesis`,
+// `subtask_text` and `review_text` carry incremental chunks — clients append.
+// A review round is `review_start` → `review_text`* → `review_end`; when the
+// verdict is "changes", the author's fix round streams as `subtask_text` with
+// `fixRound` set.
 export interface OrchEvent {
-  type: "plan" | "subtask_start" | "subtask_text" | "subtask_end" | "synthesis" | "error" | "log";
+  type:
+    | "plan" | "subtask_start" | "subtask_text" | "subtask_end"
+    | "review_start" | "review_text" | "review_end"
+    | "synthesis" | "error" | "log";
   content?: string;
   subtaskId?: string;
   title?: string;
   workerId?: string;
   workerLabel?: string;
   subtasks?: PlannedSubtask[];
+  /** On `plan`: the orchestra roles the subtasks may reference. */
+  roles?: { id: string; name: string; editsFiles: boolean }[];
+  /** The orchestra role running the subtask (subtask_start/subtask_end). */
+  roleId?: string;
+  roleName?: string;
+  /** Review round (1-based) on review_* events. */
+  round?: number;
+  /** On subtask_text: the author's output in the fix round after review round N. */
+  fixRound?: number;
+  reviewerRoleId?: string;
+  reviewerRoleName?: string;
+  reviewerLabel?: string;
+  verdict?: ReviewVerdict;
   /** On `log`: a user-facing note that is also persisted as a "system" row. */
   notice?: boolean;
 }
@@ -54,13 +97,17 @@ export interface PlannedSubtask {
   workerId: string;
   dependsOn: string[];
   editsFiles: boolean;
+  /** The orchestra role running this subtask (absent in role-less plans). */
+  roleId?: string;
 }
 
 export interface OrchestrationOptions {
   preference?: string;
   clientProviders?: ClientProvider[];
-  /** "" / "auto" = Auto; otherwise a worker id that plans and synthesizes. */
+  /** "" / "auto" = the conductor from `orchestra` (or Auto); otherwise a worker id that plans and synthesizes. */
   plannerWorkerId?: string;
+  /** Roles, their models and review loops. Without enabled roles the planner routes to workers directly. */
+  orchestra?: OrchestraConfig | null;
 }
 
 /** Where an orchestration reports to: live events, ordered transcript rows, Stop. */
@@ -152,39 +199,8 @@ function localPool(): Promise<LocalPool> {
   return pool;
 }
 
-// --- Model classification -------------------------------------------------------
-
-const CODER_MODEL = /coder|codestral|devstral|codellama|codegemma|starcoder/i;
-const NON_GENERAL_LOCAL = /embed|bge|rerank|guard|whisper|tts/i;
-// Strong general local models, best first. Installed models from this list win;
-// otherwise the largest remaining general model (by parameter count) is used.
-const GENERAL_PRIORITY = [
-  "qwen3.6:35b", "gemma4:31b", "nemotron3", "nemotron-cascade", "qwen3.6:27b",
-  "mistral-small3.2", "glm-4.7-flash", "gemma4:26b", "gemma4:12b", "phi4",
-];
-
-/** Parameter count in billions from Ollama's "(35B)" name suffix or a ":35b" tag. */
-function paramBillions(m: { id: string; name?: string }): number {
-  const fromName = m.name?.match(/\((\d+(?:\.\d+)?)\s*([BM])\)\s*$/i);
-  if (fromName) return Number(fromName[1]) / (fromName[2].toUpperCase() === "M" ? 1000 : 1);
-  const fromId = m.id.match(/(\d+(?:\.\d+)?)b\b/i);
-  return fromId ? Number(fromId[1]) : 0;
-}
-
-function isGeneralLocal(id: string): boolean {
-  return !CODER_MODEL.test(id) && !NON_GENERAL_LOCAL.test(id);
-}
-
-/** The strongest general (non-coder, non-embedding) local model, if any. */
-function strongestGeneral<T extends { id: string; name?: string }>(models: T[]): T | undefined {
-  const prio = (id: string) => {
-    const i = GENERAL_PRIORITY.findIndex((p) => id.startsWith(p));
-    return i < 0 ? GENERAL_PRIORITY.length : i;
-  };
-  return models
-    .filter((m) => isGeneralLocal(m.id))
-    .sort((a, b) => prio(a.id) - prio(b.id) || paramBillions(b) - paramBillions(a) || a.id.localeCompare(b.id))[0];
-}
+// Model classification (CODER_MODEL, strongestGeneral, …) lives in
+// orchestra-types.ts, shared with the org chart's preset logic.
 
 // --- Workers --------------------------------------------------------------------
 
@@ -196,6 +212,7 @@ function claudeWorker(): Worker {
     label: "Claude Code",
     strengths: "Strongest at complex reasoning, software architecture, multi-file refactors, careful debugging and agentic file edits. Best for the hardest or most safety-critical coding subtasks. Higher cost.",
     editsFiles: true,
+    local: false,
   };
 }
 
@@ -207,6 +224,7 @@ function geminiWorker(): Worker {
     label: "Gemini CLI",
     strengths: "Very large context window and fast. Strong at broad codebase sweeps, boilerplate generation, wide-but-shallow changes, and reading lots of files at once. Can edit files. Free via login.",
     editsFiles: true,
+    local: false,
   };
 }
 
@@ -220,6 +238,7 @@ function ollamaWorker(model: string): Worker {
       ? "Local coding specialist (free, runs offline). Great for self-contained functions/snippets, code explanation, and quick reviews. Cannot edit files directly — returns code/text that a file-editing worker or you applies."
       : "Local general model (free, runs offline). Good for analysis, summaries, drafting, and reviewing other workers' output. Cannot edit files directly.",
     editsFiles: false,
+    local: true,
   };
 }
 
@@ -245,6 +264,7 @@ function buildApiWorkers(clientProviders: ClientProvider[] = []): Worker[] {
       label: `API: ${def.label}`,
       strengths: `Cloud/remote text model via ${def.label} (OpenAI-compatible). Strong general LLM — use for analysis, drafting code/snippets, or reviewing other workers' output. Cannot edit files directly; returns text/code that a file-editing worker or the user applies.`,
       editsFiles: false,
+      local: !!def.local,
       providerId: def.id,
       apiKey: cp.key || "",
       baseUrl,
@@ -302,15 +322,17 @@ function geminiRestricted(session: AssistantSessionRow): boolean {
   return (!!session.approvalMode && session.approvalMode !== "off") || !!session.sandbox;
 }
 
-/** Whether a worker may change files in this session (a gated Gemini may not). */
+/**
+ * Whether a worker may change files in this session. Only Claude Code enforces
+ * the approval gate and sandbox, so every other file-capable worker (Gemini
+ * CLI, local agents) is read-only while either is on.
+ */
 export function canEditFiles(w: Worker, session: AssistantSessionRow): boolean {
-  return w.kind === "claude-cli" || (w.kind === "gemini-cli" && !geminiRestricted(session));
+  return w.editsFiles && (w.kind === "claude-cli" || !geminiRestricted(session));
 }
 
 function bestEditor(workers: Worker[], session: AssistantSessionRow): Worker | null {
-  return workers.find((w) => w.kind === "claude-cli")
-    ?? workers.find((w) => w.kind === "gemini-cli" && canEditFiles(w, session))
-    ?? null;
+  return bestFileWorker(workers, (w) => canEditFiles(w, session)) ?? null;
 }
 
 interface Assignment {
@@ -354,27 +376,59 @@ function assignWorkers(
   return { assigned, notes };
 }
 
-// Which worker plans / synthesizes. An explicit id from the UI wins; otherwise
-// Auto takes the strongest AVAILABLE model: Claude CLI > Gemini CLI > strongest
-// general local Ollama model > a configured cloud API > anything left.
+// The conductor's worker id: an explicit planner from the request wins (kept
+// for older clients), then the orchestra's conductor; "" = Auto.
+function conductorId(opts: OrchestrationOptions): string {
+  const explicit = (opts.plannerWorkerId || "").trim();
+  if (explicit && explicit !== "auto") return explicit;
+  return opts.orchestra?.conductor.workerId.trim() || "";
+}
+
+// Which worker plans / synthesizes. An explicit id wins; otherwise Auto takes
+// the strongest AVAILABLE model: Claude CLI > Gemini CLI > strongest general
+// local model > a configured cloud API > anything left.
 function resolvePlanner(workers: Worker[], plannerWorkerId?: string): { worker: Worker; note: string } | null {
   const id = (plannerWorkerId || "").trim();
-  let prefix = "";
-  if (id && id !== "auto") {
-    const found = findWorker(workers, id);
-    if (found) return { worker: found, note: `Planer: ${found.label}` };
-    prefix = `Planer „${id}“ ist nicht verfügbar — `;
-  }
-  const generalLocal = strongestGeneral(
-    workers.filter((w) => w.kind === "ollama").map((w) => ({ id: w.model, worker: w }))
-  )?.worker;
-  const worker =
-    workers.find((w) => w.kind === "claude-cli") ??
-    workers.find((w) => w.kind === "gemini-cli") ??
-    generalLocal ??
-    workers.find((w) => w.kind === "api") ??
-    workers[0];
-  return worker ? { worker, note: `${prefix}Planer (Auto): ${worker.label}` } : null;
+  const r = resolveConductor(workers, id, (x) => findWorker(workers, x));
+  if (!r.worker) return null;
+  if (!r.auto) return { worker: r.worker, note: `Planer: ${r.worker.label}` };
+  const prefix = r.unavailable ? `Planer „${id}“ ist nicht verfügbar — ` : "";
+  return { worker: r.worker, note: `${prefix}Planer (Auto): ${r.worker.label}` };
+}
+
+/** Enabled roles of the orchestra; none means role-less (worker-based) planning. */
+function activeRoles(orchestra?: OrchestraConfig | null): OrchestraRole[] {
+  return (orchestra?.roles ?? []).filter((r) => r.enabled);
+}
+
+interface RoleScope {
+  workers: Worker[];
+  session: AssistantSessionRow;
+  /** The conductor's worker — Auto for roles that don't change files. */
+  conductor: Worker;
+}
+
+// The worker that runs a role in this session (configured, else Auto).
+function roleWorker(role: OrchestraRole, scope: RoleScope): { worker: Worker; unavailable: boolean } {
+  const r = resolveRoleWorker(role, scope.workers, {
+    conductor: scope.conductor,
+    canEdit: (w) => canEditFiles(w, scope.session),
+    find: (id) => findWorker(scope.workers, id),
+  });
+  return { worker: r.worker ?? scope.conductor, unavailable: r.unavailable };
+}
+
+function roleFraming(role: OrchestraRole | undefined): string {
+  if (!role) return "";
+  const instructions = role.instructions.trim();
+  return `You are the ${role.name} on this team.${instructions ? ` ${instructions}` : ""}\n\n`;
+}
+
+/** Keeps the start and the end of a long text (reports end with the summary). */
+function clip(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const head = Math.floor(max / 4);
+  return `${text.slice(0, head)}\n[…]\n${text.slice(text.length - (max - head))}`;
 }
 
 // --- Model calls ----------------------------------------------------------------
@@ -606,7 +660,7 @@ async function runText(session: AssistantSessionRow, worker: Worker, prompt: str
 // --- Planner --------------------------------------------------------------------
 
 // Mirrors plannedSubtaskSchema / orchestrateRunSchema in validation/schemas.ts.
-const LIMITS = { subtasks: 20, id: 50, title: 300, description: 20_000, workerId: 120, dependsOn: 20 };
+const LIMITS = { subtasks: 20, id: 50, title: 300, description: 20_000, workerId: 120, dependsOn: 20, roleId: ORCHESTRA_LIMITS.roleId };
 
 function extractJson(s: string): string {
   const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/);
@@ -621,12 +675,14 @@ export interface PlanOptions extends OrchestrationOptions {
   onLog?: (msg: string) => void;
 }
 
-async function plan(
-  session: AssistantSessionRow,
-  task: string,
-  workers: Worker[],
-  opts: PlanOptions
-): Promise<{ subtasks: PlannedSubtask[]; costUsd: number }> {
+// The user's standing guidance for the conductor (planning and summary).
+function conductorGuidance(orchestra?: OrchestraConfig | null): string {
+  const instructions = orchestra?.conductor.instructions.trim();
+  return instructions ? `\nAdditional instructions from the user for you as the conductor:\n${instructions}\n` : "";
+}
+
+// Role-less planning: the planner routes each subtask to a worker directly.
+function workerPlannerPrompt(session: AssistantSessionRow, task: string, workers: Worker[], prefLine: string, guidance: string): string {
   const profile = workers
     .map((w) => {
       const readOnly = w.kind === "gemini-cli" && !canEditFiles(w, session);
@@ -634,44 +690,139 @@ async function plan(
     })
     .join("\n");
 
-  const preference = opts.preference?.trim();
-  const prefLine = preference
-    ? `\nRouting preference from the user (honor it where quality allows): ${preference}\n`
-    : "";
+  return `You are an orchestration planner for a coding assistant working in the directory ${session.cwd}.${prefLine}
+Plan from the task text alone: the workers read the project themselves when they run, so using tools or exploring files now would only delay the plan. A program parses your reply, so answer with a single JSON object and nothing else (no preamble, explanation or markdown fences).
 
-  const plannerPrompt = `You are an orchestration planner for a coding assistant working in the directory ${session.cwd}.${prefLine}
-Decide the plan from the task text ALONE. Do NOT use any tools, do NOT read files, do NOT explore the codebase, and do NOT narrate. Your ENTIRE response must be a single JSON object and nothing else — no preamble, no explanation, no markdown fences.
-
-Decompose the user's task into the MINIMUM set of subtasks and assign each to the single best worker, matching the subtask to the worker's strengths.
+Split the user's task into as few subtasks as get the job done well, and give each one to the worker whose strengths fit it best.
 
 Available workers:
 ${profile}
 
-Rules:
-- For a simple question, status check, or single action, return EXACTLY ONE subtask assigned to a file-capable worker (claude or gemini) — that worker will do the actual reading/answering.
+How to plan:
+- A simple question, status check or single action becomes exactly one subtask for a worker with editsFiles=true; that worker reads the project and answers or acts.
 - Otherwise use 2-5 subtasks.
-- Any subtask that creates/modifies/deletes files MUST use a worker with editsFiles=true (claude or gemini).
-- Non-file-editing workers (editsFiles=false — local Ollama models and "api:" cloud text models) are OPTIONAL helpers: use them only for analysis, drafting snippets, or reviewing other workers' output — never for applying file changes or tasks needing to read the project. It is fine to not use them at all.
-- Prefer claude for the hardest reasoning/architecture; gemini for broad/large-context sweeps; local/api text models for cheap isolated work.
-- Order subtasks with dependsOn (array of subtask ids that must finish first). Independent subtasks may have an empty dependsOn.
+- A subtask that creates, changes or deletes files needs a worker with editsFiles=true, because the other workers return text only.
+- Workers with editsFiles=false (local models and "api:" cloud models) can't open the project, so they are optional helpers for self-contained work: analysis, drafting snippets or reviewing other workers' output. Leaving them out is fine.
+- Prefer claude for the hardest reasoning and architecture, gemini for broad, large-context sweeps, and local or api text models for cheap isolated work.
+- List in dependsOn the ids of subtasks that must finish first; independent subtasks get [].
 
-Respond with ONLY this JSON shape:
-{"subtasks":[{"id":"s1","title":"...","description":"<clear, self-contained instruction for the worker>","workerId":"<one of the worker ids>","dependsOn":[],"editsFiles":true|false}]}
-
+Reply with this JSON shape:
+{"subtasks":[{"id":"s1","title":"<short title>","description":"<clear, self-contained instruction for the worker>","workerId":"<one of the worker ids>","dependsOn":[],"editsFiles":true|false}]}
+${guidance}
 Task:
 ${task}`;
+}
+
+// Role-based planning: the planner assigns each subtask to an enabled role;
+// the role decides the worker.
+function rolePlannerPrompt(
+  session: AssistantSessionRow,
+  task: string,
+  roles: OrchestraRole[],
+  orchestra: OrchestraConfig,
+  prefLine: string,
+  guidance: string
+): string {
+  let anyReview = false;
+  const team = roles
+    .map((r) => {
+      const reviewer = reviewerFor(orchestra, r);
+      if (reviewer) anyReview = true;
+      const traits = [
+        r.editsFiles ? "changes files" : "does not change files",
+        reviewer ? `reviewed automatically by ${reviewer.name}` : "",
+      ].filter(Boolean).join("; ");
+      const about = r.description.trim().replace(/\s+/g, " ") || r.name;
+      return `- ${r.id} — ${r.name} (${traits}): ${about}`;
+    })
+    .join("\n");
+
+  return `You are the conductor of a small team of AI coding agents working in the directory ${session.cwd}. As the orchestration planner, you split the user's task into subtasks and give each one to the team role that fits it best.${prefLine}
+Plan from the task text alone: the team members read the project themselves when they run, so exploring files now would only delay the plan. A program parses your reply, so answer with a single JSON object and nothing else (no prose, no markdown fences).
+
+Team roles:
+${team}
+
+How to plan:
+- A simple question, status check or single action becomes exactly one subtask for the best-fitting role.
+- Otherwise use 2-5 subtasks; fewer is better as long as the job gets done well.
+- Give work that creates, changes or deletes files to a role that changes files; the other roles report back text only.${anyReview ? "\n- Work of a role marked \"reviewed automatically\" gets a review right after its subtask, so plan no separate review subtask for it." : ""}
+- Write each description as a self-contained instruction: the role sees only its description and the results of the subtasks it depends on.
+- List in dependsOn the ids of subtasks that must finish first; independent subtasks get [].
+
+Reply with this JSON shape:
+{"subtasks":[{"id":"s1","title":"<short title>","roleId":"<one of the role ids>","description":"<self-contained instruction>","dependsOn":[]}]}
+${guidance}
+Task:
+${task}`;
+}
+
+// Binds planned subtasks to roles: the worker comes from the role (configured,
+// else Auto) and the role decides whether the subtask changes files. A subtask
+// without a known enabled role keeps the planner's worker (or Auto).
+function bindRoles(
+  subtasks: PlannedSubtask[],
+  roles: OrchestraRole[],
+  scope: RoleScope,
+  onLog?: (msg: string) => void
+): PlannedSubtask[] {
+  const byId = new Map(roles.map((r) => [r.id, r]));
+  // Planners sometimes answer with the display name ("Coder") instead of the id.
+  const byName = new Map(roles.map((r) => [r.name.trim().toLowerCase(), r]));
+  const noted = new Set<string>();
+  return subtasks.map((st) => {
+    const key = st.roleId?.trim() ?? "";
+    const role = key ? byId.get(key) ?? byName.get(key.toLowerCase()) : undefined;
+    if (!role) {
+      if (st.roleId) onLog?.(`Rolle „${st.roleId}“ ist unbekannt oder deaktiviert — „${st.title}“ läuft ohne Rolle.`);
+      const worker =
+        findWorker(scope.workers, st.workerId) ??
+        (st.editsFiles ? bestEditor(scope.workers, scope.session) : null) ??
+        scope.conductor;
+      return { ...st, roleId: undefined, workerId: worker.id };
+    }
+    const { worker, unavailable } = roleWorker(role, scope);
+    if (unavailable && !noted.has(role.id)) {
+      noted.add(role.id);
+      onLog?.(`Rolle „${role.name}“: Modell „${role.workerId.trim()}“ ist nicht verfügbar — automatisch gewählt: ${worker.label}.`);
+    }
+    return { ...st, roleId: role.id, workerId: worker.id, editsFiles: role.editsFiles };
+  });
+}
+
+async function plan(
+  session: AssistantSessionRow,
+  task: string,
+  workers: Worker[],
+  opts: PlanOptions
+): Promise<{ subtasks: PlannedSubtask[]; costUsd: number }> {
+  const roles = activeRoles(opts.orchestra);
+  const preference = opts.preference?.trim();
+  const prefLine = preference
+    ? `\nRouting preference from the user (honor it where quality allows): ${preference}\n`
+    : "";
+  const guidance = conductorGuidance(opts.orchestra);
+
+  const choice = resolvePlanner(workers, conductorId(opts));
+  if (!choice) throw new Error(NO_WORKER_MSG);
+  opts.onLog?.(choice.note);
+  const scope: RoleScope = { workers, session, conductor: choice.worker };
+
+  const plannerPrompt = roles.length && opts.orchestra
+    ? rolePlannerPrompt(session, task, roles, opts.orchestra, prefLine, guidance)
+    : workerPlannerPrompt(session, task, workers, prefLine, guidance);
 
   // Fallback: if the planner narrated instead of returning JSON (common for
   // simple questions), don't fail — run the whole task as a single subtask on a
-  // file-capable worker, which can read the project and answer/act.
+  // file-capable worker, which can read the project and answer/act. It runs
+  // without a role (no framing, no review loop), as the task may be a plain
+  // question; with roles, the first role that changes files lends its worker.
   const fallback = (): PlannedSubtask[] => {
-    const w = bestEditor(workers, session) ?? workers[0];
+    const role = roles.find((r) => r.editsFiles);
+    const fromRole = role ? roleWorker(role, scope).worker : null;
+    const w = (fromRole && canEditFiles(fromRole, session) ? fromRole : null) ?? bestEditor(workers, session) ?? fromRole ?? workers[0];
     return [{ id: "s1", title: "Aufgabe bearbeiten", description: task, workerId: w.id, dependsOn: [], editsFiles: canEditFiles(w, session) }];
   };
-
-  const choice = resolvePlanner(workers, opts.plannerWorkerId);
-  if (!choice) throw new Error(NO_WORKER_MSG);
-  opts.onLog?.(choice.note);
 
   let raw = "";
   let costUsd = 0;
@@ -708,15 +859,20 @@ ${task}`;
   // Clamped to the hybrid-run schema (orchestrateRunSchema) so an edited plan
   // round-trips through POST …/orchestrate/run without a validation error.
   const str = (v: unknown, max: number) => (v == null ? "" : String(v)).slice(0, max);
-  const subtasks = list.map((s, i): PlannedSubtask => ({
-    id: str(s.id, LIMITS.id) || `s${i + 1}`,
-    title: str(s.title, LIMITS.title) || `Teilaufgabe ${i + 1}`,
-    description: str(s.description, LIMITS.description),
-    workerId: str(s.workerId, LIMITS.workerId),
-    dependsOn: Array.isArray(s.dependsOn) ? s.dependsOn.slice(0, LIMITS.dependsOn).map((d) => str(d, LIMITS.id)) : [],
-    editsFiles: !!s.editsFiles,
-  }));
-  return { subtasks: subtasks.length === 0 ? fallback() : subtasks, costUsd };
+  const subtasks = list.map((s, i): PlannedSubtask => {
+    const roleId = roles.length ? str(s.roleId, LIMITS.roleId) : "";
+    return {
+      id: str(s.id, LIMITS.id) || `s${i + 1}`,
+      title: str(s.title, LIMITS.title) || `Teilaufgabe ${i + 1}`,
+      description: str(s.description, LIMITS.description),
+      workerId: str(s.workerId, LIMITS.workerId),
+      dependsOn: Array.isArray(s.dependsOn) ? s.dependsOn.slice(0, LIMITS.dependsOn).map((d) => str(d, LIMITS.id)) : [],
+      editsFiles: !!s.editsFiles,
+      ...(roleId ? { roleId } : {}),
+    };
+  });
+  if (subtasks.length === 0) return { subtasks: fallback(), costUsd };
+  return { subtasks: roles.length ? bindRoles(subtasks, roles, scope, opts.onLog) : subtasks, costUsd };
 }
 
 // Planner output and edited plans may repeat an id; ids key the live events and
@@ -773,11 +929,90 @@ export async function planSubtasks(
 
 // --- Execution ------------------------------------------------------------------
 
+interface ReviewContext {
+  task: string;
+  st: PlannedSubtask;
+  author: OrchestraRole;
+  authorWorker: Worker;
+  reviewer: OrchestraRole;
+  reviewerWorker: Worker;
+  cwd: string;
+  /** The author changed files in the working directory. */
+  authorEdits: boolean;
+}
+
+// Fresh-context review of one subtask. CLI reviewers run read-only (plan mode)
+// and are asked to check the actual files instead of trusting the report.
+function reviewPrompt(c: ReviewContext, report: string, round: number, maxRounds: number): string {
+  const access = c.reviewerWorker.editsFiles
+    ? c.authorEdits
+      ? `The changes are in the working directory ${c.cwd}. Read the affected files (and their callers where relevant) to check the actual code rather than relying on the report. Your access is read-only here, so leave the files as they are.`
+      : `You can read the project in ${c.cwd} to verify the claims in the report. Your access is read-only here, so leave the files as they are.`
+    : "You can't open the project files here, so judge the report and any code it contains.";
+  return `${roleFraming(c.reviewer)}Review round ${round} of ${maxRounds}. Look at the result with fresh eyes and judge it on its own merits against the requirements below.
+
+<task>
+${clip(c.task, 4000)}
+</task>
+
+<subtask author="${c.author.name} (${c.authorWorker.label})">
+${c.st.title}
+${clip(c.st.description.trim(), 6000)}
+</subtask>
+
+Report from the ${c.author.name}:
+<report>
+${clip(report.trim(), 8000) || "(no text output)"}
+</report>
+
+${access}
+
+Check:
+1. Does the result meet every requirement of the subtask?
+2. Is it correct — logic, edge cases, error handling, types, security?
+3. Does anything the task relies on break or go missing?
+
+Report only gaps that affect correctness or the stated requirements, each with file and line where you can see them and a concrete fix. Leave out style preferences and optional improvements, so the author can focus on what matters.
+
+End with exactly one final line: <verdict>pass</verdict> when nothing blocking remains, or <verdict>changes</verdict> when the author needs to fix something. A program reads that line to decide whether the author gets another round, so write the tag exactly once.`;
+}
+
+// The author's fix round after a "changes" verdict (fresh context as well).
+function fixPrompt(c: ReviewContext, findings: string, previous: string, round: number): string {
+  const how = c.authorEdits
+    ? `Fix each finding in the working directory ${c.cwd} and verify the fix (type check, linter or tests where available).`
+    : "Return the corrected, complete result.";
+  return `${roleFraming(c.author)}The ${c.reviewer.name} reviewed your work on this subtask (review round ${round}) and found gaps to fix.
+
+<task>
+${clip(c.task, 4000)}
+</task>
+
+<subtask>
+${c.st.title}
+${clip(c.st.description.trim(), 6000)}
+</subtask>
+
+<previous_report>
+${clip(previous.trim(), 6000) || "(no text output)"}
+</previous_report>
+
+<findings reviewer="${c.reviewer.name}">
+${clip(findings.trim(), 8000)}
+</findings>
+
+${how} If you disagree with a finding, explain briefly why instead of changing the code, so the next review can weigh your reasoning. Finish with a short summary of what you changed.
+
+(You are working in ${c.cwd}.)`;
+}
+
 /**
  * Executes a plan: subtasks run sequentially in dependency order (sharing the
- * working directory), then the planner model writes a streamed summary. Emits
- * live events, persists transcript rows in order, and stops cleanly (no
- * further subtasks, no synthesis) once `io.signal` aborts.
+ * working directory), each framed by its orchestra role and — when the role
+ * has a review loop — reviewed (and fixed) before the next one starts; then
+ * the conductor writes a streamed summary. Emits live events, persists
+ * transcript rows in order, and stops cleanly (no further subtasks, reviews or
+ * synthesis) once `io.signal` aborts.
  */
 export async function executePlan(
   session: AssistantSessionRow,
@@ -803,24 +1038,185 @@ export async function executePlan(
   log(`Worker: ${workers.map((w) => w.id).join(", ") || "—"}`);
 
   const { assigned, notes } = assignWorkers(orderSubtasks(subtasks), workers, session);
+  // Every configured role may frame a subtask — an edited plan can still name
+  // a role that was disabled in the meantime. A role that no longer exists is
+  // dropped, so the plan event never references an unknown role.
+  const orchestra = opts.orchestra ?? null;
+  const roles = new Map((orchestra?.roles ?? []).map((r) => [r.id, r]));
+  for (const a of assigned) {
+    if (a.st.roleId && !roles.has(a.st.roleId)) {
+      notes.push(`Rolle „${a.st.roleId}“ gibt es nicht (mehr) — „${a.st.title}“ läuft ohne Rolle.`);
+      a.st = { ...a.st, roleId: undefined };
+    }
+  }
   const planned = assigned.map((a) => a.st);
-  emit({ type: "plan", subtasks: planned });
-  record({ role: "plan", content: task, meta: JSON.stringify({ subtasks: planned, workers: workers.map((w) => ({ id: w.id, label: w.label })) }) });
+  const planRoles = (orchestra?.roles ?? [])
+    .filter((r) => planned.some((s) => s.roleId === r.id))
+    .map((r) => ({ id: r.id, name: r.name, editsFiles: r.editsFiles }));
+  const withRoles = planRoles.length ? { roles: planRoles } : {};
+  emit({ type: "plan", subtasks: planned, ...withRoles });
+  record({
+    role: "plan",
+    content: task,
+    meta: JSON.stringify({ subtasks: planned, workers: workers.map((w) => ({ id: w.id, label: w.label })), ...withRoles }),
+  });
   for (const n of notes) log(n, true);
 
+  // The conductor writes the summary and runs Auto roles that don't change files.
+  const conductor = resolvePlanner(workers, conductorId(opts));
+  const scope: RoleScope | null = conductor ? { workers, session, conductor: conductor.worker } : null;
+
+  // Real work: CLIs with the session's tools, gate and sandbox; text workers
+  // stream a chat. Failures are reported through `stream.onError`.
+  const runWork = async (worker: Worker, prompt: string, stream: StreamOpts): Promise<void> => {
+    try {
+      if (worker.kind === "ollama" || worker.kind === "api") {
+        await runChat(worker, prompt, stream);
+      } else {
+        const r = await runCli(session, worker, prompt, "work", stream);
+        costUsd += r.costUsd;
+        if (r.isError && !signal?.aborted) isError = true;
+      }
+    } catch (err) {
+      stream.onError?.(`${worker.label} fehlgeschlagen: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  // Review loop: the reviewer role checks the subtask; on "changes" the author
+  // fixes the findings, up to the role's maxRounds. Returns the author's output
+  // including fixes, or null when the review could not start.
+  const reviewLoop = async (
+    st: PlannedSubtask,
+    role: OrchestraRole,
+    author: Worker,
+    reviewer: OrchestraRole,
+    authorText: string
+  ): Promise<{ output: string; verdict: ReviewVerdict; rounds: number } | null> => {
+    if (!scope) {
+      log(`Prüfung von „${st.title}“ übersprungen: kein Modell verfügbar.`);
+      return null;
+    }
+    const { worker: reviewerWorker, unavailable } = roleWorker(reviewer, scope);
+    if (unavailable) {
+      log(`Rolle „${reviewer.name}“: Modell „${reviewer.workerId.trim()}“ ist nicht verfügbar — automatisch gewählt: ${reviewerWorker.label}.`);
+    }
+    const c: ReviewContext = {
+      task, st, author: role, authorWorker: author, reviewer, reviewerWorker, cwd: session.cwd,
+      authorEdits: st.editsFiles && canEditFiles(author, session),
+    };
+    const maxRounds = clampRounds(role.reviewLoop.maxRounds);
+    let output = authorText;
+    let latest = authorText;
+    let verdict: ReviewVerdict = "unknown";
+    let rounds = 0;
+    for (let round = 1; round <= maxRounds; round++) {
+      if (signal?.aborted) break;
+      rounds = round;
+      emit({
+        type: "review_start", subtaskId: st.id, round,
+        reviewerRoleId: reviewer.id, reviewerRoleName: reviewer.name, reviewerLabel: reviewerWorker.label,
+      });
+      let review = "";
+      const reviewErrors: string[] = [];
+      try {
+        const r = await runText(session, reviewerWorker, reviewPrompt(c, latest, round, maxRounds), {
+          signal,
+          onChunk: (chunk) => {
+            review += chunk;
+            emit({ type: "review_text", subtaskId: st.id, round, content: chunk });
+          },
+          onError: (m) => reviewErrors.push(m),
+          onLog: (m) => log(m),
+        });
+        costUsd += r.costUsd;
+        if (r.isError && !review.trim() && !reviewErrors.length) reviewErrors.push("kein Output");
+      } catch (err) {
+        reviewErrors.push(err instanceof Error ? err.message : String(err));
+      }
+      verdict = parseVerdict(review);
+      if (review.trim()) {
+        record({
+          role: "assistant",
+          content: review.trim(),
+          meta: JSON.stringify({
+            subtaskId: st.id, review: true, round, verdict,
+            worker: reviewerWorker.label, workerId: reviewerWorker.id, roleId: reviewer.id, roleName: reviewer.name,
+          }),
+        });
+      }
+      if (reviewErrors.length && !signal?.aborted) {
+        isError = true;
+        const msg = `Prüfung von „${st.title}“ fehlgeschlagen (${reviewerWorker.label}): ${reviewErrors[0]}`;
+        emit({ type: "error", content: msg, subtaskId: st.id });
+        record({ role: "error", content: msg.slice(0, 4000), meta: JSON.stringify({ subtaskId: st.id, review: true, round }) });
+      }
+      emit({ type: "review_end", subtaskId: st.id, round, verdict });
+      if (signal?.aborted) break;
+      if (verdict === "unknown" && review.trim() && !reviewErrors.length) {
+        log(`Prüfung von „${st.title}“ ohne eindeutiges Urteil — keine Nachbesserung.`, true);
+      }
+      if (verdict !== "changes") break;
+      if (round === maxRounds) {
+        log(`Prüfschleife: „${st.title}“ hat nach ${maxRounds} ${maxRounds === 1 ? "Runde" : "Runden"} noch offene Punkte.`, true);
+        break;
+      }
+
+      // Fix round on the author's worker; streams into the subtask.
+      let fix = "";
+      const fixErrors: string[] = [];
+      await runWork(author, fixPrompt(c, review, latest, round), {
+        signal,
+        onChunk: (chunk) => {
+          emit({ type: "subtask_text", subtaskId: st.id, content: fix ? chunk : `\n\n${chunk}`, fixRound: round });
+          fix += chunk;
+        },
+        onError: (m) => {
+          if (signal?.aborted) return;
+          fixErrors.push(m);
+          emit({ type: "error", content: m, subtaskId: st.id });
+        },
+        onLog: (m) => log(m),
+      });
+      if (fix.trim() || (!fixErrors.length && !signal?.aborted)) {
+        record({
+          role: "assistant",
+          content: fix.trim() || "(kein Output)",
+          meta: JSON.stringify({
+            subtaskId: st.id, title: st.title, worker: author.label, workerId: author.id,
+            roleId: role.id, roleName: role.name, fixRound: round,
+          }),
+        });
+      }
+      for (const e of fixErrors) record({ role: "error", content: e.slice(0, 4000), meta: JSON.stringify({ subtaskId: st.id, fixRound: round }) });
+      if (fix.trim()) {
+        output += `\n\n${fix}`;
+        latest = fix;
+      }
+      if (fixErrors.length) {
+        isError = true;
+        break;
+      }
+    }
+    return { output, verdict, rounds };
+  };
+
   const results = new Map<string, string>();
+  const reviews = new Map<string, { reviewer: string; verdict: ReviewVerdict; rounds: number }>();
 
   for (const { st, worker } of assigned) {
     if (signal?.aborted) return stop();
-    emit({ type: "subtask_start", subtaskId: st.id, title: st.title, workerId: worker.id, workerLabel: worker.label });
+    const role = st.roleId ? roles.get(st.roleId) : undefined;
+    const roleInfo = role ? { roleId: role.id, roleName: role.name } : {};
+    emit({ type: "subtask_start", subtaskId: st.id, title: st.title, workerId: worker.id, workerLabel: worker.label, ...roleInfo });
 
     // Provide upstream results as context (file edits are already on disk for CLIs,
     // but a text summary helps both CLI and local workers stay aligned).
     const deps = st.dependsOn.map((d) => results.get(d)).filter(Boolean);
     const context = deps.length
-      ? `\n\nContext from previous subtasks:\n${deps.map((c, i) => `[${i + 1}] ${String(c).slice(0, 1500)}`).join("\n")}`
+      ? `\n\nContext from previous subtasks:\n${deps.map((c, i) => `[${i + 1}] ${clip(String(c), 1500)}`).join("\n")}`
       : "";
-    const prompt = `${st.description.trim() || st.title}${context}\n\n(You are working in ${session.cwd}.)`;
+    const body = st.description.trim() || st.title;
+    const prompt = `${role ? `${roleFraming(role)}Your subtask:\n${body}` : body}${context}\n\n(You are working in ${session.cwd}.)`;
 
     const errors: string[] = [];
     const fail = (msg: string) => {
@@ -831,7 +1227,7 @@ export async function executePlan(
     // Collected from the live chunks, so partial output survives a failed or
     // stopped stream and is persisted exactly as the UI showed it.
     let text = "";
-    const stream: StreamOpts = {
+    await runWork(worker, prompt, {
       signal,
       onChunk: (c) => {
         text += c;
@@ -839,52 +1235,59 @@ export async function executePlan(
       },
       onError: fail,
       onLog: (m) => log(m),
-    };
-
-    try {
-      if (worker.kind === "ollama" || worker.kind === "api") {
-        await runChat(worker, prompt, stream);
-      } else {
-        const r = await runCli(session, worker, prompt, "work", stream);
-        costUsd += r.costUsd;
-        if (r.isError && !signal?.aborted) isError = true;
-      }
-    } catch (err) {
-      fail(`${worker.label} fehlgeschlagen: ${err instanceof Error ? err.message : String(err)}`);
-    }
+    });
     if (errors.length) isError = true;
 
-    results.set(st.id, text);
     if (text.trim() || (!errors.length && !signal?.aborted)) {
       record({
         role: "assistant",
         content: text.trim() || "(kein Output)",
-        meta: JSON.stringify({ subtaskId: st.id, title: st.title, worker: worker.label, workerId: worker.id }),
+        meta: JSON.stringify({ subtaskId: st.id, title: st.title, worker: worker.label, workerId: worker.id, ...roleInfo }),
       });
     }
     for (const e of errors) record({ role: "error", content: e.slice(0, 4000), meta: JSON.stringify({ subtaskId: st.id }) });
-    emit({ type: "subtask_end", subtaskId: st.id, workerLabel: worker.label });
+
+    let output = text;
+    const reviewer = role && orchestra ? reviewerFor(orchestra, role) : null;
+    if (role && reviewer && !signal?.aborted) {
+      if (errors.length) {
+        log(`Prüfung von „${st.title}“ übersprungen: die Teilaufgabe ist fehlgeschlagen.`);
+      } else {
+        const outcome = await reviewLoop(st, role, worker, reviewer, text);
+        if (outcome) {
+          output = outcome.output;
+          if (outcome.rounds) reviews.set(st.id, { reviewer: reviewer.name, verdict: outcome.verdict, rounds: outcome.rounds });
+        }
+      }
+    }
+    results.set(st.id, output);
+    emit({ type: "subtask_end", subtaskId: st.id, workerLabel: worker.label, ...roleInfo });
   }
 
   if (signal?.aborted) return stop();
 
   // Synthesis: a concise wrap-up of what the workers produced, streamed on the
-  // planner model (or Auto) — not hardwired to Claude.
-  const synthesizer = resolvePlanner(workers, opts.plannerWorkerId);
-  if (!synthesizer) {
+  // conductor's model (or Auto) — not hardwired to Claude.
+  if (!conductor) {
     log("Keine Zusammenfassung: kein Modell verfügbar.");
     return { costUsd, isError, stopped: false };
   }
   const summaryInput = assigned
-    .map(({ st, worker }) => `### ${st.title} (${worker.label})\n${String(results.get(st.id) || "").slice(0, 2000)}`)
+    .map(({ st, worker }) => {
+      const role = st.roleId ? roles.get(st.roleId) : undefined;
+      const rv = reviews.get(st.id);
+      const reviewLine = rv ? `\nReview by ${rv.reviewer}: ${rv.verdict} after ${rv.rounds} round(s)` : "";
+      return `### ${st.title} (${role ? `${role.name}, ` : ""}${worker.label})${reviewLine}\n${clip(String(results.get(st.id) || ""), 2000)}`;
+    })
     .join("\n\n");
-  const synthPrompt = `You orchestrated multiple AI workers on this task:\n"${task}"\n\nHere is what each worker produced:\n\n${summaryInput}\n\nWrite a concise final summary for the user: what was accomplished across the subtasks, any files changed, and any follow-ups or caveats. Do not use any tools.`;
+  const caveats = reviews.size ? "any follow-ups or caveats (including review findings that remain open)" : "any follow-ups or caveats";
+  const synthPrompt = `You orchestrated multiple AI workers on this task:\n"${task}"\n\nHere is what each worker produced:\n\n${summaryInput}\n\nWrite a concise final summary for the user: what was accomplished across the subtasks, any files changed, and ${caveats}. The reports above are your source, so answer from them without using tools.${conductorGuidance(orchestra)}`;
 
-  log(`Zusammenfassung: ${synthesizer.worker.label}`);
+  log(`Zusammenfassung: ${conductor.worker.label}`);
   let synth = "";
   const synthErrors: string[] = [];
   try {
-    const r = await runText(session, synthesizer.worker, synthPrompt, {
+    const r = await runText(session, conductor.worker, synthPrompt, {
       signal,
       onChunk: (c) => { synth += c; emit({ type: "synthesis", content: c }); },
       onError: (m) => synthErrors.push(m),

@@ -1,4 +1,10 @@
 import { z } from "zod";
+import {
+  ORCHESTRA_LIMITS,
+  ORCHESTRA_PRESETS,
+  ORCHESTRA_PRESET_VALUES,
+  ROLE_ID_PATTERN,
+} from "@/lib/assistant/orchestra-types";
 
 // --- Shared enums ---
 
@@ -167,14 +173,77 @@ const clientProviderSchema = z.object({
   baseUrl: z.string().max(500).optional().default(""),
 });
 
+// --- Orchestra (org chart: which model plays which role) ---
+// Types, defaults and limits live in src/lib/assistant/orchestra-types.ts.
+
+const orchestraRoleSchema = z.object({
+  id: z
+    .string()
+    .trim()
+    .min(1)
+    .max(ORCHESTRA_LIMITS.roleId)
+    .regex(ROLE_ID_PATTERN, "Rollen-ID: nur Kleinbuchstaben, Ziffern, „-“ und „_“ (beginnend mit Buchstabe oder Ziffer)."),
+  name: z.string().trim().min(1).max(ORCHESTRA_LIMITS.name),
+  description: z.string().max(ORCHESTRA_LIMITS.description).optional().default(""),
+  instructions: z.string().max(ORCHESTRA_LIMITS.instructions).optional().default(""),
+  // "" = Auto (picked from the available workers at run time).
+  workerId: z.string().trim().max(ORCHESTRA_LIMITS.workerId).optional().default(""),
+  editsFiles: z.boolean().optional().default(false),
+  enabled: z.boolean().optional().default(true),
+  reviewLoop: z
+    .object({
+      enabled: z.boolean().optional().default(false),
+      reviewerRoleId: z.string().trim().max(ORCHESTRA_LIMITS.roleId).optional().default(""),
+      maxRounds: z.number().int().min(1).max(ORCHESTRA_LIMITS.maxRounds).optional().default(1),
+    })
+    .optional()
+    .default({ enabled: false, reviewerRoleId: "", maxRounds: 1 }),
+});
+
+export const orchestraConfigSchema = z
+  .object({
+    version: z.literal(1).optional().default(1),
+    conductor: z
+      .object({
+        workerId: z.string().trim().max(ORCHESTRA_LIMITS.workerId).optional().default(""),
+        instructions: z.string().max(ORCHESTRA_LIMITS.instructions).optional().default(""),
+      })
+      .optional()
+      .default({ workerId: "", instructions: "" }),
+    roles: z.array(orchestraRoleSchema).max(ORCHESTRA_LIMITS.roles),
+    preset: z.enum(ORCHESTRA_PRESET_VALUES).optional().default("custom"),
+  })
+  .superRefine((config, ctx) => {
+    const seen = new Set<string>();
+    config.roles.forEach((role, i) => {
+      if (seen.has(role.id)) {
+        ctx.addIssue({ code: "custom", path: ["roles", i, "id"], message: `Rollen-ID „${role.id}“ kommt mehrfach vor.` });
+      }
+      seen.add(role.id);
+    });
+  });
+
+// PUT /api/orchestra
+export const orchestraPutSchema = z.object({ config: orchestraConfigSchema });
+
+// POST /api/orchestra/preset — `config` (optional) keeps the user's roles and
+// only reassigns the models.
+export const orchestraPresetSchema = z.object({
+  preset: z.enum(ORCHESTRA_PRESETS),
+  clientProviders: z.array(clientProviderSchema).max(20).optional().default([]),
+  config: orchestraConfigSchema.optional(),
+});
+
 export const orchestrateSchema = z.object({
   prompt: z.string().min(1).max(100000),
   preference: z.string().max(2000).optional(),
   clientProviders: z.array(clientProviderSchema).max(20).optional().default([]),
-  // Which worker plans (and synthesizes). "" / "auto" = pick an available model
-  // without forcing a Claude account; a worker id (e.g. "gemini", "ollama:...")
-  // pins it explicitly.
+  // Which worker plans (and synthesizes). "" / "auto" = the orchestra's
+  // conductor (or an available model, without forcing a Claude account); a
+  // worker id (e.g. "gemini", "ollama:...") pins it explicitly.
   plannerWorkerId: z.string().max(120).optional(),
+  // Run with this (possibly unsaved) orchestra instead of the saved one.
+  orchestra: orchestraConfigSchema.optional(),
 });
 
 const plannedSubtaskSchema = z.object({
@@ -184,6 +253,8 @@ const plannedSubtaskSchema = z.object({
   workerId: z.string().min(1).max(120),
   dependsOn: z.array(z.string().max(50)).max(20).optional().default([]),
   editsFiles: z.boolean().optional().default(false),
+  // The orchestra role that runs the subtask (role framing + review loop).
+  roleId: z.string().max(ORCHESTRA_LIMITS.roleId).optional(),
 });
 
 export const orchestrateRunSchema = z.object({
@@ -191,6 +262,7 @@ export const orchestrateRunSchema = z.object({
   subtasks: z.array(plannedSubtaskSchema).min(1).max(20),
   clientProviders: z.array(clientProviderSchema).max(20).optional().default([]),
   plannerWorkerId: z.string().max(120).optional(),
+  orchestra: orchestraConfigSchema.optional(),
 });
 
 // Loop mode: repeat a task server-side until the agent prints the completion

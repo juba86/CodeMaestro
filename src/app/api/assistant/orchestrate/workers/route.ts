@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { orchestrateSchema, formatZodError } from "@/lib/validation/schemas";
-import { discoverAllWorkers } from "@/lib/assistant/orchestrator";
+import { discoverAllWorkers, toWorkerInfo } from "@/lib/assistant/orchestrator";
 
 export const runtime = "nodejs";
 
@@ -13,8 +13,11 @@ const workersBodySchema = z.object({
 
 // Lists the worker pool (file-editing CLIs + every local Ollama model + the
 // user's configured cloud/custom providers) so the UI can populate the
-// orchestrator's "planner model" dropdown. No session needed — discovery is
-// global. Body (optional): { clientProviders?: ClientProvider[] }.
+// orchestrator's "planner model" dropdown and the org chart. Each worker
+// carries its capabilities (kind, editsFiles, local, model, strengths) — never
+// API keys. No session needed — discovery is global (editsFiles is the
+// worker's capability; a session's approval gate can still make Gemini
+// read-only). Body (optional): { clientProviders?: ClientProvider[] }.
 export async function POST(req: NextRequest) {
   let body: unknown = {};
   try {
@@ -34,7 +37,7 @@ export async function POST(req: NextRequest) {
   try {
     const workers = await discoverAllWorkers(parsed.data.clientProviders);
     return NextResponse.json({
-      workers: workers.map((w) => ({ id: w.id, label: w.label, kind: w.kind, editsFiles: w.editsFiles })),
+      workers: workers.map(toWorkerInfo),
     });
   } catch (err) {
     console.error("[orchestrate/workers]", err);

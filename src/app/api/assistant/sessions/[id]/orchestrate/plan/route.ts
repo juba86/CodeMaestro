@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
 import { orchestrateSchema, formatZodError } from "@/lib/validation/schemas";
-import { planSubtasks, discoverAllWorkers, canEditFiles } from "@/lib/assistant/orchestrator";
+import { planSubtasks, discoverAllWorkers, canEditFiles, toWorkerInfo } from "@/lib/assistant/orchestrator";
+import { resolveOrchestra } from "@/lib/assistant/orchestra";
 import { resolveWorkdir } from "@/lib/assistant/security";
 import { SessionBusyError, isSessionBusy } from "@/lib/assistant/run-hub";
 import { toSessionRow } from "@/lib/assistant/session-run";
@@ -53,10 +54,12 @@ export async function POST(
     // The planner is a tool-less, read-only text run; abort it when the
     // client goes away so no orphaned CLI keeps running.
     const row = toSessionRow(session);
+    const orchestra = await resolveOrchestra(parsed.data.orchestra);
     const { subtasks, costUsd } = await planSubtasks(row, prompt, {
       preference,
       clientProviders,
       plannerWorkerId,
+      orchestra,
       signal: req.signal,
     });
     if (costUsd > 0) {
@@ -70,10 +73,12 @@ export async function POST(
     // Offer the full pool (incl. every local Ollama model + configured cloud APIs)
     // for manual reassignment. editsFiles reflects this session (a Gemini
     // worker is read-only under the approval gate / sandbox).
+    // `roles` (the enabled orchestra roles) label the subtasks' roleId.
     const allWorkers = await discoverAllWorkers(clientProviders);
     return NextResponse.json({
-      workers: allWorkers.map((w) => ({ id: w.id, label: w.label, editsFiles: canEditFiles(w, row), strengths: w.strengths })),
+      workers: allWorkers.map((w) => ({ ...toWorkerInfo(w), editsFiles: canEditFiles(w, row) })),
       subtasks,
+      roles: orchestra.roles.filter((r) => r.enabled).map((r) => ({ id: r.id, name: r.name, editsFiles: r.editsFiles })),
     });
   } catch (err) {
     return NextResponse.json(
