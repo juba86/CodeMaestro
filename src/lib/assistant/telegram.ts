@@ -37,6 +37,7 @@ import {
 import { retrieveChunks } from "@/lib/knowledge/retrieve";
 import { promises as fs } from "fs";
 import path from "path";
+import { spawn } from "child_process";
 
 // ---------------------------------------------------------------------------
 // Telegram bridge: an optional, long-poll-based front-end onto the SAME run
@@ -329,8 +330,19 @@ async function boundSession(chatId: number): Promise<string | undefined> {
 }
 
 function bindChat(chatId: number, sessionId: string): void {
+  state().chatSessions.set(chatId, sessionId);
+  saveBindings();
+}
+
+/** Drops a chat's session binding (persisted); the next prompt starts a fresh session. */
+async function unbindChat(chatId: number): Promise<void> {
+  await loadBindings();
+  state().chatSessions.delete(chatId);
+  saveBindings();
+}
+
+function saveBindings(): void {
   const s = state();
-  s.chatSessions.set(chatId, sessionId);
   // Serialize writes; each one stores the map as it is when the write runs —
   // after the persisted bindings were merged in, so none of them is dropped.
   s.bindingsSave = s.bindingsSave
@@ -344,6 +356,201 @@ function bindChat(chatId: number, sessionId: string): void {
       });
     })
     .catch((err) => console.error("[telegram] saving chat bindings failed", err));
+}
+
+// --- Per-chat settings overrides ----------------------------------------------
+
+// Telegram commands (/settings, /model, /provider, /rag, /cwd) let each chat
+// override the global bridge config. Persisted in the Setting table
+// (chatId -> partial config) so choices survive server restarts.
+interface ChatOverrides {
+  provider?: string;
+  model?: string;
+  permissionMode?: string;
+  approvalMode?: string;
+  useKnowledge?: boolean;
+  cwd?: string;
+}
+
+const OVERRIDES_SETTING_KEY = "telegramChatOverrides";
+
+async function getAllOverrides(): Promise<Record<string, ChatOverrides>> {
+  try {
+    const row = await prisma.setting.findUnique({ where: { key: OVERRIDES_SETTING_KEY } });
+    return row ? (JSON.parse(row.value) as Record<string, ChatOverrides>) : {};
+  } catch {
+    return {};
+  }
+}
+
+async function saveAllOverrides(all: Record<string, ChatOverrides>): Promise<void> {
+  await prisma.setting.upsert({
+    where: { key: OVERRIDES_SETTING_KEY },
+    update: { value: JSON.stringify(all) },
+    create: { key: OVERRIDES_SETTING_KEY, value: JSON.stringify(all) },
+  });
+}
+
+// Merge a patch into a chat's overrides. A key explicitly set to undefined
+// removes that override (back to the global default).
+async function patchChatOverrides(chatId: number, patch: ChatOverrides): Promise<void> {
+  const all = await getAllOverrides();
+  const next: ChatOverrides = { ...(all[String(chatId)] || {}), ...patch };
+  for (const k of Object.keys(next) as (keyof ChatOverrides)[]) {
+    if (next[k] === undefined) delete next[k];
+  }
+  all[String(chatId)] = next;
+  await saveAllOverrides(all);
+}
+
+async function resetChatOverrides(chatId: number): Promise<void> {
+  const all = await getAllOverrides();
+  delete all[String(chatId)];
+  await saveAllOverrides(all);
+}
+
+/** Global config merged with this chat's overrides. */
+async function configFor(chatId: number, config: TelegramConfig): Promise<TelegramConfig> {
+  const all = await getAllOverrides();
+  return { ...config, ...(all[String(chatId)] || {}) };
+}
+
+// --- Settings menu (/settings) ------------------------------------------------
+
+// Providers the session runner supports (claude/gemini CLIs + plain agents; the
+// runner degrades gracefully with an install hint if a binary is missing).
+const TG_PROVIDERS = ["claude", "gemini", "opencode", "codex", "aider"];
+const PERMISSION_MODES = ["default", "acceptEdits", "plan", "bypassPermissions"];
+const APPROVAL_MODES = ["off", "edits", "all"];
+
+// Button suggestions per provider ("" = CLI default). Any other model can be
+// set free-form via /model <name>.
+const MODEL_SUGGESTIONS: Record<string, string[]> = {
+  claude: ["", "fable", "opus", "sonnet", "haiku"],
+  gemini: ["", "gemini-3-pro-preview", "gemini-2.5-pro", "gemini-2.5-flash"],
+};
+
+function settingsText(eff: TelegramConfig): string {
+  return [
+    "⚙️ Einstellungen für diesen Chat",
+    `Provider: ${eff.provider || "claude"}`,
+    `Modell: ${eff.model || "(Standard)"}`,
+    `Permission-Mode: ${eff.permissionMode || "default"}`,
+    `Approval-Mode: ${eff.approvalMode || "edits"}`,
+    `Wissensbasis (RAG): ${eff.useKnowledge ? "AN" : "AUS"}`,
+    `Verzeichnis: ${eff.cwd || "(nicht gesetzt)"}`,
+  ].join("\n");
+}
+
+async function sendSettingsMenu(token: string, chatId: number, config: TelegramConfig) {
+  const eff = await configFor(chatId, config);
+  await sendMessage(token, chatId, settingsText(eff), {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: "🤖 Provider", callback_data: "cfg:provider" },
+          { text: "🧠 Modell", callback_data: "cfg:model" },
+        ],
+        [
+          { text: "🛡 Permission", callback_data: "cfg:perm" },
+          { text: "✅ Approval", callback_data: "cfg:approval" },
+        ],
+        [
+          { text: eff.useKnowledge ? "📚 RAG ausschalten" : "📚 RAG anschalten", callback_data: `set:rag:${eff.useKnowledge ? "off" : "on"}` },
+          { text: "♻️ Reset", callback_data: "cfg:reset" },
+        ],
+      ],
+    },
+  });
+}
+
+// One button per row so long labels stay readable on mobile.
+function choiceKeyboard(field: string, values: string[], current: string): { inline_keyboard: InlineKeyboard } {
+  return {
+    inline_keyboard: values.map((v) => [
+      { text: `${v === current ? "• " : ""}${v || "(Standard)"}`, callback_data: `set:${field}:${v}` },
+    ]),
+  };
+}
+
+async function sendChoiceMenu(token: string, chatId: number, config: TelegramConfig, what: string) {
+  const eff = await configFor(chatId, config);
+  if (what === "provider") {
+    await sendMessage(token, chatId, "Provider wählen:", {
+      reply_markup: choiceKeyboard("provider", TG_PROVIDERS, eff.provider || "claude"),
+    });
+  } else if (what === "model") {
+    const suggestions = MODEL_SUGGESTIONS[eff.provider || "claude"] || [""];
+    await sendMessage(token, chatId, "Modell wählen — oder frei setzen mit /model <name>:", {
+      reply_markup: choiceKeyboard("model", suggestions, eff.model || ""),
+    });
+  } else if (what === "perm") {
+    await sendMessage(token, chatId, "Permission-Mode wählen:", {
+      reply_markup: choiceKeyboard("perm", PERMISSION_MODES, eff.permissionMode || "default"),
+    });
+  } else if (what === "approval") {
+    await sendMessage(token, chatId, "Approval-Mode wählen (off = keine Rückfragen, edits = bei Dateiänderungen, all = bei allem):", {
+      reply_markup: choiceKeyboard("approval", APPROVAL_MODES, eff.approvalMode || "edits"),
+    });
+  } else if (what === "reset") {
+    await resetChatOverrides(chatId);
+    await sendMessage(token, chatId, "♻️ Alle Overrides entfernt — globale Einstellungen gelten wieder.");
+  }
+}
+
+// Applies one setting for a chat: persists the override, live-updates the bound
+// session where that is safe, and confirms. Shared by buttons and commands.
+async function applySetting(token: string, chatId: number, field: string, value: string) {
+  const sid = await boundSession(chatId);
+  const updateSession = async (data: { model?: string; permissionMode?: string; approvalMode?: string }) => {
+    if (!sid) return;
+    try { await prisma.assistantSession.update({ where: { id: sid }, data }); } catch { /* session gone */ }
+  };
+  switch (field) {
+    case "rag": {
+      await patchChatOverrides(chatId, { useKnowledge: value === "on" });
+      await sendMessage(token, chatId, `📚 Wissensbasis (RAG) für diesen Chat: ${value === "on" ? "AN" : "AUS"}`);
+      return;
+    }
+    case "provider": {
+      if (!TG_PROVIDERS.includes(value)) {
+        await sendMessage(token, chatId, `Unbekannter Provider. Möglich: ${TG_PROVIDERS.join(", ")}`);
+        return;
+      }
+      // Model resets with the provider; a session cannot switch provider, so
+      // unbind — the next prompt creates a fresh session with the new provider.
+      await patchChatOverrides(chatId, { provider: value, model: undefined });
+      await unbindChat(chatId);
+      await sendMessage(token, chatId, `🤖 Provider: ${value} — neue Session startet mit dem nächsten Prompt.`);
+      return;
+    }
+    case "model": {
+      await patchChatOverrides(chatId, { model: value });
+      await updateSession({ model: value });
+      await sendMessage(token, chatId, `🧠 Modell: ${value || "(Standard)"}`);
+      return;
+    }
+    case "perm": {
+      if (!PERMISSION_MODES.includes(value)) {
+        await sendMessage(token, chatId, `Ungültig. Möglich: ${PERMISSION_MODES.join(", ")}`);
+        return;
+      }
+      await patchChatOverrides(chatId, { permissionMode: value });
+      await updateSession({ permissionMode: value });
+      await sendMessage(token, chatId, `🛡 Permission-Mode: ${value}`);
+      return;
+    }
+    case "approval": {
+      if (!APPROVAL_MODES.includes(value)) {
+        await sendMessage(token, chatId, `Ungültig. Möglich: ${APPROVAL_MODES.join(", ")}`);
+        return;
+      }
+      await patchChatOverrides(chatId, { approvalMode: value });
+      await updateSession({ approvalMode: value });
+      await sendMessage(token, chatId, `✅ Approval-Mode: ${value}`);
+      return;
+    }
+  }
 }
 
 // --- Session helpers ----------------------------------------------------------
@@ -371,7 +578,7 @@ async function getActiveSession(chatId: number, config: TelegramConfig): Promise
     const row = await prisma.assistantSession.findUnique({ where: { id: existing }, select: { id: true } });
     if (row) return existing;
   }
-  const { id } = await createSession(config);
+  const { id } = await createSession(await configFor(chatId, config));
   bindChat(chatId, id);
   return id;
 }
@@ -828,6 +1035,25 @@ async function answerCardWithText(token: string, chatId: number, card: Card, tex
 const RUN_KIND_LABEL: Record<string, string> = { turn: "Einzelauftrag", loop: "Loop", orchestrate: "Orchestrierung" };
 const SESSION_STATUS_LABEL: Record<string, string> = { idle: "bereit", running: "läuft", error: "Fehler" };
 
+// --- Self-restart (/restart) --------------------------------------------------
+
+// Schedules a service restart OUTSIDE our own cgroup via a transient systemd
+// timer: systemd-run registers the timer and returns immediately, so the
+// restart still fires after this process is torn down — and the confirmation
+// message above gets out first. Killing/restarting a unit also kills every
+// child it spawned (assistant CLIs, orchestrator workers).
+function scheduleSelfRestart(): void {
+  const unit = process.env.CODEMAESTRO_UNIT || "codemaestro.service";
+  try {
+    spawn("systemd-run", ["--user", "--on-active=5", "systemctl", "--user", "restart", unit], {
+      detached: true,
+      stdio: "ignore",
+    }).unref();
+  } catch {
+    /* systemd-run missing — nothing we can do from inside the process */
+  }
+}
+
 const HELP = [
   "🤖 CodeMaestro Assistant",
   "",
@@ -838,6 +1064,12 @@ const HELP = [
   "/sessions – Sessions auflisten & wählen",
   `/loop [n] [Pause] <Aufgabe> – wiederholt die Aufgabe bis zu n-mal (Standard 10, max. ${LOOP_MAX_ITERATIONS}), bis der Agent <promise>${LOOP_PROMISE}</promise> meldet; Pause z. B. 30s, 10m, 1h`,
   "/kb <Frage> – Wissensbasis durchsuchen (RAG)",
+  "/settings – Chat-Einstellungen (Provider, Modell, Modi, RAG)",
+  "/model <name> – Modell für diesen Chat setzen",
+  "/provider <name> – Provider wechseln (claude, gemini, …)",
+  "/cwd <pfad> – Arbeitsverzeichnis für diesen Chat setzen",
+  "/rag on|off|reset – Wissensbasis (RAG) für diesen Chat umschalten",
+  "/restart – CodeMaestro-Server neu starten (mit Bestätigung)",
   "/status – Status der Session und des laufenden Auftrags",
   "/stop – laufenden Auftrag abbrechen",
   "/whoami – deine Chat-ID (für die Allowlist)",
@@ -874,7 +1106,7 @@ async function handleMessage(token: string, config: TelegramConfig, msg: TgMessa
     const prompt = caption ? `${caption}\n\n[${note}]` : note;
     await sendMessage(token, chatId, `🖼️ Bild empfangen (${path.basename(saved)}). Verarbeite…`);
     const sessionId = await getActiveSession(chatId, config);
-    await startTelegramTurn(token, chatId, sessionId, prompt, config.useKnowledge);
+    await startTelegramTurn(token, chatId, sessionId, prompt, (await configFor(chatId, config)).useKnowledge);
     return;
   }
 
@@ -884,7 +1116,7 @@ async function handleMessage(token: string, config: TelegramConfig, msg: TgMessa
       await sendMessage(token, chatId, HELP);
       return;
     case "new": {
-      const { id, cwd } = await createSession(config);
+      const { id, cwd } = await createSession(await configFor(chatId, config));
       bindChat(chatId, id);
       await sendMessage(token, chatId, `🆕 Neue Session: ${id.slice(0, 8)} in ${cwd}`);
       return;
@@ -945,7 +1177,76 @@ async function handleMessage(token: string, config: TelegramConfig, msg: TgMessa
         return;
       }
       const sessionId = await getActiveSession(chatId, config);
-      await startTelegramLoop(token, chatId, sessionId, parsed, config.useKnowledge);
+      await startTelegramLoop(token, chatId, sessionId, parsed, (await configFor(chatId, config)).useKnowledge);
+      return;
+    }
+    case "settings": {
+      await sendSettingsMenu(token, chatId, config);
+      return;
+    }
+    case "restart": {
+      await sendMessage(
+        token,
+        chatId,
+        "⚠️ CodeMaestro-Server neu starten?\n\nBricht ALLE laufenden Aufgaben ab (Telegram-Sessions, PWA-Turns, Orchestrator-Worker). Die Bridge verbindet sich danach automatisch neu; die Chat-Session muss ggf. via /sessions neu gewählt werden.",
+        {
+          reply_markup: {
+            inline_keyboard: [[
+              { text: "🔄 Ja, neu starten", callback_data: "restart:go" },
+              { text: "❌ Abbrechen", callback_data: "restart:no" },
+            ]],
+          },
+        }
+      );
+      return;
+    }
+    case "model": {
+      const m = args.trim();
+      if (m) await applySetting(token, chatId, "model", m === "default" ? "" : m);
+      else await sendChoiceMenu(token, chatId, config, "model");
+      return;
+    }
+    case "provider": {
+      const p = args.trim().toLowerCase();
+      if (p) await applySetting(token, chatId, "provider", p);
+      else await sendChoiceMenu(token, chatId, config, "provider");
+      return;
+    }
+    case "cwd": {
+      const dir = args.trim();
+      if (!dir) {
+        const eff = await configFor(chatId, config);
+        await sendMessage(token, chatId, `📂 Verzeichnis: ${eff.cwd || "(nicht gesetzt)"}\nWechseln: /cwd <pfad> · zurücksetzen: /cwd reset`);
+        return;
+      }
+      if (dir === "reset") {
+        await patchChatOverrides(chatId, { cwd: undefined });
+        await unbindChat(chatId);
+        await sendMessage(token, chatId, `📂 Zurück auf global: ${config.cwd || "(nicht gesetzt)"}`);
+        return;
+      }
+      try {
+        const resolved = await resolveWorkdir(dir);
+        await patchChatOverrides(chatId, { cwd: resolved });
+        // cwd is baked into a session — unbind so the next prompt starts there.
+        await unbindChat(chatId);
+        await sendMessage(token, chatId, `📂 Verzeichnis: ${resolved} — neue Session startet mit dem nächsten Prompt.`);
+      } catch (err) {
+        await sendMessage(token, chatId, `⚠️ Verzeichnis ungültig: ${err instanceof Error ? err.message : "?"}`);
+      }
+      return;
+    }
+    case "rag": {
+      const a = args.trim().toLowerCase();
+      if (a === "on" || a === "an" || a === "off" || a === "aus") {
+        await applySetting(token, chatId, "rag", a === "on" || a === "an" ? "on" : "off");
+      } else if (a === "reset" || a === "default") {
+        await patchChatOverrides(chatId, { useKnowledge: undefined });
+        await sendMessage(token, chatId, `📚 Override entfernt — globale Einstellung gilt (${config.useKnowledge ? "AN" : "AUS"}).`);
+      } else {
+        const eff = await configFor(chatId, config);
+        await sendMessage(token, chatId, `📚 Wissensbasis (RAG) für diesen Chat: ${eff.useKnowledge ? "AN" : "AUS"}\nNutzung: /rag on | off | reset`);
+      }
       return;
     }
     case "kb": {
@@ -985,7 +1286,7 @@ async function handleMessage(token: string, config: TelegramConfig, msg: TgMessa
     return;
   }
   const sessionId = await getActiveSession(chatId, config);
-  await startTelegramTurn(token, chatId, sessionId, prompt, config.useKnowledge);
+  await startTelegramTurn(token, chatId, sessionId, prompt, (await configFor(chatId, config)).useKnowledge);
 }
 
 async function handleCallback(token: string, config: TelegramConfig, cq: TgCallbackQuery) {
@@ -1032,6 +1333,32 @@ async function handleCallback(token: string, config: TelegramConfig, cq: TgCallb
     if (qi !== card.answers.length || !option) { await reply("Bereits beantwortet."); return; }
     const result = answerQuestion(token, card, option.label);
     await reply(result === "expired" ? "Abgelaufen" : option.label);
+    return;
+  }
+
+  if (prefix === "restart") {
+    if (parts[0] === "go") {
+      await reply("Neustart geplant");
+      await sendMessage(token, chatId, "🔄 Neustart in ~5 Sekunden … danach /status zum Prüfen.");
+      scheduleSelfRestart();
+    } else {
+      await reply("Abgebrochen");
+      await sendMessage(token, chatId, "Neustart abgebrochen.");
+    }
+    return;
+  }
+
+  if (prefix === "cfg") {
+    await reply();
+    await sendChoiceMenu(token, chatId, config, parts.join(":"));
+    return;
+  }
+
+  if (prefix === "set") {
+    // "set:<field>:<value>" — value may itself contain ":" (model tags).
+    const [field, ...valueParts] = parts;
+    await reply("OK");
+    await applySetting(token, chatId, field, valueParts.join(":"));
     return;
   }
 

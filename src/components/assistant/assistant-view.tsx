@@ -90,6 +90,15 @@ export function AssistantView() {
   // RAG: augment turns with relevant knowledge-base context (default on; the
   // server no-ops gracefully when the index is empty or Ollama is unreachable).
   const [useKnowledge, setUseKnowledge] = useState(true);
+  // Persisted in localStorage so "aus" den Reload überlebt.
+  useEffect(() => {
+    if (localStorage.getItem("pb-use-knowledge") === "off") setUseKnowledge(false);
+  }, []);
+  const toggleKnowledge = () =>
+    setUseKnowledge((v) => {
+      localStorage.setItem("pb-use-knowledge", v ? "off" : "on");
+      return !v;
+    });
   const [loopOpts, setLoopOpts] = useState<LoopOptions>(DEFAULT_LOOP_OPTIONS);
   const [orchMode, setOrchMode] = useState<"auto" | "hybrid">("auto");
   const [wizardEnabled, setWizardEnabled] = useState(false);
@@ -796,7 +805,7 @@ export function AssistantView() {
                 <Repeat size={12} /> Loop {mode === "loop" ? "an" : "aus"}
               </button>
               <button
-                onClick={() => setUseKnowledge((v) => !v)}
+                onClick={toggleKnowledge}
                 className={toggleClass(useKnowledge)}
                 aria-pressed={useKnowledge}
                 title="Relevanten Kontext aus der Wissensbasis (RAG) automatisch einfügen"

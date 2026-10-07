@@ -158,9 +158,11 @@ const CODER_MODEL = /coder|codestral|devstral|codellama|codegemma|starcoder/i;
 const NON_GENERAL_LOCAL = /embed|bge|rerank|guard|whisper|tts/i;
 // Strong general local models, best first. Installed models from this list win;
 // otherwise the largest remaining general model (by parameter count) is used.
+// An exact tag match beats a prefix match, so "qwen3.8:27b" is picked over the
+// heavier "qwen3.8:27b-q8_0" quant that would spill out of VRAM.
 const GENERAL_PRIORITY = [
-  "qwen3.6:35b", "gemma4:31b", "nemotron3", "nemotron-cascade", "qwen3.6:27b",
-  "mistral-small3.2", "glm-4.7-flash", "gemma4:26b", "gemma4:12b", "phi4",
+  "qwen3.8:27b", "qwen3.6:35b", "gemma4:31b", "nemotron3", "nemotron-cascade",
+  "qwen3.6:27b", "mistral-small3.2", "glm-4.7-flash", "gemma4:26b", "gemma4:12b", "phi4",
 ];
 
 /** Parameter count in billions from Ollama's "(35B)" name suffix or a ":35b" tag. */
@@ -178,8 +180,10 @@ function isGeneralLocal(id: string): boolean {
 /** The strongest general (non-coder, non-embedding) local model, if any. */
 function strongestGeneral<T extends { id: string; name?: string }>(models: T[]): T | undefined {
   const prio = (id: string) => {
+    const exact = GENERAL_PRIORITY.indexOf(id);
+    if (exact >= 0) return exact;
     const i = GENERAL_PRIORITY.findIndex((p) => id.startsWith(p));
-    return i < 0 ? GENERAL_PRIORITY.length : i;
+    return i < 0 ? GENERAL_PRIORITY.length : i + 0.5;
   };
   return models
     .filter((m) => isGeneralLocal(m.id))
