@@ -3,7 +3,8 @@ import { resolveApproval } from "@/lib/assistant/approvals";
 
 export const runtime = "nodejs";
 
-// Called by the browser when the user approves/denies a tool action.
+// Called by the browser when the user approves/denies a tool action or answers
+// an interactive question.
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -16,6 +17,7 @@ export async function POST(
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
   const decision = body.decision === "allow" ? "allow" : "deny";
-  const ok = resolveApproval(id, decision, body.reason);
-  return NextResponse.json({ ok });
+  const reason = typeof body.reason === "string" ? body.reason : undefined;
+  const ok = resolveApproval(id, decision, reason);
+  return NextResponse.json({ ok }, { status: ok ? 200 : 410 });
 }

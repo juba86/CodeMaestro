@@ -2,7 +2,7 @@
 
 Thanks for your interest in improving CodeMaestro! Contributions of all
 sizes are welcome — bug fixes, features, docs, and especially **tests**
-(there's no automated suite yet — see [Status & Limitations](./README.md#status--limitations)).
+(the unit suite runs with [Vitest](https://vitest.dev) — `npm test`).
 
 By contributing, you agree that your contributions are licensed under the
 project's [GNU AGPL-3.0](./LICENSE).
@@ -32,6 +32,8 @@ npm run dev                   # http://localhost:3000
 | `npm run build` | Production build |
 | `npm start` | Run the production build |
 | `npm run lint` | Lint with ESLint |
+| `npm run typecheck` | Type-check with `tsc --noEmit` |
+| `npm test` | Run the unit tests (Vitest; `npm run test:watch` for watch mode) |
 
 ## Code style
 
@@ -47,7 +49,8 @@ npm run dev                   # http://localhost:3000
 
 1. Fork the repo and create a branch from `main`.
 2. Make your change, keeping commits focused and messages descriptive.
-3. Ensure `npm run lint` and `npm run build` pass.
+3. Ensure `npm run lint`, `npm run typecheck`, `npm test` and `npm run build`
+   pass — CI runs the same checks on every pull request.
 4. Open a pull request describing **what** changed and **why**.
 
 ## Good first issues

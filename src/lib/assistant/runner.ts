@@ -1,7 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
-import { writeFileSync, unlinkSync } from "fs";
+import { writeFileSync, unlinkSync, existsSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
+import { approvalTimeoutMs, hookToken } from "./approvals";
 
 export interface AssistantSessionRow {
   id: string;
@@ -21,6 +22,25 @@ export interface AssistantSessionRow {
 
 const HOOK_PATH = path.join(process.cwd(), "scripts", "assistant-approval-hook.mjs");
 
+// POSIX single-quote a path for the shell that runs hook commands, so paths
+// with spaces or quotes (e.g. "/Users/Jane Doe/…") can't split the command.
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Base URL the approval hook (a child of the CLI) uses to call back. */
+export function internalBaseUrl(): string {
+  const explicit = process.env.CODEMAESTRO_INTERNAL_URL?.trim();
+  if (explicit) return explicit.replace(/\/+$/, "");
+  return `http://127.0.0.1:${process.env.PORT || "3000"}`;
+}
+
+export class ApprovalHookMissingError extends Error {
+  constructor() {
+    super(`Freigabe-Hook fehlt (${HOOK_PATH}). Ohne Hook kann die Freigabe nicht erzwungen werden — Ausführung abgebrochen.`);
+  }
+}
+
 // Builds a Claude Code --settings file (PreToolUse approval hook + optional
 // sandbox) for this turn. Returns the file path, or null if neither is needed.
 function buildSettingsFile(session: AssistantSessionRow): string | null {
@@ -28,16 +48,23 @@ function buildSettingsFile(session: AssistantSessionRow): string | null {
   const wantQuestions = !!session.interactive;
   if (!approval && !session.sandbox && !wantQuestions) return null;
 
-  const hookCmd = `${process.execPath} ${JSON.stringify(HOOK_PATH).slice(1, -1)}`;
+  // Fail closed: an approval gate whose hook can't run would let every tool
+  // call through (Claude Code treats a crashing hook as non-blocking).
+  const hookAvailable = existsSync(HOOK_PATH);
+  if (approval && !hookAvailable) throw new ApprovalHookMissingError();
+  const hookCmd = `${shellQuote(process.execPath)} ${shellQuote(HOOK_PATH)}`;
+  // Hook timeout (seconds) must outlast the approval wait so the hook — not
+  // Claude Code — decides what happens on timeout.
+  const timeout = Math.ceil(approvalTimeoutMs() / 1000) + 60;
   const preToolUse: Array<Record<string, unknown>> = [];
   // Always intercept interactive questions on live turns so the UI can show
   // clickable options (otherwise they appear as an unanswerable tool call).
-  if (wantQuestions) {
-    preToolUse.push({ matcher: "AskUserQuestion|ExitPlanMode", hooks: [{ type: "command", command: hookCmd, timeout: 320 }] });
+  if (wantQuestions && hookAvailable) {
+    preToolUse.push({ matcher: "AskUserQuestion|ExitPlanMode", hooks: [{ type: "command", command: hookCmd, timeout }] });
   }
   if (approval) {
-    const matcher = session.approvalMode === "all" ? "Edit|Write|MultiEdit|Bash" : "Edit|Write|MultiEdit";
-    preToolUse.push({ matcher, hooks: [{ type: "command", command: hookCmd, timeout: 320 }] });
+    const matcher = session.approvalMode === "all" ? "Edit|Write|MultiEdit|NotebookEdit|Bash" : "Edit|Write|MultiEdit|NotebookEdit";
+    preToolUse.push({ matcher, hooks: [{ type: "command", command: hookCmd, timeout }] });
   }
   const settings: Record<string, unknown> = {};
   if (preToolUse.length) settings.hooks = { PreToolUse: preToolUse };
@@ -67,20 +94,69 @@ export interface TurnResult {
   isError: boolean;
 }
 
-// One active child per session id, so the stop endpoint can terminate it.
-const procs = new Map<string, ChildProcessWithoutNullStreams>();
+// Every live CLI child per assistant session (a turn, an orchestrator worker,
+// a planner …), so Stop can terminate all of them. Process-wide (globalThis)
+// because route handlers and the instrumentation-started Telegram bridge live
+// in different Next.js module graphs.
+const gp = globalThis as unknown as { __cmProcs?: Map<string, Set<ChildProcessWithoutNullStreams>> };
+const procs: Map<string, Set<ChildProcessWithoutNullStreams>> = (gp.__cmProcs ??= new Map());
 
-export function stopSession(sessionId: string): boolean {
-  const p = procs.get(sessionId);
-  if (p) {
-    p.kill("SIGTERM");
-    return true;
+function trackProc(sessionId: string, child: ChildProcessWithoutNullStreams) {
+  let set = procs.get(sessionId);
+  if (!set) procs.set(sessionId, (set = new Set()));
+  set.add(child);
+}
+
+function untrackProc(sessionId: string, child: ChildProcessWithoutNullStreams) {
+  const set = procs.get(sessionId);
+  if (!set) return;
+  set.delete(child);
+  if (set.size === 0) procs.delete(sessionId);
+}
+
+// Children are spawned as process-group leaders (detached) on POSIX so a kill
+// also reaches the shells/tools they started (e.g. a hanging Bash command).
+function killTree(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals) {
+  try {
+    if (process.platform !== "win32" && child.pid) process.kill(-child.pid, signal);
+    else child.kill(signal);
+  } catch {
+    try { child.kill(signal); } catch { /* already gone */ }
   }
-  return false;
+}
+
+function terminate(child: ChildProcessWithoutNullStreams) {
+  killTree(child, "SIGTERM");
+  const t = setTimeout(() => { if (child.exitCode === null) killTree(child, "SIGKILL"); }, 5000);
+  t.unref?.();
+}
+
+/** Terminates every CLI process of a session. Returns true if any was running. */
+export function stopSession(sessionId: string): boolean {
+  const set = procs.get(sessionId);
+  if (!set || set.size === 0) return false;
+  for (const child of set) terminate(child);
+  return true;
 }
 
 export function isRunning(sessionId: string): boolean {
-  return procs.has(sessionId);
+  return (procs.get(sessionId)?.size ?? 0) > 0;
+}
+
+// --- externalId markers --------------------------------------------------------
+// AssistantSession.externalId is UNIQUE. Real CLI session ids (Claude UUIDs) are
+// stored as-is; agents without resumable ids get a per-session marker instead of
+// a shared literal (which made the 2nd session of the same agent fail the DB
+// update and stay "running" forever).
+const MARKER_SEP = "~";
+
+function markerFor(provider: string, sessionId: string): string {
+  return `${provider}${MARKER_SEP}${sessionId}`;
+}
+
+/** True for our synthetic "already started" markers (not a resumable CLI id). */
+export function isMarker(externalId: string | null | undefined): boolean {
+  return !!externalId && externalId.includes(MARKER_SEP);
 }
 
 function claudeArgs(session: AssistantSessionRow, prompt: string, settingsFile: string | null): string[] {
@@ -106,15 +182,37 @@ function geminiApproval(mode: string): string {
   }
 }
 
+// Claude Code tool names (what the UI offers) → gemini-cli built-in tool names.
+const GEMINI_TOOL_NAMES: Record<string, string[]> = {
+  Read: ["read_file", "read_many_files", "list_directory"],
+  Grep: ["search_file_content"],
+  Glob: ["glob"],
+  Bash: ["run_shell_command"],
+  Edit: ["replace"],
+  Write: ["write_file"],
+  WebSearch: ["google_web_search"],
+  WebFetch: ["web_fetch"],
+};
+
+export function mapToolsForGemini(csv: string): string {
+  const out = new Set<string>();
+  for (const t of csv.split(",").map((x) => x.trim()).filter(Boolean)) {
+    for (const g of GEMINI_TOOL_NAMES[t] ?? [t]) out.add(g);
+  }
+  return [...out].join(",");
+}
+
 function geminiArgs(session: AssistantSessionRow, prompt: string): string[] {
   const args = ["-p", prompt, "--output-format", "json", "--skip-trust"];
   if (session.model) args.push("--model", session.model);
   args.push("--approval-mode", geminiApproval(session.permissionMode || "default"));
-  const tools = (session.allowedTools || "").trim();
+  const tools = mapToolsForGemini(session.allowedTools || "");
   if (tools) args.push("--allowed-tools", tools);
-  // gemini resumes by index/"latest" (not UUID). Once this session has run once,
-  // continue the most recent session in this working directory.
-  if (session.externalId) args.push("--resume", "latest");
+  // Resume this session's own gemini conversation when the CLI reported an id;
+  // fall back to "latest" (most recent in the cwd) only for legacy markers.
+  if (session.externalId) {
+    args.push("--resume", isMarker(session.externalId) ? "latest" : session.externalId);
+  }
   return args;
 }
 
@@ -179,14 +277,28 @@ export async function runTurn(
   session: AssistantSessionRow,
   prompt: string,
   apiKey: string | undefined,
-  emit: (e: NormalizedEvent) => void
+  emit: (e: NormalizedEvent) => void,
+  opts: { signal?: AbortSignal } = {}
 ): Promise<TurnResult> {
   const plain = isPlainAgent(session.provider);
   const isGemini = session.provider === "gemini";
   const kind: "claude" | "gemini" | "plain" = plain ? "plain" : isGemini ? "gemini" : "claude";
 
+  if (opts.signal?.aborted) {
+    return { externalId: session.externalId, costUsd: 0, isError: true };
+  }
+
   // Approval hook + sandbox are Claude-Code-specific (PreToolUse settings).
-  const settingsFile = kind === "claude" ? buildSettingsFile(session) : null;
+  let settingsFile: string | null = null;
+  if (kind === "claude") {
+    try {
+      settingsFile = buildSettingsFile(session);
+    } catch (err) {
+      emit({ type: "error", content: err instanceof Error ? err.message : String(err) });
+      emit({ type: "done" });
+      return { externalId: session.externalId, costUsd: 0, isError: true };
+    }
+  }
   const bin = plain ? PLAIN_AGENTS[session.provider].bin : isGemini ? "gemini" : "claude";
   const args = plain
     ? plainArgs(session.provider, session, prompt)
@@ -203,25 +315,29 @@ export async function runTurn(
     // Optional: allow overriding Claude auth with an explicit key.
     env.ANTHROPIC_API_KEY = apiKey;
   }
-  // The approval hook (a child of claude) calls back into this server.
+  // The approval hook (a child of claude) calls back into this server and
+  // authenticates with a per-process token.
   if (settingsFile) {
-    const host = process.env.HOSTNAME || "127.0.0.1";
-    const port = process.env.PORT || "3000";
-    env.PB_BASE_URL = `http://${host}:${port}`;
+    env.PB_BASE_URL = internalBaseUrl();
     env.PB_SESSION_ID = session.id;
+    env.PB_HOOK_TOKEN = hookToken();
+    env.PB_APPROVAL_TIMEOUT_MS = String(approvalTimeoutMs());
   }
 
   const installHint = plain ? ` (nicht installiert? ${PLAIN_AGENTS[session.provider].install})` : "";
 
   let child: ChildProcessWithoutNullStreams;
   try {
-    child = spawn(bin, args, { cwd: session.cwd, env });
+    child = spawn(bin, args, { cwd: session.cwd, env, detached: process.platform !== "win32" });
   } catch (err) {
+    if (settingsFile) { try { unlinkSync(settingsFile); } catch { /* ignore */ } }
     emit({ type: "error", content: `Failed to start ${bin}: ${err instanceof Error ? err.message : String(err)}${installHint}` });
     return { externalId: session.externalId, costUsd: 0, isError: true };
   }
 
-  procs.set(session.id, child);
+  trackProc(session.id, child);
+  const onAbort = () => terminate(child);
+  opts.signal?.addEventListener("abort", onAbort, { once: true });
 
   let externalId = session.externalId;
   let costUsd = 0;
@@ -302,8 +418,9 @@ export async function runTurn(
       isError = true;
     });
 
-    child.on("close", (code) => {
-      procs.delete(session.id);
+    child.on("close", (code, signal) => {
+      untrackProc(session.id, child);
+      opts.signal?.removeEventListener("abort", onAbort);
       if (settingsFile) { try { unlinkSync(settingsFile); } catch { /* ignore */ } }
 
       if (kind === "gemini") {
@@ -311,9 +428,9 @@ export async function runTurn(
           const data = JSON.parse(stdoutBuffer);
           if (data.response) emit({ type: "text", content: String(data.response) });
           if (data.error) { emit({ type: "error", content: String(data.error) }); isError = true; }
-          // gemini resumes by "latest"/index, not UUID — mark the session so the
-          // next turn passes --resume latest.
-          externalId = data.session_id || externalId || "latest";
+          // Prefer the CLI's own session id; otherwise mark the session as
+          // started with a per-session marker (externalId is unique).
+          externalId = data.session_id || externalId || markerFor("gemini", session.id);
           emit({ type: "result", content: data.response || "", costUsd: 0, isError });
         } catch {
           if (stdoutBuffer.trim()) emit({ type: "text", content: stdoutBuffer.trim() });
@@ -321,7 +438,7 @@ export async function runTurn(
         }
       } else if (kind === "plain") {
         // Mark the session started so follow-up turns can continue it (opencode).
-        externalId = externalId || session.provider;
+        externalId = externalId || markerFor(session.provider, session.id);
         emit({ type: "result", content: "", costUsd: 0, isError });
       } else if (stdoutBuffer.trim()) {
         handleClaudeLine(stdoutBuffer);
@@ -329,7 +446,8 @@ export async function runTurn(
 
       if (code !== 0 && !isError) {
         isError = true;
-        emit({ type: "error", content: stderr.trim() || `${bin} exited with code ${code}` });
+        const stopped = opts.signal?.aborted || signal === "SIGTERM" || signal === "SIGKILL";
+        emit({ type: "error", content: stopped ? "Gestoppt." : (stderr.trim() || `${bin} exited with code ${code}`) });
       }
       emit({ type: "done" });
       resolve({ externalId, costUsd, isError });

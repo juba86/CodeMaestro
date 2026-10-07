@@ -171,6 +171,25 @@ export const orchestrateRunSchema = z.object({
   plannerWorkerId: z.string().max(120).optional(),
 });
 
+// Loop mode: repeat a task server-side until the agent prints the completion
+// promise, the iteration cap is hit, or the user stops it (survives closed
+// windows — the loop runs in the server's run registry).
+export const assistantLoopSchema = z.object({
+  prompt: z.string().min(1).max(100000),
+  apiKey: z.string().optional(),
+  useKnowledge: z.boolean().optional().default(false),
+  maxIterations: z.number().int().min(1).max(100).optional().default(10),
+  // Text the agent outputs (as <promise>TEXT</promise>) once the task is done.
+  completionPromise: z.string().trim().min(1).max(100).optional().default("DONE"),
+  // Pause between iterations (0 = back-to-back; >0 = recurring like /loop 10m).
+  intervalSec: z.number().int().min(0).max(86400).optional().default(0),
+  // true = fresh CLI context per iteration (state lives in files, "Ralph"
+  // style); false = continue the same conversation.
+  freshContext: z.boolean().optional().default(false),
+  // Stop the loop when an iteration ends with an error.
+  stopOnError: z.boolean().optional().default(true),
+});
+
 // --- Telegram bridge ---
 
 export const telegramConfigSchema = z.object({

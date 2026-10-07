@@ -15,8 +15,9 @@
 ## Checklist
 
 - [ ] `npm run lint` passes (no new warnings introduced)
+- [ ] `npm run typecheck` and `npm test` pass
 - [ ] `npm run build` succeeds
-- [ ] I manually tested the change (there is no automated test suite yet)
+- [ ] I manually tested the change (and added unit tests where it makes sense)
 - [ ] No secrets, API keys, or personal paths are included in the diff
 - [ ] Docs/README updated if behavior or setup changed
 
