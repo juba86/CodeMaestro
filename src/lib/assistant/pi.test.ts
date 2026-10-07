@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "fs";
 import http from "http";
 import type { AddressInfo } from "net";
 import { tmpdir } from "os";
@@ -10,6 +10,7 @@ vi.mock("@/lib/github", () => ({ githubEnv: vi.fn(async () => ({})), GITHUB_SAND
 import {
   PiEventMapper,
   buildModelsJson,
+  deletePiSessionFiles,
   effectiveContext,
   mapToolsForPi,
   piGatedTools,
@@ -216,6 +217,29 @@ describe("tool mapping", () => {
     expect(a).toMatch(/^cm-s1-[a-z0-9]+$/);
     expect(a).not.toBe(b);
     expect(piSessionIdFor("s1", "gemini~s1")).toMatch(/^cm-s1-/); // a marker is not a pi id
+  });
+
+  it("deletes a session's pi transcripts: the stored one and every minted one (orchestrator workers)", async () => {
+    const dir = path.join(agentDir, "sessions");
+    rmSync(dir, { recursive: true, force: true });
+    mkdirSync(dir, { recursive: true });
+    const files = [
+      "2026-10-07T20-00-00-000Z_cm-s1-abc.jsonl",
+      "2026-10-07T20-01-00-000Z_cm-s1-def.jsonl",
+      "2026-10-07T20-02-00-000Z_resumed-id.jsonl",
+      "2026-10-07T20-03-00-000Z_cm-s10-abc.jsonl", // another session
+      "2026-10-07T20-04-00-000Z_cm-s2-abc.jsonl",
+      "notes_cm-s1-x.txt",
+    ];
+    for (const f of files) writeFileSync(path.join(dir, f), "{}\n");
+    expect(await deletePiSessionFiles(null, "s1")).toBe(2);
+    expect(await deletePiSessionFiles("resumed-id", "s9")).toBe(1);
+    expect(await deletePiSessionFiles("../x", "")).toBe(0);
+    expect(readdirSync(dir).sort()).toEqual([
+      "2026-10-07T20-03-00-000Z_cm-s10-abc.jsonl",
+      "2026-10-07T20-04-00-000Z_cm-s2-abc.jsonl",
+      "notes_cm-s1-x.txt",
+    ]);
   });
 });
 

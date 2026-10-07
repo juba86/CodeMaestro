@@ -24,7 +24,7 @@ export const ORCHESTRA_LIMITS = {
   name: 60,
   description: 1000,
   instructions: 8000,
-  workerId: 120,
+  workerId: 220, // "pi:" / "ollama:" + Ollama ids of up to 200 chars
   maxRounds: 3,
 } as const;
 
@@ -228,10 +228,14 @@ export function strongestGeneral<T extends { id: string; name?: string }>(models
 // --- Worker ranking ---------------------------------------------------------------
 
 export function isLocalWorker(w: OrchestraWorkerInfo): boolean {
-  return w.local ?? w.kind === "ollama";
+  return w.local ?? (w.kind === "ollama" || w.kind === "pi");
 }
 
-/** Capability tier, higher is stronger: Claude Code > Gemini CLI > cloud APIs > local models. */
+/**
+ * Capability tier, higher is stronger: Claude Code > Gemini CLI > cloud APIs >
+ * local models (plain Ollama chat and pi agents alike — editing roles pick the
+ * file-capable ones by capability).
+ */
 export function workerTier(w: OrchestraWorkerInfo): number {
   if (w.kind === "claude-cli") return 3;
   if (w.kind === "gemini-cli") return 2;
@@ -366,6 +370,10 @@ export function parseVerdict(text: string): ReviewVerdict {
 export const NO_MODEL_WARNING =
   "Kein Modell verfügbar: weder Claude Code noch Gemini CLI gefunden, keine lokalen Modelle installiert und keine Cloud-API eingerichtet.";
 
+/** Local models exist, but none can change files (pi missing, or no model with tool calling). */
+export const NO_LOCAL_AGENT_HINT =
+  "Lokale Modelle ändern Dateien über den pi coding agent — pi installieren (Einstellungen → Lokale Modelle (pi)) und ein Ollama-Modell mit Tool-Unterstützung herunterladen.";
+
 const quoted = (role: OrchestraRole) => `„${role.name || role.id}“`;
 
 /**
@@ -439,7 +447,7 @@ const BALANCED_STRONG_ROLES = new Set(["architekt", "reviewer"]);
  *   on a cheaper file-capable worker below the top tier (Gemini CLI, a local
  *   agent) when one exists;
  * - local: local models only — text models for text roles, file-capable local
- *   workers for roles that change files.
+ *   workers (pi agents) for roles that change files.
  * Picks are by capability (editsFiles/local), not by worker kind. When nothing
  * fits, the assignment falls back to Auto with a warning. `base` keeps the
  * user's roles and instructions and only reassigns the workers.
@@ -502,6 +510,8 @@ export function buildPreset(
     roles,
     preset,
   };
+  const editingRole = roles.some((r) => r.enabled && r.editsFiles);
+  if (preset === "local" && editingRole && localText.length && !localFiles.length) warnings.push(NO_LOCAL_AGENT_HINT);
   for (const w of validateOrchestra(config, workers)) if (!warnings.includes(w)) warnings.push(w);
   return { config, warnings };
 }

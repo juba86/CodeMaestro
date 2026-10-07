@@ -687,8 +687,13 @@ const PI_SESSION_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,198}[A-Za-z0-9])?$/;
  */
 export function piSessionIdFor(sessionId: string, externalId: string | null): string {
   if (externalId && PI_SESSION_ID.test(externalId)) return externalId;
-  const safe = sessionId.replace(/[^A-Za-z0-9._-]/g, "").slice(0, 80) || "s";
-  return `cm-${safe}-${Date.now().toString(36)}${randomBytes(3).toString("hex")}`;
+  return `${mintedPrefix(sessionId) || "cm-s-"}${Date.now().toString(36)}${randomBytes(3).toString("hex")}`;
+}
+
+/** "cm-<sessionId>-": the start of every pi session id minted for a CodeMaestro session ("" when unusable). */
+function mintedPrefix(sessionId: string): string {
+  const safe = sessionId.replace(/[^A-Za-z0-9._-]/g, "").slice(0, 80);
+  return safe ? `cm-${safe}-` : "";
 }
 
 /** A session's model id as pi/Ollama know it (an "ollama/" prefix is accepted). */
@@ -710,16 +715,21 @@ export function isValidPiModelId(id: string): boolean {
 }
 
 /**
- * Removes pi's session transcript(s) for a CodeMaestro session (files are named
- * "<ISO-ts>_<piSessionId>.jsonl" in the flat sessions dir). Best effort.
+ * Removes pi's session transcripts of a CodeMaestro session: the session's own
+ * conversation (its externalId) and every one-off worker run the orchestrator
+ * minted for it ("cm-<sessionId>-…"). Files are named "<ISO-ts>_<piSessionId>.jsonl"
+ * in the flat sessions dir. Best effort.
  */
-export async function deletePiSessionFiles(externalId: string | null | undefined): Promise<number> {
-  if (!externalId || !/^[A-Za-z0-9._-]+$/.test(externalId)) return 0;
+export async function deletePiSessionFiles(externalId: string | null | undefined, sessionId: string): Promise<number> {
+  const prefix = mintedPrefix(sessionId);
+  const own = externalId && PI_SESSION_ID.test(externalId) ? `_${externalId}.jsonl` : null;
+  if (!prefix && !own) return 0;
   const dir = piSessionsDir();
   let removed = 0;
   try {
     for (const name of await fs.readdir(dir)) {
-      if (name.endsWith(`_${externalId}.jsonl`)) {
+      const minted = prefix && name.includes(`_${prefix}`) && name.endsWith(".jsonl");
+      if (minted || (own && name.endsWith(own))) {
         await fs.unlink(path.join(dir, name)).catch(() => {});
         removed++;
       }

@@ -3,6 +3,7 @@ import path from "path";
 import os from "node:os";
 import { prisma } from "@/lib/db/client";
 import { runTurn, type AssistantSessionRow } from "./runner";
+import { piInfo, syncOllamaModels, type PiModel } from "./pi";
 import type { HubEvent } from "./run-hub";
 import type { RunContext, RunOutcome } from "./session-run";
 import type { TranscriptRow } from "./transcript";
@@ -23,6 +24,7 @@ import {
   resolveRoleWorker,
   reviewerFor,
   strongestGeneral,
+  strongestWorker,
   type OrchestraConfig,
   type OrchestraRole,
   type OrchestraWorkerInfo,
@@ -38,9 +40,10 @@ export interface ClientProvider {
 }
 
 // A worker is a concrete model the orchestrator can route a subtask to.
+// "pi" = a local Ollama model as a file-editing agent via the pi coding agent.
 export interface Worker {
   id: string;
-  kind: "claude-cli" | "gemini-cli" | "ollama" | "api";
+  kind: "claude-cli" | "gemini-cli" | "pi" | "ollama" | "api";
   model: string;
   label: string;
   strengths: string;
@@ -162,18 +165,22 @@ interface LocalPool {
   claude: boolean;
   gemini: boolean;
   ollama: ModelInfo[];
+  /** Ollama models pi can run as file-editing agents (pi installed, tool calling). */
+  pi: PiModel[];
 }
 
-// Discovery (PATH probes, gemini creds, Ollama /api/tags) is shared by the
-// workers dropdown, planning and execution — memoize it briefly so one
-// orchestration doesn't repeat it. Client providers are cheap (no I/O) and are
-// rebuilt on every call, so keys/base URLs are never stale. Kept on globalThis
-// so every route's module graph shares one cache per process.
+// Discovery (PATH probes, gemini creds, Ollama /api/tags, pi + its model sync)
+// is shared by the workers dropdown, planning and execution — memoize it
+// briefly so one orchestration doesn't repeat it. Client providers are cheap
+// (no I/O) and are rebuilt on every call, so keys/base URLs are never stale.
+// Kept on globalThis so every route's module graph shares one cache per process.
 const POOL_TTL_MS = 30_000;
 const API_MODEL_TTL_MS = 5 * 60_000;
-// An unreachable Ollama host (e.g. an offline tailnet machine) must not stall
-// discovery — and with it a run that Stop cannot interrupt yet.
-const OLLAMA_DISCOVERY_TIMEOUT_MS = 8_000;
+// An unreachable Ollama host (e.g. an offline tailnet machine) or a hanging
+// `pi --version` must not stall discovery — and with it a run that Stop
+// cannot interrupt yet. A pi sync that runs over keeps going in the
+// background and fills pi's own cache for the next discovery.
+const DISCOVERY_TIMEOUT_MS = 8_000;
 
 interface OrchCaches {
   pool: { at: number; pool: Promise<LocalPool> } | null;
@@ -182,19 +189,37 @@ interface OrchCaches {
 const gc = globalThis as unknown as { __cmOrchCaches?: OrchCaches };
 const caches: OrchCaches = (gc.__cmOrchCaches ??= { pool: null, apiModels: new Map() });
 
+/** `p`, or `fallback` when it fails or takes longer than `ms`. */
+function settleWithin<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(fallback), ms);
+    timer.unref?.();
+  });
+  return Promise.race([p.catch(() => fallback), timeout]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * The Ollama models pi can drive as file-editing agents: none unless pi is
+ * installed; only models with tool calling (the others stay text-only Ollama
+ * workers). An Ollama outage yields none — the sync then still reports the
+ * last good list, but pi could not reach those models either.
+ */
+async function discoverPiModels(): Promise<PiModel[]> {
+  if (!(await piInfo()).installed) return [];
+  const sync = await syncOllamaModels();
+  return sync.error ? [] : sync.models.filter((m) => m.toolsOk);
+}
+
 function localPool(): Promise<LocalPool> {
   const now = Date.now();
   if (caches.pool && now - caches.pool.at < POOL_TTL_MS) return caches.pool.pool;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const ollamaTimeout = new Promise<ModelInfo[]>((resolve) => {
-    timer = setTimeout(() => resolve([]), OLLAMA_DISCOVERY_TIMEOUT_MS);
-    timer.unref?.();
-  });
   const pool = Promise.all([
     onPath("claude"),
     geminiAvailable(),
-    Promise.race([fetchOllamaModels().catch(() => [] as ModelInfo[]), ollamaTimeout]).finally(() => clearTimeout(timer)),
-  ]).then(([claude, gemini, ollama]) => ({ claude, gemini, ollama }));
+    settleWithin(fetchOllamaModels(), DISCOVERY_TIMEOUT_MS, [] as ModelInfo[]),
+    settleWithin(discoverPiModels(), DISCOVERY_TIMEOUT_MS, [] as PiModel[]),
+  ]).then(([claude, gemini, ollama, pi]) => ({ claude, gemini, ollama, pi }));
   caches.pool = { at: now, pool };
   return pool;
 }
@@ -225,6 +250,27 @@ function geminiWorker(): Worker {
     strengths: "Very large context window and fast. Strong at broad codebase sweeps, boilerplate generation, wide-but-shallow changes, and reading lots of files at once. Can edit files. Free via login.",
     editsFiles: true,
     local: false,
+  };
+}
+
+// Below this a local agent's context barely holds pi's prompt and a few files
+// (the pi settings flag such models as well).
+const SMALL_AGENT_CONTEXT = 16_384;
+
+function piWorker(m: Pick<PiModel, "id" | "contextWindow">): Worker {
+  const specialty = CODER_MODEL.test(m.id) ? "Coding specialist." : "General model.";
+  const ctx = `~${Math.max(1, Math.round(m.contextWindow / 1024))}k tokens`;
+  const scope = m.contextWindow < SMALL_AGENT_CONTEXT
+    ? `Small context (${ctx}), so only for tiny, single-file changes.`
+    : `Context ${ctx}, so best for focused, well-scoped changes; weaker than Claude Code or Gemini CLI on large or subtle multi-file work.`;
+  return {
+    id: `pi:${m.id}`,
+    kind: "pi",
+    model: m.id,
+    label: `pi · ${m.id}`,
+    strengths: `Local agent (free, runs offline) on ${m.id} via the pi coding agent: reads and edits project files and runs commands, like the CLI workers. ${specialty} ${scope}`,
+    editsFiles: true,
+    local: true,
   };
 }
 
@@ -274,9 +320,11 @@ function buildApiWorkers(clientProviders: ClientProvider[] = []): Worker[] {
 }
 
 /**
- * The curated pool the planner routes to, with a strengths profile per worker:
- * the installed file-editing CLIs, a local coder + the strongest general local
- * Ollama model (text-only), and the user's configured cloud/custom APIs.
+ * The pool the planner routes to and runs execute on, with a strengths
+ * profile per worker: the installed file-editing CLIs, a local coder + the
+ * strongest general local Ollama model (text-only), a pi agent for EVERY local
+ * model with tool calling (the role-less planner sees only the best two, see
+ * plannerWorkers), and the user's configured cloud/custom APIs.
  */
 export async function discoverWorkers(clientProviders: ClientProvider[] = []): Promise<Worker[]> {
   const pool = await localPool();
@@ -286,28 +334,34 @@ export async function discoverWorkers(clientProviders: ClientProvider[] = []): P
   const coder = pool.ollama.find((m) => CODER_MODEL.test(m.id));
   const general = strongestGeneral(pool.ollama);
   for (const m of [coder, general]) if (m) workers.push(ollamaWorker(m.id));
+  // Text-only Ollama workers come first: on a tie (same model) a role that
+  // doesn't change files keeps the plain chat; only file work needs the agent.
+  workers.push(...pool.pi.map(piWorker));
   workers.push(...buildApiWorkers(clientProviders));
   return workers;
 }
 
 /**
- * The full worker pool for the hybrid editor: the curated pool plus EVERY
- * installed Ollama chat model, so the user can manually route a subtask to any
- * local model (e.g. gemma4:31b).
+ * The full worker pool for the hybrid editor, the org chart and the presets:
+ * the pool above plus EVERY installed Ollama chat model as a text worker, so
+ * the user can route a subtask to any local model (e.g. gemma4:31b) — as a
+ * file-editing pi agent when it supports tools, or as plain chat.
  */
 export async function discoverAllWorkers(clientProviders: ClientProvider[] = []): Promise<Worker[]> {
   const [curated, pool] = await Promise.all([discoverWorkers(clientProviders), localPool()]);
-  const out = curated.filter((w) => w.kind !== "ollama");
+  const out = curated.filter((w) => w.kind !== "ollama" && w.kind !== "pi");
   const ids = new Set(out.map((w) => w.id));
-  for (const m of pool.ollama) {
-    const w = ollamaWorker(m.id);
+  for (const w of [...pool.ollama.map((m) => ollamaWorker(m.id)), ...curated.filter((x) => x.kind === "pi")]) {
     if (!ids.has(w.id)) { ids.add(w.id); out.push(w); }
   }
   return out;
 }
 
 // Resolve a worker id against a pool, building an Ollama worker on the fly for
-// any ollama:<model> id (so manually-assigned local models always run).
+// any ollama:<model> id (so manually-assigned local models always run). pi
+// workers are never built on the fly: only discovery knows that pi is
+// installed and the model can call tools — an unknown pi:<model> id falls
+// back to Auto like any other unavailable worker.
 function findWorker(workers: Worker[], id: string): Worker | null {
   const found = workers.find((w) => w.id === id);
   if (found) return found;
@@ -315,21 +369,29 @@ function findWorker(workers: Worker[], id: string): Worker | null {
   return null;
 }
 
-// The approval gate and the sandbox are enforced through Claude Code settings
-// (PreToolUse hook / sandbox). gemini-cli has neither, so while either is on in
-// this session a Gemini worker runs read-only instead of bypassing them.
-function geminiRestricted(session: AssistantSessionRow): boolean {
-  return (!!session.approvalMode && session.approvalMode !== "off") || !!session.sandbox;
+function gateOn(session: AssistantSessionRow): boolean {
+  return !!session.approvalMode && session.approvalMode !== "off";
 }
 
 /**
- * Whether a worker may change files in this session. Only Claude Code enforces
- * the approval gate and sandbox, so every other file-capable worker (Gemini
- * CLI, local agents) is read-only while either is on.
+ * Whether a worker may change files in this session. Claude Code enforces the
+ * approval gate (PreToolUse hook) and the sandbox; pi enforces the gate (its
+ * approval extension) but cannot be sandboxed; gemini-cli enforces neither.
+ * A worker that cannot enforce what the session asks for runs read-only
+ * instead of bypassing it (see runCli).
  */
 export function canEditFiles(w: Worker, session: AssistantSessionRow): boolean {
-  return w.editsFiles && (w.kind === "claude-cli" || !geminiRestricted(session));
+  if (!w.editsFiles) return false;
+  if (w.kind === "claude-cli") return true;
+  if (w.kind === "pi") return !session.sandbox;
+  return !gateOn(session) && !session.sandbox;
 }
+
+// Why a file-capable worker runs read-only in this session (German notice).
+const READ_ONLY_NOTES: Partial<Record<Worker["kind"], string>> = {
+  "gemini-cli": "Gemini CLI läuft schreibgeschützt: Freigabe-Modus bzw. Sandbox lassen sich für Gemini nicht erzwingen.",
+  pi: "pi (lokale Modelle) läuft in Sandbox-Sessions schreibgeschützt: die Sandbox lässt sich für pi nicht erzwingen.",
+};
 
 function bestEditor(workers: Worker[], session: AssistantSessionRow): Worker | null {
   return bestFileWorker(workers, (w) => canEditFiles(w, session)) ?? null;
@@ -352,6 +414,8 @@ function assignWorkers(
 ): { assigned: Assignment[]; notes: string[] } {
   const editor = bestEditor(workers, session);
   const notes: string[] = [];
+  // File-capable workers this session restricts (planned or moved off).
+  const restricted = new Set<Worker["kind"]>();
   const assigned = subtasks.map((raw, i): Assignment => {
     const title = raw.title.trim() || `Teilaufgabe ${i + 1}`;
     let worker = findWorker(workers, raw.workerId);
@@ -360,18 +424,22 @@ function assignWorkers(
       if (!worker) throw new Error(NO_WORKER_MSG);
       notes.push(`Worker „${raw.workerId}“ ist nicht verfügbar — „${title}“ übernimmt ${worker.label}.`);
     }
+    if (worker.editsFiles && !canEditFiles(worker, session)) restricted.add(worker.kind);
     if (raw.editsFiles && !canEditFiles(worker, session)) {
       if (editor) {
         notes.push(`„${title}“ ändert Dateien, ${worker.label} kann das nicht — übernimmt ${editor.label}.`);
         worker = editor;
       } else {
         notes.push(`⚠ „${title}“ soll Dateien ändern, aber kein Worker mit Dateizugriff ist verfügbar — ${worker.label} liefert nur Text, es werden keine Dateien geändert.`);
+        // Say why when file-capable workers exist but this session restricts them.
+        for (const w of workers) if (w.editsFiles && !canEditFiles(w, session)) restricted.add(w.kind);
       }
     }
     return { st: { ...raw, title, workerId: worker.id }, worker };
   });
-  if (geminiRestricted(session) && assigned.some((a) => a.worker.kind === "gemini-cli")) {
-    notes.push("Gemini CLI läuft schreibgeschützt: Freigabe-Modus bzw. Sandbox lassen sich für Gemini nicht erzwingen.");
+  for (const kind of restricted) {
+    const note = READ_ONLY_NOTES[kind];
+    if (note) notes.push(note);
   }
   return { assigned, notes };
 }
@@ -448,13 +516,78 @@ interface TextResult {
   isError: boolean;
 }
 
-// Tools a read-only Gemini worker may keep pre-approved.
+// Tools a read-only Gemini / pi worker may keep pre-approved.
 const READ_ONLY_TOOLS = new Set(["Read", "Grep", "Glob", "WebSearch", "WebFetch"]);
+// pi's read/grep/find/ls. pi has no implicit tools, while Claude Code reads the
+// project without asking in every mode (plan included) — so every pi run gets
+// them, or a pi reviewer or editor could not even open the files.
+const PI_READ_TOOLS = ["Read", "Grep", "Glob"];
+// Permission modes in which Claude Code changes files without asking.
+const AUTO_EDIT_MODES = new Set(["acceptEdits", "auto", "bypassPermissions"]);
+
+const csv = (s: string) => s.split(",").map((t) => t.trim()).filter(Boolean);
+const joinTools = (...lists: string[][]) => [...new Set(lists.flat())].join(",");
 
 /**
- * Runs a CLI worker. "work" = a real subtask with the session's permission
- * mode, tools, approval gate and sandbox (approval cards reach the UI through
- * the run hub). "text" = planning/synthesis: tool-less, read-only, no gate.
+ * A file-editing pi worker's tools. pi never asks: the tools it gets are the
+ * tools it may use, and of the permission modes only "plan" counts (the runner
+ * drops bash/edit/write there). So it gets what Claude Code may do in the same
+ * session — the session's tools plus the read tools; Edit/Write when edits
+ * run without asking or through the approval gate (pi's extension then asks
+ * for each one); Bash when commands run without asking (bypassPermissions) or
+ * through the gate's "all" mode. Without this, the default tool list
+ * (Read/Grep/Glob) left a pi editor unable to edit even under the gate.
+ */
+function piWorkTools(session: AssistantSessionRow): string {
+  const gate = gateOn(session) ? session.approvalMode : "off";
+  const extra: string[] = [];
+  if (AUTO_EDIT_MODES.has(session.permissionMode) || gate === "edits" || gate === "all") extra.push("Edit", "Write");
+  if (session.permissionMode === "bypassPermissions" || gate === "all") extra.push("Bash");
+  return joinTools(csv(session.allowedTools), PI_READ_TOOLS, extra);
+}
+
+const CLI_PROVIDER: Partial<Record<Worker["kind"], string>> = { "claude-cli": "claude", "gemini-cli": "gemini", pi: "pi" };
+
+/** The runner row's mode/tools/gate/sandbox for a CLI worker run. */
+function cliAccess(
+  session: AssistantSessionRow,
+  worker: Worker,
+  mode: "work" | "text"
+): Pick<AssistantSessionRow, "permissionMode" | "allowedTools" | "approvalMode" | "sandbox" | "interactive"> {
+  const pi = worker.kind === "pi";
+  // Read-only, no gate: plan mode (pi keeps only its read tools there).
+  if (mode === "text") return { permissionMode: "plan", allowedTools: pi ? joinTools(PI_READ_TOOLS) : "" };
+  if (canEditFiles(worker, session)) {
+    return {
+      permissionMode: session.permissionMode,
+      allowedTools: pi ? piWorkTools(session) : session.allowedTools,
+      approvalMode: session.approvalMode,
+      sandbox: session.sandbox,
+      interactive: false,
+    };
+  }
+  const readTools = csv(session.allowedTools).filter((t) => READ_ONLY_TOOLS.has(t));
+  if (pi) {
+    // pi cannot be sandboxed (the runner refuses pi with `sandbox` set), so in
+    // a sandboxed session it runs read-only instead: plan mode drops bash,
+    // edit and write, which leaves nothing for the sandbox to contain. The
+    // gate stays loaded as a second line of defence.
+    return { permissionMode: "plan", allowedTools: joinTools(readTools, PI_READ_TOOLS), approvalMode: session.approvalMode, sandbox: false, interactive: false };
+  }
+  // Read-only Gemini: gemini-cli's --allowed-tools skip confirmation, so it
+  // keeps only read tools, and "default" denies the rest headless. That leaves
+  // nothing for the gate or the sandbox to hold back, and gemini-cli enforces
+  // neither — the runner refuses Gemini with the gate set, which made every
+  // Gemini worker of a gated session fail instead of running read-only.
+  return { permissionMode: "default", allowedTools: readTools.join(","), approvalMode: "off", sandbox: false, interactive: false };
+}
+
+/**
+ * Runs a CLI worker (Claude Code, Gemini CLI, pi). "work" = a real subtask
+ * with the session's permission mode, tools, approval gate and sandbox
+ * (approval cards reach the UI through the run hub); a worker that cannot
+ * enforce the gate/sandbox runs read-only. "text" = planning/review/synthesis:
+ * read-only plan mode, no gate.
  */
 async function runCli(
   session: AssistantSessionRow,
@@ -463,27 +596,13 @@ async function runCli(
   mode: "work" | "text",
   o: StreamOpts
 ): Promise<TextResult> {
-  const gemini = worker.kind === "gemini-cli";
-  const readOnlyGemini = gemini && mode === "work" && geminiRestricted(session);
   const row: AssistantSessionRow = {
     id: session.id, // same key as the run, so Stop kills this child too
     externalId: null, // fresh run; subtasks coordinate via the shared filesystem
-    provider: gemini ? "gemini" : "claude",
+    provider: CLI_PROVIDER[worker.kind] ?? "claude",
     model: worker.model,
     cwd: session.cwd,
-    ...(mode === "text"
-      ? { permissionMode: "plan", allowedTools: "" }
-      : {
-          // gemini-cli's --allowed-tools skip confirmation, so a read-only
-          // Gemini keeps only read tools; "default" denies the rest headless.
-          permissionMode: readOnlyGemini ? "default" : session.permissionMode,
-          allowedTools: readOnlyGemini
-            ? session.allowedTools.split(",").map((t) => t.trim()).filter((t) => READ_ONLY_TOOLS.has(t)).join(",")
-            : session.allowedTools,
-          approvalMode: session.approvalMode,
-          sandbox: session.sandbox,
-          interactive: false,
-        }),
+    ...cliAccess(session, worker, mode),
   };
   let text = "";
   let reported = false;
@@ -681,11 +800,24 @@ function conductorGuidance(orchestra?: OrchestraConfig | null): string {
   return instructions ? `\nAdditional instructions from the user for you as the conductor:\n${instructions}\n` : "";
 }
 
+/**
+ * The workers the role-less planner is offered: every pi agent would flood the
+ * prompt with near-identical local entries, so only the strongest coder and the
+ * strongest general one are listed (like the curated Ollama pair). Assigning
+ * any other pi worker (hybrid editor, roles) still runs.
+ */
+function plannerWorkers(workers: Worker[]): Worker[] {
+  const pi = workers.filter((w) => w.kind === "pi");
+  if (pi.length <= 2) return workers;
+  const keep = new Set([strongestWorker(pi.filter((w) => CODER_MODEL.test(w.model))), strongestWorker(pi, true)]);
+  return workers.filter((w) => w.kind !== "pi" || keep.has(w));
+}
+
 // Role-less planning: the planner routes each subtask to a worker directly.
 function workerPlannerPrompt(session: AssistantSessionRow, task: string, workers: Worker[], prefLine: string, guidance: string): string {
-  const profile = workers
+  const profile = plannerWorkers(workers)
     .map((w) => {
-      const readOnly = w.kind === "gemini-cli" && !canEditFiles(w, session);
+      const readOnly = w.editsFiles && !canEditFiles(w, session);
       return `- ${w.id} (${w.label}, editsFiles=${canEditFiles(w, session)}): ${w.strengths}${readOnly ? " (Read-only in this session.)" : ""}`;
     })
     .join("\n");
@@ -702,8 +834,8 @@ How to plan:
 - A simple question, status check or single action becomes exactly one subtask for a worker with editsFiles=true; that worker reads the project and answers or acts.
 - Otherwise use 2-5 subtasks.
 - A subtask that creates, changes or deletes files needs a worker with editsFiles=true, because the other workers return text only.
-- Workers with editsFiles=false (local models and "api:" cloud models) can't open the project, so they are optional helpers for self-contained work: analysis, drafting snippets or reviewing other workers' output. Leaving them out is fine.
-- Prefer claude for the hardest reasoning and architecture, gemini for broad, large-context sweeps, and local or api text models for cheap isolated work.
+- Workers with editsFiles=false ("ollama:" local models and "api:" cloud models) can't open the project, so they are optional helpers for self-contained work: analysis, drafting snippets or reviewing other workers' output. Leaving them out is fine.
+- Prefer claude for the hardest reasoning and architecture, gemini for broad, large-context sweeps, "pi:" local agents for free, well-scoped file changes, and local or api text models for cheap isolated work.
 - List in dependsOn the ids of subtasks that must finish first; independent subtasks get [].
 
 Reply with this JSON shape:
@@ -920,7 +1052,8 @@ export async function planSubtasks(
   const workers = await discoverWorkers(opts.clientProviders);
   if (!workers.length) throw new Error(NO_WORKER_MSG);
   const planned = await plan(session, task, workers, opts);
-  const { assigned } = assignWorkers(orderSubtasks(planned.subtasks), workers, session);
+  const { assigned, notes } = assignWorkers(orderSubtasks(planned.subtasks), workers, session);
+  for (const n of notes) opts.onLog?.(n);
   // The single-subtask fallback carries the whole task; keep it within the
   // run schema so the edited plan can be submitted.
   const subtasks = assigned.map((a) => ({ ...a.st, description: a.st.description.slice(0, LIMITS.description) }));

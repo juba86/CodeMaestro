@@ -5,6 +5,7 @@ import path from "path";
 import { orchestraConfigSchema, orchestrateRunSchema } from "@/lib/validation/schemas";
 import {
   DEFAULT_ROLES,
+  NO_LOCAL_AGENT_HINT,
   NO_MODEL_WARNING,
   autoConductor,
   buildPreset,
@@ -62,6 +63,11 @@ vi.mock("./runner", () => ({
     state.turns.push({ row, prompt });
     return state.turnImpl!(row, prompt, emit, opts);
   },
+}));
+// pi is not installed here (pi workers: orchestrator-pi.test.ts).
+vi.mock("./pi", () => ({
+  piInfo: async () => ({ installed: false, version: null, bin: "pi" }),
+  syncOllamaModels: async () => ({ models: [], syncedAt: null, ollamaBaseUrl: "", contextFallback: 32768 }),
 }));
 
 // --- Fixtures ---------------------------------------------------------------------
@@ -194,6 +200,8 @@ describe("presets", () => {
     expect(warnings).toEqual([
       "Kein lokales Modell mit Dateizugriff für Rolle „Coder“ verfügbar — Zuweisung auf Automatisch gesetzt.",
       "Kein lokales Modell mit Dateizugriff für Rolle „Tester“ verfügbar — Zuweisung auf Automatisch gesetzt.",
+      // Points at pi, which turns the local models into file-editing agents.
+      NO_LOCAL_AGENT_HINT,
     ]);
     // A file-capable local worker takes the editing roles; text roles stay on the text model.
     const withPi = buildPreset("local", [...FULL, PI]);

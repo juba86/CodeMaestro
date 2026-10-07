@@ -62,8 +62,9 @@ export async function DELETE(
   stopDev(id);
   try {
     const deleted = await prisma.assistantSession.delete({ where: { id } });
-    // pi keeps its own transcript files; drop them with the session.
-    if (deleted.provider === "pi") void deletePiSessionFiles(deleted.externalId);
+    // pi keeps its own transcript files; drop them with the session — also
+    // those of pi orchestrator workers, which any session can run.
+    void deletePiSessionFiles(deleted.provider === "pi" ? deleted.externalId : null, deleted.id);
     return NextResponse.json({ ok: true });
   } catch {
     return NextResponse.json({ error: "Not found", code: "NOT_FOUND" }, { status: 404 });
