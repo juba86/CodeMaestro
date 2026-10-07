@@ -13,7 +13,10 @@ export type LoopConfig = z.infer<typeof assistantLoopSchema>;
 /** What callers pass in (defaults are filled in by assistantLoopSchema). */
 export type LoopInput = z.input<typeof assistantLoopSchema>;
 export type LoopPromptConfig = Pick<LoopConfig, "prompt" | "maxIterations" | "completionPromise" | "freshContext">;
-export type LoopEndReason = "promise" | "max" | "stopped" | "error";
+export type LoopEndReason = "promise" | "blocked" | "max" | "stopped" | "error";
+
+/** Promise text the agent prints when it cannot continue without the user. */
+export const BLOCKED_PROMISE = "BLOCKED";
 
 /** Progress log the agent keeps when every iteration starts with a fresh context. */
 export const LOOP_PROGRESS_FILE = ".codemaestro/loop-progress.md";
@@ -21,11 +24,12 @@ export const LOOP_PROGRESS_FILE = ".codemaestro/loop-progress.md";
 // Providers whose next turn resumes the previous conversation (see runner.ts:
 // claude/gemini --resume, opencode --continue). codex/aider — and anything
 // unknown — start from scratch every turn, so each iteration gets the full task.
-const RESUMING_PROVIDERS = new Set(["claude", "gemini", "opencode"]);
+const RESUMING_PROVIDERS = new Set(["claude", "gemini", "opencode", "pi"]);
 
 // Mirrors the labels the assistant UI shows for live loop events.
 const END_LABEL: Record<LoopEndReason, string> = {
   promise: "✅ Abschluss-Signal erkannt",
+  blocked: "⛔ Blockiert – braucht deine Eingabe",
   max: "Max. Iterationen erreicht",
   stopped: "Gestoppt",
   error: "Abbruch nach Fehler",
@@ -52,7 +56,8 @@ export function buildIterationPrompt(
   const finish = [
     "- When the whole task is complete and verified, end your final message with this line:",
     tag,
-    "- Output that line only when it is true. Never use it to end the loop early, and do not write the tag anywhere else. If you are blocked, explain the blocker and what you need instead.",
+    "- Output that line only when it is true. Never use it to end the loop early, and do not write the tag anywhere else.",
+    `- If you cannot make further progress without the user (missing access, an unclear requirement, a decision only they can make), explain the blocker and what you need, then end your message with <promise>${BLOCKED_PROMISE}</promise> so the loop pauses instead of repeating the same attempt.`,
   ];
 
   if (continued) {
@@ -154,8 +159,10 @@ async function runLoop(ctx: RunContext, cfg: LoopConfig, resumable: boolean): Pr
 
     if (ctx.signal.aborted) return end("stopped", i);
     // Plain CLIs may echo the prompt (which names the tag) into their output.
-    if (hasCompletionPromise(turn.resultText.split(prompt).join(""), cfg.completionPromise)) {
-      return end("promise", i);
+    const output = turn.resultText.split(prompt).join("");
+    if (hasCompletionPromise(output, cfg.completionPromise)) return end("promise", i);
+    if (cfg.completionPromise.trim() !== BLOCKED_PROMISE && hasCompletionPromise(output, BLOCKED_PROMISE)) {
+      return end("blocked", i);
     }
     if (turn.isError && cfg.stopOnError) return end("error", i);
     // A failed turn may never have reached the model (spawn error, bad resume

@@ -44,6 +44,7 @@ export type LiveAction =
 
 const LOOP_END_LABEL: Record<string, string> = {
   promise: "✅ Abschluss-Signal erkannt",
+  blocked: "⛔ Blockiert – braucht deine Eingabe",
   max: "Max. Iterationen erreicht",
   stopped: "Gestoppt",
   error: "Abbruch nach Fehler",

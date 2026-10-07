@@ -545,6 +545,7 @@ const FINAL_ANSWER_MAX = 3 * MAX_MSG;
 
 const LOOP_END_LABEL: Record<string, string> = {
   promise: "Ziel erreicht",
+  blocked: "blockiert – braucht deine Eingabe",
   max: "Iterationslimit erreicht",
   stopped: "gestoppt",
   error: "Fehler",
