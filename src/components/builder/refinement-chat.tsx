@@ -2,11 +2,12 @@
 
 import { useBuilderStore } from "@/stores/builder-store";
 import { useSettingsStore } from "@/stores/settings-store";
-import { REFINEMENT_SYSTEM_PROMPT, QUICK_ACTIONS } from "@/lib/prompt-engine/refinement-prompts";
+import { buildRefinementSystemPrompt, QUICK_ACTIONS } from "@/lib/prompt-engine/refinement-prompts";
+import { getModelProfile } from "@/lib/prompt-engine/model-profile";
 import { parseXmlPartial, PROMPT_TAGS, tagPattern } from "@/lib/prompt-engine/xml-parser";
 import { buildXml } from "@/lib/prompt-engine/xml-builder";
 import { getApiKey, getBaseUrl } from "@/lib/ai/client-keys";
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import { Send, Wand2 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -70,6 +71,11 @@ export function RefinementChat() {
     isGenerating, setIsGenerating, updateStructured, setStep,
   } = useBuilderStore();
   const { activeProvider, activeModel } = useSettingsStore();
+  // The prompt is refined for the active model, as the quality panel lints it.
+  const systemPrompt = useMemo(
+    () => buildRefinementSystemPrompt(getModelProfile(activeProvider, activeModel)),
+    [activeProvider, activeModel]
+  );
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -128,7 +134,7 @@ export function RefinementChat() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           messages: [...history, { role: "user", content: userMsg }],
-          systemPrompt: REFINEMENT_SYSTEM_PROMPT,
+          systemPrompt,
           provider: activeProvider,
           model: activeModel,
           stream: true,

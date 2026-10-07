@@ -61,7 +61,7 @@ export function ProjectInfoForm() {
         updateStructured(merged);
         setXmlContent(buildXml(merged));
         setStep("edit");
-        toast.success("CoT prompt generated!");
+        toast.success("Prompt erstellt.");
       }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Generation failed. Check your API key in Settings.");
