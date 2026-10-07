@@ -82,7 +82,7 @@ export function useOrchestraLive(sessionId: string | null): { live: OrchestraLiv
     const attach = (since: number) => {
       detach();
       if (closed || hidden() || !runId) return;
-      const source = new EventSource(`${url}/events?since=${since}&run=${encodeURIComponent(runId)}`);
+      const source = new EventSource(`${url}/events?since=${since}&run=${encodeURIComponent(runId)}&observer=1`);
       es = source;
       source.onopen = () => {
         if (es !== source) return;

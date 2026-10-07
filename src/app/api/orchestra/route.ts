@@ -13,7 +13,7 @@ const germanErrors = z.locales.de().localeError;
 // GET → { config, presets }; the defaults when nothing is saved yet.
 export async function GET() {
   try {
-    const config = await loadOrchestraConfig();
+    const config = await loadOrchestraConfig({ strict: true });
     return NextResponse.json({ config, presets: ORCHESTRA_PRESETS });
   } catch (err) {
     console.error("[GET orchestra]", err);

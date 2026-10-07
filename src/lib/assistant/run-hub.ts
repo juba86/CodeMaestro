@@ -20,6 +20,8 @@ export interface HubEvent {
 
 export interface BufferedEvent {
   seq: number;
+  /** Server time the event was published (epoch ms). */
+  at: number;
   data: HubEvent;
 }
 
@@ -39,6 +41,9 @@ interface Run {
   info: RunInfo;
   events: BufferedEvent[];
   listeners: Set<(e: BufferedEvent) => void>;
+  // Read-only watchers (e.g. the org chart's live view) — they don't count as
+  // "someone is watching" for push notifications.
+  observers: WeakSet<(e: BufferedEvent) => void>;
   abort: AbortController;
   finished: Promise<RunEndStatus>;
   resolveFinished: (s: RunEndStatus) => void;
@@ -108,9 +113,13 @@ export function isSessionBusy(sessionId: string): boolean {
   return getActiveRun(sessionId) !== null;
 }
 
-/** Number of live SSE/bridge listeners attached to a session's run. */
+/** Number of live SSE/bridge listeners attached to a session's run (observers excluded). */
 export function listenerCount(sessionId: string): number {
-  return hub().runs.get(sessionId)?.listeners.size ?? 0;
+  const run = hub().runs.get(sessionId);
+  if (!run) return 0;
+  let n = 0;
+  for (const l of run.listeners) if (!run.observers.has(l)) n++;
+  return n;
 }
 
 export interface RunHandle {
@@ -146,6 +155,7 @@ export function beginRun(sessionId: string, kind: RunKind, origin: RunOrigin): R
     },
     events: [],
     listeners: new Set(),
+    observers: new WeakSet(),
     abort: new AbortController(),
     finished,
     resolveFinished,
@@ -169,7 +179,7 @@ export function publish(sessionId: string, data: HubEvent, runId?: string): void
   const run = hub().runs.get(sessionId);
   if (!run || run.info.done) return;
   if (runId && run.info.runId !== runId) return;
-  const ev: BufferedEvent = { seq: run.info.lastSeq + 1, data: clip(data) };
+  const ev: BufferedEvent = { seq: run.info.lastSeq + 1, at: Date.now(), data: clip(data) };
   run.info.lastSeq = ev.seq;
   run.events.push(ev);
   if (run.events.length > MAX_EVENTS) {
@@ -218,11 +228,13 @@ export function wasAborted(sessionId: string, runId: string): boolean {
 export function subscribe(
   sessionId: string,
   sinceSeq: number,
-  listener: (e: BufferedEvent) => void
+  listener: (e: BufferedEvent) => void,
+  opts: { observer?: boolean } = {}
 ): { info: RunInfo; replay: BufferedEvent[]; unsubscribe: () => void } | null {
   const run = hub().runs.get(sessionId);
   if (!run) return null;
   const replay = run.events.filter((e) => e.seq > sinceSeq);
+  if (opts.observer) run.observers.add(listener);
   if (!run.info.done) run.listeners.add(listener);
   return {
     info: { ...run.info },
@@ -242,7 +254,13 @@ const HEARTBEAT_MS = 15_000;
  * When the session has no run, sends a single `{type:"idle"}` and closes.
  * Closing the connection only detaches the listener — the run keeps going.
  */
-export function sseResponse(sessionId: string, sinceSeq: number, signal: AbortSignal, expectedRunId?: string): Response {
+export function sseResponse(
+  sessionId: string,
+  sinceSeq: number,
+  signal: AbortSignal,
+  expectedRunId?: string,
+  opts: { observer?: boolean } = {}
+): Response {
   // A resume position only makes sense within the same run: if the client's
   // position belongs to an older run (other run id, or beyond this run's last
   // event), replay the current run from the start instead of skipping it.
@@ -260,7 +278,8 @@ export function sseResponse(sessionId: string, sinceSeq: number, signal: AbortSi
         if (closed) return;
         try { controller.enqueue(encoder.encode(chunk)); } catch { close(); }
       };
-      const frame = (e: BufferedEvent) => write(`id: ${e.seq}\ndata: ${JSON.stringify(e.data)}\n\n`);
+      // `at` (server publish time) lets late joiners show exact durations.
+      const frame = (e: BufferedEvent) => write(`id: ${e.seq}\ndata: ${JSON.stringify({ ...e.data, at: e.at })}\n\n`);
       const close = () => {
         if (closed) return;
         closed = true;
@@ -274,7 +293,7 @@ export function sseResponse(sessionId: string, sinceSeq: number, signal: AbortSi
       const sub = subscribe(sessionId, sinceSeq, (e) => {
         frame(e);
         if (e.data.type === "run_end") close();
-      });
+      }, opts);
       if (!sub) {
         write(`data: ${JSON.stringify({ type: "idle" })}\n\n`);
         close();

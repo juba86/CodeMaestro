@@ -16,13 +16,19 @@ import {
 
 export const ORCHESTRA_SETTING_KEY = "orchestra.config";
 
-/** The saved configuration, or the defaults when nothing (valid) is saved. */
-export async function loadOrchestraConfig(): Promise<OrchestraConfig> {
+/**
+ * The saved configuration, or the defaults when nothing (valid) is saved.
+ * With `strict` a failed database read throws instead of returning the
+ * defaults — the editor must not mistake an outage for "nothing saved" and
+ * then overwrite the real chart on save. Runs use the lenient default.
+ */
+export async function loadOrchestraConfig(opts: { strict?: boolean } = {}): Promise<OrchestraConfig> {
   let raw: string | undefined;
   try {
     raw = (await prisma.setting.findUnique({ where: { key: ORCHESTRA_SETTING_KEY } }))?.value;
   } catch (err) {
     console.error("[orchestra] loading the configuration failed", err);
+    if (opts.strict) throw err;
     return defaultOrchestraConfig();
   }
   if (!raw) return defaultOrchestraConfig();

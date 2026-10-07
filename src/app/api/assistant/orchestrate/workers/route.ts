@@ -42,7 +42,7 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     console.error("[orchestrate/workers]", err);
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Worker-Erkennung fehlgeschlagen", code: "DISCOVERY_FAILED", workers: [] },
+      { error: "Die verfügbaren Modelle konnten nicht ermittelt werden.", code: "DISCOVERY_FAILED", workers: [] },
       { status: 500 }
     );
   }

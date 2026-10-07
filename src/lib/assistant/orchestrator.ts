@@ -86,6 +86,8 @@ export interface OrchEvent {
   /** On subtask_text: the author's output in the fix round after review round N. */
   fixRound?: number;
   reviewerRoleId?: string;
+  /** review_start: the review loop's round cap (for "Runde n/m"). */
+  maxRounds?: number;
   reviewerRoleName?: string;
   reviewerLabel?: string;
   verdict?: ReviewVerdict;
@@ -1246,7 +1248,7 @@ export async function executePlan(
       if (signal?.aborted) break;
       rounds = round;
       emit({
-        type: "review_start", subtaskId: st.id, round,
+        type: "review_start", subtaskId: st.id, round, maxRounds,
         reviewerRoleId: reviewer.id, reviewerRoleName: reviewer.name, reviewerLabel: reviewerWorker.label,
       });
       let review = "";
