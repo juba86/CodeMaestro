@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
 import { resolveWorkdir } from "@/lib/assistant/security";
-import { getDev, startDev, detectStartCommand, findFreePort } from "@/lib/assistant/devserver";
+import { getDev, startDev, detectStartCommand, findFreePort, waitForDevUrl } from "@/lib/assistant/devserver";
 import { z } from "zod";
 
 export const runtime = "nodejs";
@@ -16,10 +16,10 @@ export async function GET(
 
   // Not running — suggest a command + free port for this project.
   const session = await prisma.assistantSession.findUnique({ where: { id } });
-  if (!session) return NextResponse.json({ running: false });
+  if (!session) return NextResponse.json({ running: false, url: null });
   const port = await findFreePort(4300);
   const { command, framework } = await detectStartCommand(session.cwd, port);
-  return NextResponse.json({ running: false, suggestion: { command, port, framework } });
+  return NextResponse.json({ running: false, url: null, suggestion: { command, port, framework } });
 }
 
 const startSchema = z.object({
@@ -46,5 +46,8 @@ export async function POST(
   }
 
   startDev(id, cwd, parsed.data.command, parsed.data.port);
+  // With CODEMAESTRO_DEV_TAILSCALE_SERVE the HTTPS tailnet URL usually is ready
+  // within a second — wait briefly so the first response already carries it.
+  await waitForDevUrl(id);
   return NextResponse.json(getDev(id));
 }

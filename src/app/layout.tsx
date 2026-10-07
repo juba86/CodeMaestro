@@ -17,9 +17,13 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "CodeMaestro",
+  applicationName: "CodeMaestro",
   description: "Conduct a fleet of AI coding agents — from anywhere",
   manifest: "/manifest.webmanifest",
-  appleWebApp: { capable: true, statusBarStyle: "black-translucent", title: "CodeMaestro" },
+  // "black" (not "black-translucent"): iOS then reserves the status bar area
+  // instead of drawing the header/sidebar underneath the clock.
+  appleWebApp: { capable: true, statusBarStyle: "black", title: "CodeMaestro" },
+  formatDetection: { telephone: false },
   icons: {
     icon: "/icons/icon-192.png",
     apple: "/icons/apple-touch-icon.png",
@@ -39,7 +43,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className="dark">
+    <html lang="de" className="dark">
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >

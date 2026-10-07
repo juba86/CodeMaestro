@@ -2,6 +2,7 @@ import { promises as fs } from "fs";
 import { randomBytes, timingSafeEqual } from "crypto";
 import { diffLines } from "@/lib/diff";
 import { getActiveRun, publish, type HubEvent } from "./run-hub";
+import { notifySession } from "@/lib/push";
 
 export interface QuestionOption { label: string; description?: string }
 export interface QuestionItem {
@@ -227,6 +228,7 @@ export async function createApproval(
 
   state().pending.set(approvalId, { sessionId, event, waiters: new Set(), timer });
   publish(sessionId, event as unknown as HubEvent);
+  void notifySession(sessionId, question ? "question" : "approval", { detail: event.command || event.filePath || event.questions?.[0]?.question || tool });
   return { approvalId };
 }
 

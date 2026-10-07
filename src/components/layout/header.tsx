@@ -3,6 +3,16 @@
 import { useSettingsStore } from "@/stores/settings-store";
 import { Moon, Sun } from "lucide-react";
 import { useEffect } from "react";
+import { PushToggle } from "@/components/push-toggle";
+
+// Installed desktop app in Window Controls Overlay mode (manifest
+// display_override): the header doubles as the draggable title bar and keeps
+// its buttons clear of the OS window controls.
+const TITLEBAR_CSS = `@media (display-mode: window-controls-overlay) {
+  .cm-titlebar { -webkit-app-region: drag; app-region: drag;
+    padding-right: max(1rem, calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw) + 0.5rem)); }
+  .cm-titlebar button, .cm-titlebar a { -webkit-app-region: no-drag; app-region: no-drag; }
+}`;
 
 export function Header() {
   const { theme, setTheme } = useSettingsStore();
@@ -26,11 +36,13 @@ export function Header() {
   }, [theme]);
 
   return (
-    <header className="flex items-center justify-between px-4 h-12 border-b border-border bg-background">
+    <header className="cm-titlebar flex items-center justify-between px-4 h-12 border-b border-border bg-background">
+      <style>{TITLEBAR_CSS}</style>
       <div className="text-sm text-muted-foreground">
         CodeMaestro · AI coding control plane
       </div>
       <div className="flex items-center gap-2">
+        <PushToggle />
         <button
           onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
           aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}

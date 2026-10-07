@@ -1,69 +1,24 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useSearchParams } from "next/navigation";
 import { getApiKey, getBaseUrl } from "@/lib/ai/client-keys";
 import { PROVIDERS as CHAT_PROVIDERS } from "@/lib/ai/catalog";
 import {
-  Plus, Send, Square, Trash2, Loader2, Terminal, Wrench, FileText,
-  AlertCircle, FolderGit2, Network, Cpu, Sparkles, FolderPlus, Folder, ChevronUp, ExternalLink, Play,
-  ChevronDown, Maximize2, Minimize2, Paperclip, ShieldCheck, Check, X, BookOpen,
+  Plus, Send, Square, Trash2, Loader2, Terminal, FolderGit2, Network, Sparkles, FolderPlus, Folder,
+  ChevronUp, ExternalLink, Play, ChevronDown, Maximize2, Minimize2, Paperclip, ShieldCheck, BookOpen,
+  Repeat, WifiOff,
 } from "lucide-react";
 import { toast } from "sonner";
-
-interface SessionSummary {
-  id: string;
-  provider: string;
-  model: string;
-  title: string;
-  cwd: string;
-  status: string;
-  totalCostUsd: number;
-  messageCount: number;
-  updatedAt: string;
-}
-
-interface Msg {
-  id?: string;
-  role: string; // user | assistant | tool_use | tool_result | system | error | plan | synthesis
-  content: string;
-  meta?: string;
-  _streaming?: boolean;
-  _subtaskId?: string;
-}
-
-interface PlannedSubtask {
-  id: string;
-  title: string;
-  workerId: string;
-  description: string;
-  dependsOn: string[];
-  editsFiles: boolean;
-}
-
-interface BrowseState {
-  path: string;
-  parent: string | null;
-  dirs: { name: string; path: string }[];
-}
-
-interface DiffPart { op: "equal" | "add" | "del"; text: string }
-interface ApprovalCard {
-  approvalId: string;
-  tool: string; // Edit | Write | MultiEdit | Bash
-  command?: string;
-  filePath?: string;
-  isWrite?: boolean;
-  diff?: DiffPart[];
-}
-
-interface QuestionOpt { label: string; description?: string }
-interface QuestionItemUI { question: string; header?: string; multiSelect?: boolean; options: QuestionOpt[] }
-interface QuestionCard {
-  approvalId: string;
-  kind: "ask" | "plan";
-  questions?: QuestionItemUI[]; // kind "ask"
-  plan?: string;                // kind "plan"
-}
+import { MessageBubble } from "./message-bubble";
+import { PendingGates } from "./approval-cards";
+import { LoopControls, loopBody } from "./loop-controls";
+import { runningLabel } from "./run-events";
+import { storedSessionId, useSessionRun } from "./use-session-run";
+import {
+  DEFAULT_LOOP_OPTIONS,
+  type BrowseState, type DevStatus, type LoopOptions, type PlannedSubtask, type SessionSummary,
+} from "./types";
 
 const PROVIDERS = [
   { id: "claude", label: "Claude Code" },
@@ -76,24 +31,72 @@ const PROVIDERS = [
 // Approval-gate + sandbox are Claude-Code-specific (PreToolUse hooks).
 const APPROVAL_CAPABLE = new Set(["claude"]);
 
+type Mode = "chat" | "orchestrate" | "loop";
+
+interface PlanDraft {
+  sid: string;
+  prompt: string;
+  workers: { id: string; label: string; editsFiles?: boolean }[];
+  subtasks: PlannedSubtask[];
+}
+
+/**
+ * Link to the session's dev server. Prefers the server-provided URL (HTTPS via
+ * `tailscale serve`); a raw dev port is never TLS, so the fallback is always
+ * http — even when this app itself is served over https.
+ */
+function devHref(dev: DevStatus): string {
+  if (dev.url && /^https?:\/\//i.test(dev.url)) return dev.url;
+  const host = typeof window === "undefined" ? "localhost" : window.location.hostname;
+  return `http://${host}:${dev.port}`;
+}
+
+// Collect the user's configured cloud/custom OpenAI-compatible providers so the
+// orchestrator can offer them as optional text workers (keys live in the
+// browser). Cloud needs a key; the custom endpoint needs a base URL.
+async function gatherClientProviders(): Promise<{ id: string; key: string; baseUrl: string }[]> {
+  const out: { id: string; key: string; baseUrl: string }[] = [];
+  for (const def of CHAT_PROVIDERS) {
+    if (def.kind !== "openai" && def.kind !== "openai-local") continue;
+    const key = await getApiKey(def.id);
+    const baseUrl = getBaseUrl(def.id);
+    if (def.kind === "openai") { if (!key) continue; } // cloud: needs key
+    else if (def.configurableBaseUrl) { if (!baseUrl) continue; } // custom: needs base
+    else continue; // lmstudio etc.: skip auto-include to avoid inert workers
+    out.push({ id: def.id, key, baseUrl });
+  }
+  return out;
+}
+
 export function AssistantView() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
-  const [activeId, setActiveId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<Msg[]>([]);
-  const [live, setLive] = useState<Msg[]>([]);
+  const [sessionsLoaded, setSessionsLoaded] = useState(false);
+
+  const loadSessions = useCallback(() => {
+    fetch("/api/assistant/sessions", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d) => { setSessions(d.sessions || []); setSessionsLoaded(true); })
+      .catch(() => {});
+  }, []);
+
+  const {
+    activeId, messages, live, running, stopping, reconnecting,
+    openSession, ensureSession, reattach, closeSession, startRun, stop, decide,
+  } = useSessionRun(loadSessions);
+
   const [input, setInput] = useState("");
-  const [running, setRunning] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [orchestrateMode, setOrchestrateMode] = useState(false);
+  const [mode, setMode] = useState<Mode>("chat");
   // RAG: augment turns with relevant knowledge-base context (default on; the
   // server no-ops gracefully when the index is empty or Ollama is unreachable).
   const [useKnowledge, setUseKnowledge] = useState(true);
+  const [loopOpts, setLoopOpts] = useState<LoopOptions>(DEFAULT_LOOP_OPTIONS);
   const [orchMode, setOrchMode] = useState<"auto" | "hybrid">("auto");
   const [wizardEnabled, setWizardEnabled] = useState(false);
   const [wizardOpen, setWizardOpen] = useState(false);
   const [wizard, setWizard] = useState({ stack: "", constraints: "", routing: "balanced", verify: false });
-  const [planDraft, setPlanDraft] = useState<{ workers: { id: string; label: string; editsFiles?: boolean }[]; subtasks: PlannedSubtask[] } | null>(null);
-  const [pendingPrompt, setPendingPrompt] = useState("");
+  const [planDraft, setPlanDraft] = useState<PlanDraft | null>(null);
+  const [planning, setPlanning] = useState(false);
   // Which model plans/synthesizes the orchestration. "" = Auto (no Claude required).
   const [plannerWorkerId, setPlannerWorkerId] = useState("");
   const [orchWorkers, setOrchWorkers] = useState<{ id: string; label: string }[]>([]);
@@ -103,16 +106,18 @@ export function AssistantView() {
   const [tools, setTools] = useState<string[]>([]);
   const [permissionModes, setPermissionModes] = useState<string[]>([]);
 
-  // Dev-server launcher state for the active session.
-  const [dev, setDev] = useState<{ running: boolean; port?: number; command?: string; logs?: string[]; exitInfo?: string } | null>(null);
+  // Dev-server launcher state, tagged with the session it belongs to.
+  const [devState, setDevState] = useState<{ sid: string; status: DevStatus } | null>(null);
   const [devCmd, setDevCmd] = useState("");
   const [devPort, setDevPort] = useState<number>(0);
   const [devLogsOpen, setDevLogsOpen] = useState(false);
-  const devPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const dev = devState && devState.sid === activeId ? devState.status : null;
 
-  // Mobile/UX: maximize the chat to full screen; collapse the new-session config.
+  // Mobile/UX: maximize the chat to full screen; collapse the new-session config
+  // (open by default only when there is nothing to show yet).
   const [maximized, setMaximized] = useState(false);
-  const [configOpen, setConfigOpen] = useState(false);
+  const [configPref, setConfigPref] = useState<boolean | null>(null);
+  const configOpen = configPref ?? (sessionsLoaded && sessions.length === 0 && !activeId);
 
   const [draft, setDraft] = useState({
     provider: "claude",
@@ -124,46 +129,60 @@ export function AssistantView() {
     sandbox: false,
   });
 
-  // Pending tool approvals (diff/command gate) awaiting the user's decision.
-  const [approvals, setApprovals] = useState<ApprovalCard[]>([]);
-  const [questions, setQuestions] = useState<QuestionCard[]>([]);
-
   const threadRef = useRef<HTMLDivElement>(null);
-  const abortRef = useRef<AbortController | null>(null);
+  // Auto-scroll only while the user is at the bottom (not while reading back).
+  const stickRef = useRef(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
 
-  async function uploadFiles(files: FileList | null) {
-    if (!files || files.length === 0 || !activeId) return;
-    setUploading(true);
-    try {
-      const fd = new FormData();
-      Array.from(files).forEach((f) => fd.append("files", f));
-      const res = await fetch(`/api/assistant/sessions/${activeId}/upload`, { method: "POST", body: fd });
-      const d = await res.json();
-      if (!res.ok) { toast.error(d.error || "Upload fehlgeschlagen."); return; }
-      toast.success(`${d.saved.length} Datei(en) hochgeladen: ${d.saved.join(", ")}`);
-      if (d.saved.length) {
-        setInput((prev) => prev
-          ? prev
-          : `Ich habe folgende Dateien ins Projekt hochgeladen: ${d.saved.join(", ")}. `);
-      }
-    } finally {
-      setUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
-    }
-  }
-
-  const loadSessions = useCallback(() => {
-    fetch("/api/assistant/sessions").then((r) => r.json()).then((d) => setSessions(d.sessions || [])).catch(() => {});
-  }, []);
+  const activeSession = sessions.find((s) => s.id === activeId);
+  const busy = running || planning;
 
   useEffect(() => { loadSessions(); }, [loadSessions]);
 
+  // Keep the session list (running badges) fresh: fast while anything runs,
+  // slow otherwise — that also picks up runs started elsewhere (Telegram).
+  const anyRunning = sessions.some((s) => s.status === "running");
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (document.visibilityState === "visible") loadSessions();
+    }, anyRunning ? 4000 : 20000);
+    return () => clearInterval(t);
+  }, [anyRunning, loadSessions]);
+
+  // Open the session from the URL (?session=, used by push-notification deep
+  // links) or, on first mount, the one used last. The hook itself writes
+  // ?session= on every switch, so the value is read from the live URL: a
+  // lagging router render must not switch back to the previous session.
+  const sessionParam = useSearchParams().get("session");
+  const restoredRef = useRef(false);
+  useEffect(() => {
+    const fromUrl = new URLSearchParams(window.location.search).get("session");
+    if (!restoredRef.current) {
+      restoredRef.current = true;
+      if (!fromUrl) {
+        const stored = storedSessionId();
+        // A remembered session may have been deleted meanwhile — drop it silently.
+        if (stored) ensureSession(stored, { quiet: true });
+        return;
+      }
+    }
+    if (fromUrl) ensureSession(fromUrl);
+  }, [sessionParam, ensureSession]);
+
+  // The active session runs (started in another tab / via Telegram) but this
+  // page is not attached — attach.
+  const activeStatus = activeSession?.status;
+  useEffect(() => {
+    if (activeStatus === "running" && !running) reattach();
+  }, [activeStatus, running, reattach]);
+
   // Load the worker pool for the orchestrator's "planner model" dropdown the
   // first time the user enables Orchestrator mode.
+  const orchestrateOn = mode === "orchestrate";
+  const needWorkers = orchestrateOn && orchWorkers.length === 0;
   useEffect(() => {
-    if (!orchestrateMode || orchWorkers.length > 0) return;
+    if (!needWorkers) return;
     let cancelled = false;
     (async () => {
       try {
@@ -178,30 +197,26 @@ export function AssistantView() {
       } catch { /* dropdown just falls back to Auto */ }
     })();
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [orchestrateMode]);
-
-  // Open the new-session config by default only when there's nothing to show yet.
-  useEffect(() => {
-    if (sessions.length === 0 && !activeId) setConfigOpen(true);
-  }, [sessions.length, activeId]);
-
-  // Keep the session list (running badges) fresh while anything is running.
-  const anyRunning = sessions.some((s) => s.status === "running");
-  useEffect(() => {
-    if (!anyRunning) return;
-    const t = setInterval(() => loadSessions(), 4000);
-    return () => clearInterval(t);
-  }, [anyRunning, loadSessions]);
+  }, [needWorkers]);
 
   // Handoff from the Prompt Builder: a prompt was sent over → prefill the input.
   useEffect(() => {
     const handoff = sessionStorage.getItem("pb-assistant-prompt");
-    if (handoff) {
-      sessionStorage.removeItem("pb-assistant-prompt");
-      setInput(handoff);
-      setConfigOpen(true);
-      toast.info("Prompt übernommen — wähle/erstelle eine Session und sende ihn ab.");
+    if (!handoff) return;
+    sessionStorage.removeItem("pb-assistant-prompt");
+    setInput(handoff);
+    setConfigPref(true);
+    toast.info("Prompt übernommen — wähle/erstelle eine Session und sende ihn ab.");
+  }, []);
+
+  // Folder browser: navigate the allowed directory tree; the browsed folder is
+  // the working directory the session will run in.
+  const loadBrowse = useCallback(async (path?: string) => {
+    const url = path ? `/api/assistant/browse?path=${encodeURIComponent(path)}` : "/api/assistant/browse";
+    const d = await fetch(url).then((r) => r.json()).catch(() => null);
+    if (d?.path) {
+      setBrowse({ path: d.path, parent: d.parent ?? null, dirs: d.dirs || [] });
+      setDraft((prev) => ({ ...prev, cwd: d.path }));
     }
   }, []);
 
@@ -210,91 +225,87 @@ export function AssistantView() {
       setTools(d.tools || []);
       setPermissionModes(d.permissionModes || ["default"]);
     }).catch(() => {});
-    loadBrowse();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    void loadBrowse();
+  }, [loadBrowse]);
 
-  // Folder browser: navigate the allowed directory tree; the browsed folder is
-  // the working directory the session will run in.
-  async function loadBrowse(path?: string) {
-    const url = path ? `/api/assistant/browse?path=${encodeURIComponent(path)}` : "/api/assistant/browse";
-    const d = await fetch(url).then((r) => r.json()).catch(() => null);
-    if (d?.path) {
-      setBrowse({ path: d.path, parent: d.parent ?? null, dirs: d.dirs || [] });
-      setDraft((prev) => ({ ...prev, cwd: d.path }));
-    }
-  }
-
+  // New session → start at the bottom again.
+  useEffect(() => { stickRef.current = true; }, [activeId]);
   useEffect(() => {
-    threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages, live]);
+    const el = threadRef.current;
+    if (el && stickRef.current) el.scrollTop = el.scrollHeight;
+  }, [messages, live.items, busy]);
 
-  // When returning to the tab (e.g. after mobile standby), reload the active
-  // session so any work that finished in the background is shown immediately.
-  useEffect(() => {
-    const onVis = () => {
-      if (document.visibilityState === "visible" && activeId && !running) {
-        openSession(activeId);
-        loadSessions();
-      }
-    };
-    document.addEventListener("visibilitychange", onVis);
-    return () => document.removeEventListener("visibilitychange", onVis);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeId, running]);
+  const onThreadScroll = () => {
+    const el = threadRef.current;
+    if (el) stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  };
 
-  // Poll the dev-server status (logs/exit) while it's running.
-  useEffect(() => {
-    if (devPollRef.current) { clearInterval(devPollRef.current); devPollRef.current = null; }
-    if (activeId && dev?.running) {
-      devPollRef.current = setInterval(() => loadDev(activeId), 3000);
-    }
-    return () => { if (devPollRef.current) clearInterval(devPollRef.current); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeId, dev?.running]);
-
-  const activeSession = sessions.find((s) => s.id === activeId);
-
-  async function openSession(sid: string) {
-    setActiveId(sid);
-    setLive([]);
-    const d = await fetch(`/api/assistant/sessions/${sid}`).then((r) => r.json());
-    setMessages(d.session?.messages || []);
-    loadDev(sid);
-  }
-
-  async function loadDev(sid: string) {
-    const d = await fetch(`/api/assistant/sessions/${sid}/dev`).then((r) => r.json()).catch(() => null);
+  const loadDev = useCallback(async (sid: string) => {
+    const d = (await fetch(`/api/assistant/sessions/${sid}/dev`, { cache: "no-store" })
+      .then((r) => r.json())
+      .catch(() => null)) as DevStatus | null;
     if (!d) return;
-    setDev(d);
+    setDevState({ sid, status: d });
     if (d.suggestion) { setDevCmd(d.suggestion.command); setDevPort(d.suggestion.port); }
     else if (d.command && d.port) { setDevCmd(d.command); setDevPort(d.port); }
+  }, []);
+
+  useEffect(() => {
+    if (activeId) void loadDev(activeId);
+  }, [activeId, loadDev]);
+
+  // Poll the dev-server status (logs/exit) while it's running.
+  const devRunning = !!dev?.running;
+  useEffect(() => {
+    if (!activeId || !devRunning) return;
+    const t = setInterval(() => void loadDev(activeId), 3000);
+    return () => clearInterval(t);
+  }, [activeId, devRunning, loadDev]);
+
+  async function uploadFiles(files: FileList | null) {
+    if (!files || files.length === 0 || !activeId) return;
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      Array.from(files).forEach((f) => fd.append("files", f));
+      const res = await fetch(`/api/assistant/sessions/${activeId}/upload`, { method: "POST", body: fd });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) { toast.error(d.error || "Upload fehlgeschlagen."); return; }
+      const saved: string[] = Array.isArray(d.saved) ? d.saved : [];
+      toast.success(`${saved.length} Datei(en) hochgeladen: ${saved.join(", ")}`);
+      if (saved.length) {
+        setInput((prev) => prev
+          ? prev
+          : `Ich habe folgende Dateien ins Projekt hochgeladen: ${saved.join(", ")}. `);
+      }
+    } catch {
+      toast.error("Upload fehlgeschlagen.");
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
   }
 
   async function startDevServer() {
     if (!activeId || !devCmd.trim() || !devPort) return;
-    const res = await fetch(`/api/assistant/sessions/${activeId}/dev`, {
+    const sid = activeId;
+    const res = await fetch(`/api/assistant/sessions/${sid}/dev`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ command: devCmd, port: devPort }),
     });
-    const d = await res.json();
+    const d = await res.json().catch(() => ({}));
     if (!res.ok) { toast.error(d.error || "Start fehlgeschlagen."); return; }
-    setDev(d);
+    setDevState({ sid, status: d });
     setDevLogsOpen(true);
     toast.success(`App gestartet auf Port ${devPort}.`);
   }
 
   async function stopDevServer() {
     if (!activeId) return;
-    await fetch(`/api/assistant/sessions/${activeId}/dev/stop`, { method: "POST" });
+    await fetch(`/api/assistant/sessions/${activeId}/dev/stop`, { method: "POST" }).catch(() => {});
     await loadDev(activeId);
     toast.info("App gestoppt.");
-  }
-
-  function devLink(port: number) {
-    if (typeof window === "undefined") return `:${port}`;
-    return `${window.location.protocol}//${window.location.hostname}:${port}`;
   }
 
   async function createSession() {
@@ -305,12 +316,11 @@ export function AssistantView() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...draft, allowedTools: draft.allowedTools.join(",") }),
       });
-      const d = await res.json();
+      const d = await res.json().catch(() => ({}));
       if (!res.ok) { toast.error(d.error || "Konnte Session nicht anlegen."); return; }
-      await loadSessions();
-      setActiveId(d.session.id);
-      setMessages([]);
-      setLive([]);
+      loadSessions();
+      setConfigPref(false);
+      await openSession(d.session.id);
       toast.success("Session angelegt.");
     } finally {
       setCreating(false);
@@ -319,176 +329,32 @@ export function AssistantView() {
 
   async function deleteSession(sid: string) {
     if (!window.confirm("Session löschen?")) return;
-    await fetch(`/api/assistant/sessions/${sid}`, { method: "DELETE" });
-    if (activeId === sid) { setActiveId(null); setMessages([]); }
+    await fetch(`/api/assistant/sessions/${sid}`, { method: "DELETE" }).catch(() => {});
+    closeSession(sid); // no-op unless it is (still) the open session
     loadSessions();
-  }
-
-  async function stop() {
-    if (!activeId) return;
-    await fetch(`/api/assistant/sessions/${activeId}/stop`, { method: "POST" });
-    abortRef.current?.abort();
   }
 
   // Stop a (possibly background) run in any session from the session list.
   async function stopSessionById(sid: string) {
-    await fetch(`/api/assistant/sessions/${sid}/stop`, { method: "POST" }).catch(() => {});
-    if (sid === activeId) abortRef.current?.abort();
-    loadSessions();
-    if (sid === activeId) await openSession(sid);
-    toast.info("Aufgabe gestoppt.");
-  }
-
-  // Poll a session until it is no longer "running", updating the transcript.
-  // Used after a dropped connection (mobile standby) — the server keeps working.
-  async function pollSessionUntilIdle(sid: string) {
-    for (let i = 0; i < 240; i++) {
-      const d = await fetch(`/api/assistant/sessions/${sid}`).then((r) => r.json()).catch(() => null);
-      if (d?.session) {
-        setMessages(d.session.messages || []);
-        if (d.session.status !== "running") return;
-      }
-      await new Promise((r) => setTimeout(r, 3000));
-    }
-  }
-
-  // Shared cleanup after a stream ends. If it ended cleanly (or the user stopped),
-  // reload the transcript; if the connection dropped, poll for the background result.
-  async function settleStream(gotDone: boolean) {
-    setRunning(false);
-    abortRef.current = null;
-    setLive([]);
-    setApprovals([]);
-    if (!activeId) return;
-    if (gotDone) {
-      await openSession(activeId);
-    } else {
-      toast.info("Verbindung unterbrochen — Aufgabe läuft im Hintergrund weiter.");
-      setRunning(true);
-      await pollSessionUntilIdle(activeId);
-      setRunning(false);
-    }
-    loadSessions();
+    await stop(sid);
+    toast.info("Aufgabe wird gestoppt.");
   }
 
   async function send() {
-    if (!input.trim() || running || !activeId) return;
-    if (orchestrateMode) { void orchestrate(); return; }
+    if (!activeId || busy) return;
+    if (mode === "orchestrate") { void orchestrate(); return; }
     const prompt = input;
+    if (!prompt.trim()) return;
+    // Bound to the session the prompt was typed in; startRun refuses if the
+    // user switched sessions while the key was being read.
+    const sid = activeId;
     setInput("");
-    setMessages((prev) => [...prev, { role: "user", content: prompt }]);
-    setLive([]);
-    setRunning(true);
-
+    stickRef.current = true;
     const apiKey = activeSession?.provider === "gemini" ? await getApiKey("gemini") : undefined;
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    // Accumulate live events; assistant text is merged into one growing bubble.
-    let assistantBuf = "";
-    let gotDone = false;
-    const pushLive = (m: Msg) => setLive((prev) => [...prev, m]);
-
-    try {
-      const res = await fetch(`/api/assistant/sessions/${activeId}/message`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt, apiKey, useKnowledge }),
-        signal: controller.signal,
-      });
-      if (!res.ok || !res.body) {
-        const e = await res.json().catch(() => ({}));
-        toast.error(e.error || "Anfrage fehlgeschlagen.");
-        gotDone = true;
-        return;
-      }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        const lines = buf.split("\n");
-        buf = lines.pop() || "";
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          const data = line.slice(6);
-          if (data === "[DONE]") { gotDone = true; break; }
-          try {
-            const e = JSON.parse(data);
-            if (e.type === "text" && e.content) {
-              assistantBuf += e.content;
-              setLive((prev) => {
-                const next = [...prev];
-                const lastAssistant = [...next].reverse().find((m) => m.role === "assistant" && m._streaming);
-                if (lastAssistant) { lastAssistant.content = assistantBuf; return next; }
-                next.push({ role: "assistant", content: assistantBuf, _streaming: true } as Msg & { _streaming: boolean });
-                return next;
-              });
-            } else if (e.type === "knowledge") {
-              const sources: string[] = e.sources || [];
-              pushLive({ role: "knowledge", content: `${sources.length} Quelle(n) aus der Wissensbasis`, meta: JSON.stringify({ sources }) });
-            } else if (e.type === "tool_use") {
-              assistantBuf = "";
-              pushLive({ role: "tool_use", content: e.name || "tool", meta: JSON.stringify({ name: e.name, input: e.input }) });
-            } else if (e.type === "tool_result") {
-              pushLive({ role: "tool_result", content: e.content || "", meta: JSON.stringify({ isError: e.isError }) });
-            } else if (e.type === "error" && e.content) {
-              pushLive({ role: "error", content: e.content });
-            } else if (e.type === "approval_request") {
-              setApprovals((prev) => [...prev, {
-                approvalId: e.approvalId, tool: e.tool, command: e.command,
-                filePath: e.filePath, isWrite: e.isWrite, diff: e.diff,
-              }]);
-            } else if (e.type === "approval_resolved") {
-              setApprovals((prev) => prev.filter((a) => a.approvalId !== e.approvalId));
-            } else if (e.type === "question_request") {
-              setQuestions((prev) => [...prev, {
-                approvalId: e.approvalId, kind: e.kind, questions: e.questions, plan: e.plan,
-              }]);
-            } else if (e.type === "question_resolved") {
-              setQuestions((prev) => prev.filter((q) => q.approvalId !== e.approvalId));
-            }
-          } catch { /* ignore */ }
-        }
-      }
-    } catch (err) {
-      // AbortError = user pressed Stop (server already stopped & set idle).
-      if (err instanceof DOMException && err.name === "AbortError") gotDone = true;
-    } finally {
-      await settleStream(gotDone);
-    }
-  }
-
-  // Resolve a pending tool approval. reason (on deny) steers the model mid-run.
-  async function decideApproval(approvalId: string, decision: "allow" | "deny", reason?: string) {
-    setApprovals((prev) => prev.filter((a) => a.approvalId !== approvalId));
-    try {
-      await fetch(`/api/assistant/approval/${approvalId}/decide`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ decision, reason }),
-      });
-    } catch {
-      toast.error("Freigabe konnte nicht übermittelt werden.");
-    }
-  }
-
-  // Answer a pending interactive question. For AskUserQuestion we "deny" the tool
-  // with the chosen answer as the reason (the model reads it and continues); for
-  // ExitPlanMode "allow" approves the plan, "deny" sends it back.
-  async function answerQuestion(approvalId: string, decision: "allow" | "deny", reason?: string) {
-    setQuestions((prev) => prev.filter((q) => q.approvalId !== approvalId));
-    try {
-      await fetch(`/api/assistant/approval/${approvalId}/decide`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ decision, reason }),
-      });
-    } catch {
-      toast.error("Antwort konnte nicht übermittelt werden.");
-    }
+    const r = mode === "loop"
+      ? await startRun(sid, "loop", { prompt, apiKey, useKnowledge, ...loopBody(loopOpts) }, prompt)
+      : await startRun(sid, "message", { prompt, apiKey, useKnowledge }, prompt);
+    if (!r.ok) setInput((cur) => cur || prompt);
   }
 
   function buildPreference(): string {
@@ -502,143 +368,71 @@ export function AssistantView() {
     return parts.join(" ");
   }
 
-  // Collect the user's configured cloud/custom OpenAI-compatible providers so the
-  // orchestrator can offer them as optional text workers (keys live in the
-  // browser). Cloud needs a key; the custom endpoint needs a base URL.
-  async function gatherClientProviders(): Promise<{ id: string; key: string; baseUrl: string }[]> {
-    const out: { id: string; key: string; baseUrl: string }[] = [];
-    for (const def of CHAT_PROVIDERS) {
-      if (def.kind !== "openai" && def.kind !== "openai-local") continue;
-      const key = await getApiKey(def.id);
-      const baseUrl = getBaseUrl(def.id);
-      if (def.kind === "openai") { if (!key) continue; } // cloud: needs key
-      else if (def.configurableBaseUrl) { if (!baseUrl) continue; } // custom: needs base
-      else continue; // lmstudio etc.: skip auto-include to avoid inert workers
-      out.push({ id: def.id, key, baseUrl });
-    }
-    return out;
-  }
-
   async function orchestrate() {
-    if (orchestrateMode && wizardEnabled && !wizardOpen) {
+    if (!activeId) return;
+    if (wizardEnabled && !wizardOpen) {
       setWizardOpen(true);
       return;
     }
-    if (!input.trim() || running || !activeId) return;
-    const preference = buildPreference();
     const prompt = input;
+    if (!prompt.trim() || busy) return;
+    const sid = activeId;
+    const preference = buildPreference();
     setInput("");
     setWizardOpen(false);
-    setMessages((prev) => [...prev, { role: "user", content: prompt }]);
-    setLive([]);
+    stickRef.current = true;
 
     const clientProviders = await gatherClientProviders();
 
     if (orchMode === "hybrid") {
-      setPendingPrompt(prompt);
-      setRunning(true);
+      // Planning is synchronous; the plan is reviewed before anything runs.
+      setPlanning(true);
       try {
-        const res = await fetch(`/api/assistant/sessions/${activeId}/orchestrate/plan`, {
+        const res = await fetch(`/api/assistant/sessions/${sid}/orchestrate/plan`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ prompt, preference, clientProviders, plannerWorkerId }),
         });
-        const d = await res.json();
-        if (!res.ok) { toast.error(d.error || "Planung fehlgeschlagen."); return; }
-        setPlanDraft({ workers: d.workers || [], subtasks: d.subtasks || [] });
+        const d = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          toast.error(d.error || "Planung fehlgeschlagen.");
+          setInput((cur) => cur || prompt);
+          if (res.status === 409) reattach();
+          return;
+        }
+        setPlanDraft({ sid, prompt, workers: d.workers || [], subtasks: d.subtasks || [] });
+      } catch {
+        toast.error("Planung fehlgeschlagen.");
+        setInput((cur) => cur || prompt);
       } finally {
-        setRunning(false);
+        setPlanning(false);
       }
       return;
     }
-    await streamOrchestrate(`/api/assistant/sessions/${activeId}/orchestrate`, { prompt, preference, clientProviders, plannerWorkerId });
+    const r = await startRun(sid, "orchestrate", { prompt, preference, clientProviders, plannerWorkerId }, prompt);
+    if (!r.ok) setInput((cur) => cur || prompt);
   }
 
   async function runEditedPlan() {
-    if (!planDraft || !activeId) return;
-    const subtasks = planDraft.subtasks;
+    const plan = planDraft;
+    if (!plan || plan.sid !== activeId || busy) return;
     setPlanDraft(null);
+    stickRef.current = true;
     const clientProviders = await gatherClientProviders();
-    await streamOrchestrate(`/api/assistant/sessions/${activeId}/orchestrate/run`, { prompt: pendingPrompt, subtasks, clientProviders, plannerWorkerId });
+    const r = await startRun(
+      plan.sid,
+      "orchestrate/run",
+      { prompt: plan.prompt, subtasks: plan.subtasks, clientProviders, plannerWorkerId },
+      plan.prompt,
+    );
+    // Keep the edited plan for a retry unless the session is busy elsewhere.
+    if (!r.ok && r.status !== 409) setPlanDraft(plan);
   }
 
-  async function streamOrchestrate(url: string, body: object) {
-    setRunning(true);
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    const updateSubtask = (sid: string, fn: (m: Msg) => void) => {
-      setLive((prev) => {
-        const next = [...prev];
-        const m = next.find((x) => x._subtaskId === sid && x.role === "assistant");
-        if (m) fn(m);
-        return next;
-      });
-    };
-
-    const taskText = (body as { prompt?: string }).prompt || "";
-    let gotDone = false;
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-      if (!res.ok || !res.body) {
-        const e = await res.json().catch(() => ({}));
-        toast.error(e.error || "Orchestrierung fehlgeschlagen.");
-        gotDone = true;
-        return;
-      }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
-      let synthBuf = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        const lines = buf.split("\n");
-        buf = lines.pop() || "";
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          const data = line.slice(6);
-          if (data === "[DONE]") { gotDone = true; break; }
-          try {
-            const e = JSON.parse(data);
-            if (e.type === "plan") {
-              setLive((prev) => [...prev, { role: "plan", content: taskText, meta: JSON.stringify({ subtasks: e.subtasks }) }]);
-            } else if (e.type === "subtask_start") {
-              setLive((prev) => [...prev, {
-                role: "assistant", content: "",
-                meta: JSON.stringify({ subtaskId: e.subtaskId, title: e.title, worker: e.workerLabel, workerId: e.workerId }),
-                _streaming: true, _subtaskId: e.subtaskId,
-              }]);
-            } else if (e.type === "subtask_text" && e.subtaskId) {
-              updateSubtask(e.subtaskId, (m) => { m.content += e.content; });
-            } else if (e.type === "subtask_end" && e.subtaskId) {
-              updateSubtask(e.subtaskId, (m) => { m._streaming = false; });
-            } else if (e.type === "synthesis") {
-              synthBuf += e.content;
-              setLive((prev) => {
-                const next = [...prev];
-                const m = [...next].reverse().find((x) => x.role === "synthesis");
-                if (m) { m.content = synthBuf; return next; }
-                next.push({ role: "synthesis", content: synthBuf });
-                return next;
-              });
-            } else if (e.type === "error") {
-              setLive((prev) => [...prev, { role: "error", content: e.content }]);
-            }
-          } catch { /* ignore */ }
-        }
-      }
-    } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") gotDone = true;
-    } finally {
-      await settleStream(gotDone);
-    }
+  function cancelPlan() {
+    const plan = planDraft;
+    setPlanDraft(null);
+    if (plan) setInput((cur) => cur || plan.prompt);
   }
 
   async function createFolder() {
@@ -649,7 +443,7 @@ export function AssistantView() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: newFolder.trim(), parent }),
     });
-    const d = await res.json();
+    const d = await res.json().catch(() => ({}));
     if (!res.ok) { toast.error(d.error || "Ordner konnte nicht erstellt werden."); return; }
     setNewFolder("");
     await loadBrowse(d.path); // navigate into the new folder (becomes the cwd)
@@ -665,17 +459,22 @@ export function AssistantView() {
     }));
   }
 
-  const thread = [...messages, ...live];
+  const activePlan = planDraft && planDraft.sid === activeId ? planDraft : null;
+  const hasCards = live.approvals.length > 0 || live.questions.length > 0;
+  const toggleClass = (on: boolean) =>
+    `flex items-center gap-1.5 px-2 py-1 text-xs rounded-md border ${
+      on ? "bg-primary text-primary-foreground border-primary" : "border-input hover:bg-accent"
+    }`;
 
   return (
     <div className="flex flex-col gap-4 lg:grid lg:grid-cols-[300px_1fr] lg:h-[calc(100vh-7rem)]">
       {/* Sidebar: new session + list — hidden when the chat is maximized */}
-      <div className={`flex-col gap-3 lg:overflow-y-auto pr-1 ${maximized ? "hidden" : "flex"}`}>
+      <div className={`flex-col gap-3 lg:overflow-y-auto pr-1 min-w-0 ${maximized ? "hidden" : "flex"}`}>
         <h1 className="text-xl font-bold flex items-center gap-2"><Terminal size={18} /> Code Assistant</h1>
 
         <div className="rounded-lg border border-border p-3 space-y-2 text-sm">
           <button
-            onClick={() => setConfigOpen((v) => !v)}
+            onClick={() => setConfigPref(!configOpen)}
             className="w-full flex items-center justify-between font-medium"
             aria-expanded={configOpen}
           >
@@ -718,7 +517,7 @@ export function AssistantView() {
                   onClick={() => loadBrowse(dir.path)}
                   className="w-full text-left px-2 py-1 rounded text-xs hover:bg-accent flex items-center gap-1.5"
                 >
-                  <Folder size={12} className="text-muted-foreground shrink-0" /> {dir.name}
+                  <Folder size={12} className="text-muted-foreground shrink-0" /> <span className="truncate">{dir.name}</span>
                 </button>
               ))}
             </div>
@@ -728,8 +527,9 @@ export function AssistantView() {
           </p>
           <div className="flex gap-1.5">
             <input
-              className="flex-1 rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+              className="flex-1 min-w-0 rounded-md border border-input bg-background px-2 py-1.5 text-sm"
               placeholder="Neuer Ordner (hier anlegen)"
+              aria-label="Name des neuen Ordners"
               value={newFolder}
               onChange={(e) => setNewFolder(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); createFolder(); } }}
@@ -747,6 +547,7 @@ export function AssistantView() {
           <input
             className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm"
             placeholder="Modell (optional, z.B. opus / sonnet)"
+            aria-label="Modell"
             value={draft.model}
             onChange={(e) => setDraft({ ...draft, model: e.target.value })}
           />
@@ -763,6 +564,7 @@ export function AssistantView() {
               <button
                 key={t}
                 onClick={() => toggleTool(t)}
+                aria-pressed={draft.allowedTools.includes(t)}
                 className={`px-2 py-0.5 text-xs rounded border ${
                   draft.allowedTools.includes(t)
                     ? "bg-primary text-primary-foreground border-primary"
@@ -822,10 +624,19 @@ export function AssistantView() {
           {sessions.map((s) => (
             <div
               key={s.id}
+              role="button"
+              tabIndex={0}
+              aria-current={activeId === s.id ? "true" : undefined}
               className={`group flex items-center justify-between gap-2 rounded-md px-2 py-1.5 cursor-pointer text-sm ${
                 activeId === s.id ? "bg-accent" : "hover:bg-accent/50"
               }`}
               onClick={() => openSession(s.id)}
+              onKeyDown={(e) => {
+                if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) {
+                  e.preventDefault();
+                  openSession(s.id);
+                }
+              }}
             >
               <div className="min-w-0">
                 <div className="truncate font-medium flex items-center gap-1.5">
@@ -843,7 +654,8 @@ export function AssistantView() {
                 </button>
               ) : (
                 <button onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }} aria-label="löschen"
-                  className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive shrink-0">
+                  title="Session löschen"
+                  className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100 text-muted-foreground hover:text-destructive shrink-0">
                   <Trash2 size={13} />
                 </button>
               )}
@@ -853,26 +665,34 @@ export function AssistantView() {
       </div>
 
       {/* Thread */}
-      <div className={maximized
-        ? "fixed inset-0 z-50 bg-background flex flex-col"
-        : "flex flex-col border border-border rounded-lg min-h-[65vh] lg:min-h-0"}>
+      <div
+        className={maximized
+          ? "fixed inset-0 z-50 bg-background flex flex-col"
+          : "flex flex-col border border-border rounded-lg min-h-[65vh] lg:min-h-0 min-w-0"}
+        style={maximized ? { paddingTop: "env(safe-area-inset-top)" } : undefined}
+      >
         {!activeId ? (
-          <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
+          <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground px-4 text-center">
             Wähle links eine Session oder starte eine neue.
           </div>
         ) : (
           <>
-            <div className="border-b border-border px-3 py-2 text-xs text-muted-foreground flex items-center gap-2">
+            <div className="border-b border-border px-3 py-2 text-xs text-muted-foreground flex items-center gap-2 min-w-0">
               <FolderGit2 size={13} className="shrink-0" />
               <span className="truncate" title={activeSession?.cwd}>
                 {maximized ? (activeSession?.title || activeSession?.cwd) : activeSession?.cwd}
               </span>
+              {reconnecting && (
+                <span className="inline-flex items-center gap-1 text-amber-500 shrink-0" title="Verbindung wird wiederhergestellt…" role="status">
+                  <WifiOff size={12} /> <span className="hidden sm:inline">Verbindung wird wiederhergestellt…</span>
+                </span>
+              )}
               <span className="ml-auto capitalize whitespace-nowrap hidden sm:inline">{activeSession?.provider}{activeSession?.model && ` · ${activeSession.model}`}</span>
               <button
                 onClick={() => setMaximized((v) => !v)}
                 aria-label={maximized ? "Verkleinern" : "Chat maximieren"}
                 title={maximized ? "Verkleinern" : "Chat maximieren"}
-                className="shrink-0 p-1 rounded hover:bg-accent text-foreground"
+                className="ml-auto sm:ml-0 shrink-0 p-1 rounded hover:bg-accent text-foreground"
               >
                 {maximized ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
               </button>
@@ -886,15 +706,15 @@ export function AssistantView() {
                     <Play size={12} /> App läuft · Port {dev.port}
                   </span>
                   <a
-                    href={devLink(dev.port!)}
+                    href={devHref(dev)}
                     target="_blank"
                     rel="noreferrer"
                     className="px-2 py-0.5 rounded bg-primary text-primary-foreground inline-flex items-center gap-1"
                   >
                     <ExternalLink size={11} /> Öffnen
                   </a>
-                  <code className="px-1 bg-accent rounded">{devLink(dev.port!)}</code>
-                  <button onClick={() => setDevLogsOpen((v) => !v)} className="px-2 py-0.5 rounded border border-input hover:bg-accent ml-auto">Logs</button>
+                  <code className="px-1 bg-accent rounded truncate max-w-full">{devHref(dev)}</code>
+                  <button onClick={() => setDevLogsOpen((v) => !v)} aria-expanded={devLogsOpen} className="px-2 py-0.5 rounded border border-input hover:bg-accent ml-auto">Logs</button>
                   <button
                     onClick={stopDevServer}
                     className="px-2 py-0.5 rounded bg-red-500/15 text-red-500 border border-red-500/40 hover:bg-red-500/25 inline-flex items-center gap-1 font-medium"
@@ -907,6 +727,7 @@ export function AssistantView() {
                   <input
                     className="flex-1 min-w-[150px] rounded-md border border-input bg-background px-2 py-1 text-xs font-mono"
                     placeholder="Start-Befehl (z.B. npm run dev)"
+                    aria-label="Start-Befehl"
                     value={devCmd}
                     onChange={(e) => setDevCmd(e.target.value)}
                   />
@@ -914,6 +735,7 @@ export function AssistantView() {
                     type="number"
                     className="w-20 rounded-md border border-input bg-background px-2 py-1 text-xs"
                     placeholder="Port"
+                    aria-label="Port"
                     value={devPort || ""}
                     onChange={(e) => setDevPort(Number(e.target.value))}
                   />
@@ -930,47 +752,65 @@ export function AssistantView() {
                 <p className="text-[11px] text-amber-500">{dev.exitInfo}</p>
               )}
               {devLogsOpen && dev?.logs && dev.logs.length > 0 && (
-                <pre className="max-h-40 overflow-y-auto bg-accent/30 rounded p-2 text-[11px] whitespace-pre-wrap leading-snug">
+                <pre className="max-h-40 overflow-y-auto bg-accent/30 rounded p-2 text-[11px] whitespace-pre-wrap break-words leading-snug">
                   {dev.logs.join("\n")}
                 </pre>
               )}
             </div>
 
-            <div ref={threadRef} className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0">
-              {thread.length === 0 && (
+            <div ref={threadRef} onScroll={onThreadScroll} className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-3 min-h-0">
+              {messages.length === 0 && live.items.length === 0 && !busy && (
                 <p className="text-sm text-muted-foreground text-center py-8">
                   Stelle eine Aufgabe — der Assistent arbeitet im Verzeichnis oben.
                 </p>
               )}
-              {thread.map((m, i) => <MessageBubble key={m.id || `live-${i}`} msg={m} />)}
-              {running && <div className="text-xs text-muted-foreground animate-pulse">Assistent arbeitet…</div>}
+              {messages.map((m, i) => <MessageBubble key={m.id || `local-${i}`} msg={m} />)}
+              {live.items.map((m, i) => <MessageBubble key={`live-${i}`} msg={m} />)}
+              {busy && (
+                <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground" role="status" aria-live="polite">
+                  <Loader2 size={12} className="animate-spin" />
+                  <span>{planning ? "Plan wird erstellt…" : runningLabel(live, stopping)}</span>
+                  {!planning && live.run?.origin === "telegram" && (
+                    <span className="inline-flex items-center gap-1 rounded-full border border-sky-500/40 bg-sky-500/10 px-2 py-0.5 text-[10px] text-sky-400">
+                      <Send size={10} /> läuft via Telegram
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
             <div className="border-t border-border px-3 pt-2 flex flex-wrap items-center gap-2">
               <button
-                onClick={() => setOrchestrateMode((v) => !v)}
-                className={`flex items-center gap-1.5 px-2 py-1 text-xs rounded-md border ${
-                  orchestrateMode ? "bg-primary text-primary-foreground border-primary" : "border-input hover:bg-accent"
-                }`}
+                onClick={() => setMode((m) => (m === "orchestrate" ? "chat" : "orchestrate"))}
+                className={toggleClass(mode === "orchestrate")}
+                aria-pressed={mode === "orchestrate"}
                 title="Aufgabe zerlegen und auf die stärksten Modelle verteilen"
               >
-                <Network size={12} /> Orchestrator {orchestrateMode ? "an" : "aus"}
+                <Network size={12} /> Orchestrator {mode === "orchestrate" ? "an" : "aus"}
+              </button>
+              <button
+                onClick={() => setMode((m) => (m === "loop" ? "chat" : "loop"))}
+                className={toggleClass(mode === "loop")}
+                aria-pressed={mode === "loop"}
+                title="Aufgabe wiederholen, bis der Agent das Abschluss-Signal ausgibt"
+              >
+                <Repeat size={12} /> Loop {mode === "loop" ? "an" : "aus"}
               </button>
               <button
                 onClick={() => setUseKnowledge((v) => !v)}
-                className={`flex items-center gap-1.5 px-2 py-1 text-xs rounded-md border ${
-                  useKnowledge ? "bg-primary text-primary-foreground border-primary" : "border-input hover:bg-accent"
-                }`}
+                className={toggleClass(useKnowledge)}
+                aria-pressed={useKnowledge}
                 title="Relevanten Kontext aus der Wissensbasis (RAG) automatisch einfügen"
               >
                 <BookOpen size={12} /> Wissensbasis {useKnowledge ? "an" : "aus"}
               </button>
-              {orchestrateMode && (
+              {orchestrateOn && (
                 <>
-                  <div className="flex rounded-md border border-input overflow-hidden text-xs">
+                  <div className="flex rounded-md border border-input overflow-hidden text-xs" role="group" aria-label="Orchestrierungs-Modus">
                     {(["auto", "hybrid"] as const).map((m) => (
                       <button
                         key={m}
                         onClick={() => setOrchMode(m)}
+                        aria-pressed={orchMode === m}
                         className={`px-2 py-1 ${orchMode === m ? "bg-accent font-medium" : "hover:bg-accent/50"}`}
                       >
                         {m === "auto" ? "Auto" : "Hybrid"}
@@ -984,7 +824,8 @@ export function AssistantView() {
                   <select
                     value={plannerWorkerId}
                     onChange={(e) => setPlannerWorkerId(e.target.value)}
-                    className="rounded-md border border-input bg-background px-2 py-1 text-xs"
+                    aria-label="Planer-Modell"
+                    className="rounded-md border border-input bg-background px-2 py-1 text-xs max-w-full"
                     title="Modell, das die Aufgabe plant und am Ende zusammenfasst (nicht zwingend Claude)"
                   >
                     <option value="">Planer: Auto</option>
@@ -999,18 +840,21 @@ export function AssistantView() {
               )}
             </div>
 
+            {/* Loop options */}
+            {mode === "loop" && <LoopControls value={loopOpts} onChange={setLoopOpts} />}
+
             {/* Wizard panel */}
-            {orchestrateMode && wizardEnabled && wizardOpen && (
+            {orchestrateOn && wizardEnabled && wizardOpen && (
               <div className="mx-3 mt-2 rounded-md border border-border p-3 space-y-2 text-sm">
                 <div className="font-medium flex items-center gap-1.5"><Sparkles size={14} /> Projekt-Wizard</div>
                 <input className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm"
-                  placeholder="Stack / Sprache (z.B. Next.js + TypeScript)"
+                  placeholder="Stack / Sprache (z.B. Next.js + TypeScript)" aria-label="Stack / Sprache"
                   value={wizard.stack} onChange={(e) => setWizard({ ...wizard, stack: e.target.value })} />
                 <input className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm"
-                  placeholder="Rahmenbedingungen / No-Gos (optional)"
+                  placeholder="Rahmenbedingungen / No-Gos (optional)" aria-label="Rahmenbedingungen / No-Gos"
                   value={wizard.constraints} onChange={(e) => setWizard({ ...wizard, constraints: e.target.value })} />
-                <div className="flex items-center gap-2">
-                  <select className="rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+                <div className="flex flex-wrap items-center gap-2">
+                  <select className="rounded-md border border-input bg-background px-2 py-1.5 text-sm" aria-label="Routing"
                     value={wizard.routing} onChange={(e) => setWizard({ ...wizard, routing: e.target.value })}>
                     <option value="balanced">Routing: ausgewogen</option>
                     <option value="quality">Routing: beste Qualität</option>
@@ -1026,59 +870,46 @@ export function AssistantView() {
             )}
 
             {/* Hybrid plan editor */}
-            {planDraft && (
-              <div className="mx-3 mt-2 rounded-md border border-primary/40 bg-primary/5 p-3 space-y-2 text-sm">
+            {activePlan && (
+              <div className="mx-3 mt-2 rounded-md border border-primary/40 bg-primary/5 p-3 space-y-2 text-sm max-h-[50vh] overflow-y-auto">
                 <div className="font-medium flex items-center gap-1.5 text-primary"><Network size={14} /> Plan prüfen & Modelle zuweisen</div>
-                {planDraft.subtasks.map((st, idx) => (
-                  <div key={st.id} className="flex items-start gap-2">
+                <p className="text-[11px] text-muted-foreground line-clamp-2 break-words" title={activePlan.prompt}>Aufgabe: {activePlan.prompt}</p>
+                {activePlan.subtasks.map((st, idx) => (
+                  <div key={st.id} className="flex flex-wrap sm:flex-nowrap items-start gap-2">
                     <span className="text-xs text-muted-foreground mt-1.5 w-5 shrink-0">{idx + 1}.</span>
                     <div className="flex-1 min-w-0">
-                      <div className="text-sm">{st.title}</div>
+                      <div className="text-sm break-words">{st.title}</div>
                       {st.description && <div className="text-[11px] text-muted-foreground truncate">{st.description}</div>}
                     </div>
                     <select
-                      className="rounded-md border border-input bg-background px-2 py-1 text-xs shrink-0"
+                      className="rounded-md border border-input bg-background px-2 py-1 text-xs shrink-0 max-w-full"
+                      aria-label={`Modell für Teilaufgabe ${idx + 1}`}
                       value={st.workerId}
                       onChange={(e) => setPlanDraft((prev) => prev && ({
                         ...prev,
                         subtasks: prev.subtasks.map((x) => x.id === st.id ? { ...x, workerId: e.target.value } : x),
                       }))}
                     >
-                      {planDraft.workers.map((w) => (
+                      {activePlan.workers.map((w) => (
                         <option key={w.id} value={w.id}>{w.label}{w.editsFiles ? "" : " (kein Datei-Edit)"}</option>
                       ))}
                     </select>
                   </div>
                 ))}
                 <div className="flex gap-2 pt-1">
-                  <button onClick={runEditedPlan} disabled={running}
+                  <button onClick={runEditedPlan} disabled={busy}
                     className="px-3 py-1.5 text-xs rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50">
                     Ausführen
                   </button>
-                  <button onClick={() => setPlanDraft(null)} className="px-3 py-1.5 text-xs rounded-md border border-input hover:bg-accent">
+                  <button onClick={cancelPlan} className="px-3 py-1.5 text-xs rounded-md border border-input hover:bg-accent">
                     Abbrechen
                   </button>
                 </div>
               </div>
             )}
 
-            {/* Interactive questions: clickable options / plan approval */}
-            {questions.length > 0 && (
-              <div className="mx-3 mt-2 space-y-2">
-                {questions.map((q) => (
-                  <QuestionGate key={q.approvalId} card={q} onAnswer={answerQuestion} />
-                ))}
-              </div>
-            )}
-
-            {/* Approval gate: diff/command cards awaiting the user's decision */}
-            {approvals.length > 0 && (
-              <div className="mx-3 mt-2 space-y-2">
-                {approvals.map((a) => (
-                  <ApprovalGate key={a.approvalId} card={a} onDecide={decideApproval} />
-                ))}
-              </div>
-            )}
+            {/* Approval gate + interactive questions of the attached run */}
+            {hasCards && <PendingGates approvals={live.approvals} questions={live.questions} onDecide={decide} />}
 
             <div className="px-3 pb-3 pt-2 flex gap-2 items-end" style={{ paddingBottom: "max(0.75rem, env(safe-area-inset-bottom))" }}>
               <input
@@ -1090,27 +921,45 @@ export function AssistantView() {
               />
               <button
                 onClick={() => fileInputRef.current?.click()}
-                disabled={uploading || running}
+                disabled={uploading || busy}
                 aria-label="Dateien hochladen"
                 title="Dateien ins Projekt hochladen"
-                className="px-3 py-2 rounded-md border border-input hover:bg-accent disabled:opacity-50 shrink-0"
+                className="h-11 px-3 rounded-md border border-input hover:bg-accent disabled:opacity-50 shrink-0"
               >
                 {uploading ? <Loader2 size={16} className="animate-spin" /> : <Paperclip size={16} />}
               </button>
               <textarea
-                className="flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm resize-none min-h-[44px] max-h-40 focus:outline-none focus:ring-2 focus:ring-ring"
-                placeholder={orchestrateMode ? "Größere Aufgabe — wird zerlegt & verteilt…" : "Aufgabe an den Assistenten…"}
+                className="flex-1 min-w-0 rounded-md border border-input bg-background px-3 py-2 text-sm resize-none min-h-[44px] max-h-40 focus:outline-none focus:ring-2 focus:ring-ring"
+                placeholder={
+                  mode === "orchestrate" ? "Größere Aufgabe — wird zerlegt & verteilt…"
+                    : mode === "loop" ? "Aufgabe, die wiederholt wird, bis sie erledigt ist…"
+                    : "Aufgabe an den Assistenten…"
+                }
+                aria-label="Aufgabe"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-                disabled={running}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); }
+                }}
+                disabled={busy}
               />
               {running ? (
-                <button onClick={stop} className="px-3 rounded-md border border-input hover:bg-accent" aria-label="Stop">
-                  <Square size={16} />
+                <button
+                  onClick={() => void stop()}
+                  disabled={stopping}
+                  className="h-11 px-3 shrink-0 rounded-md border border-input hover:bg-accent disabled:opacity-60"
+                  aria-label="Stop"
+                  title="Ausführung stoppen"
+                >
+                  {stopping ? <Loader2 size={16} className="animate-spin" /> : <Square size={16} />}
                 </button>
               ) : (
-                <button onClick={send} disabled={!input.trim()} className="px-3 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50" aria-label="Senden">
+                <button
+                  onClick={send}
+                  disabled={!input.trim() || planning}
+                  className="h-11 px-3 shrink-0 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+                  aria-label="Senden"
+                >
                   <Send size={16} />
                 </button>
               )}
@@ -1120,241 +969,4 @@ export function AssistantView() {
       </div>
     </div>
   );
-}
-
-function QuestionGate({ card, onAnswer }: { card: QuestionCard; onAnswer: (id: string, d: "allow" | "deny", reason?: string) => void }) {
-  const [sel, setSel] = useState<Record<number, string[]>>({});
-
-  if (card.kind === "plan") {
-    return (
-      <div className="rounded-md border border-violet-500/50 bg-violet-500/5 p-3 space-y-2 text-sm">
-        <div className="flex items-center gap-1.5 font-medium text-violet-300">
-          <ShieldCheck size={14} /> Plan freigeben
-        </div>
-        {card.plan && (
-          <pre className="max-h-60 overflow-auto whitespace-pre-wrap rounded bg-black/30 p-2 text-xs text-foreground/90">{card.plan}</pre>
-        )}
-        <div className="flex gap-2">
-          <button onClick={() => onAnswer(card.approvalId, "allow")}
-            className="px-3 py-1.5 text-xs rounded-md bg-primary text-primary-foreground hover:bg-primary/90 flex items-center gap-1">
-            <Check size={13} /> Plan umsetzen
-          </button>
-          <button onClick={() => onAnswer(card.approvalId, "deny", "Der Nutzer hat den Plan abgelehnt. Bitte überarbeite ihn und frage ggf. nach.")}
-            className="px-3 py-1.5 text-xs rounded-md border border-input hover:bg-accent flex items-center gap-1">
-            <X size={13} /> Ablehnen
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  const qs = card.questions || [];
-  const toggle = (qi: number, label: string, multi: boolean) => {
-    setSel((prev) => {
-      const cur = prev[qi] || [];
-      if (multi) return { ...prev, [qi]: cur.includes(label) ? cur.filter((l) => l !== label) : [...cur, label] };
-      return { ...prev, [qi]: [label] };
-    });
-  };
-  const allAnswered = qs.length > 0 && qs.every((_, qi) => (sel[qi] || []).length > 0);
-  const submit = () => {
-    const lines = qs.map((q, qi) => `- ${q.header || q.question || `Frage ${qi + 1}`}: ${(sel[qi] || []).join(", ")}`);
-    onAnswer(card.approvalId, "deny", `Der Nutzer hat geantwortet:\n${lines.join("\n")}`);
-  };
-
-  return (
-    <div className="rounded-md border border-violet-500/50 bg-violet-500/5 p-3 space-y-3 text-sm">
-      <div className="flex items-center gap-1.5 font-medium text-violet-300">
-        <AlertCircle size={14} /> Rückfrage
-      </div>
-      {qs.map((q, qi) => (
-        <div key={qi} className="space-y-1.5">
-          {q.header && <div className="text-[11px] uppercase tracking-wide text-muted-foreground">{q.header}</div>}
-          {q.question && <div className="text-sm">{q.question}{q.multiSelect ? " (Mehrfachauswahl)" : ""}</div>}
-          <div className="flex flex-wrap gap-1.5">
-            {q.options.map((o, oi) => {
-              const active = (sel[qi] || []).includes(o.label);
-              return (
-                <button key={oi} onClick={() => toggle(qi, o.label, !!q.multiSelect)} title={o.description}
-                  className={`px-2.5 py-1 text-xs rounded-md border text-left ${active ? "bg-primary text-primary-foreground border-primary" : "border-input hover:bg-accent"}`}>
-                  {o.label}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      ))}
-      <button onClick={submit} disabled={!allAnswered}
-        className="px-3 py-1.5 text-xs rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 flex items-center gap-1">
-        <Check size={13} /> Antwort senden
-      </button>
-    </div>
-  );
-}
-
-function ApprovalGate({ card, onDecide }: { card: ApprovalCard; onDecide: (id: string, d: "allow" | "deny", reason?: string) => void }) {
-  const [reasonOpen, setReasonOpen] = useState(false);
-  const [reason, setReason] = useState("");
-  const isBash = card.tool === "Bash";
-  return (
-    <div className="rounded-md border border-amber-500/50 bg-amber-500/5 p-3 space-y-2 text-sm">
-      <div className="flex items-center gap-1.5 font-semibold text-amber-500">
-        <ShieldCheck size={14} />
-        Freigabe nötig: {card.tool}
-        {card.filePath && <span className="font-normal text-xs text-muted-foreground truncate">· {card.filePath}</span>}
-      </div>
-      {isBash ? (
-        <pre className="bg-background/60 rounded p-2 text-xs whitespace-pre-wrap max-h-48 overflow-y-auto border border-border">{card.command}</pre>
-      ) : (
-        <pre className="bg-background/60 rounded p-2 text-xs max-h-64 overflow-y-auto border border-border leading-snug">
-          {(card.diff || []).map((d, i) => (
-            <div key={i} className={
-              d.op === "add" ? "text-green-500 bg-green-500/10"
-                : d.op === "del" ? "text-red-500 bg-red-500/10"
-                : "text-muted-foreground"
-            }>
-              <span className="select-none opacity-60">{d.op === "add" ? "+ " : d.op === "del" ? "- " : "  "}</span>
-              {d.text || " "}
-            </div>
-          ))}
-        </pre>
-      )}
-      {reasonOpen && (
-        <textarea
-          className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm resize-none min-h-[44px]"
-          placeholder="Hinweis an den Assistenten (warum abgelehnt / was stattdessen tun)…"
-          value={reason}
-          onChange={(e) => setReason(e.target.value)}
-          autoFocus
-        />
-      )}
-      <div className="flex flex-wrap gap-2">
-        <button
-          onClick={() => onDecide(card.approvalId, "allow")}
-          className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md bg-green-600 text-white hover:bg-green-500"
-        >
-          <Check size={13} /> Freigeben
-        </button>
-        {reasonOpen ? (
-          <button
-            onClick={() => onDecide(card.approvalId, "deny", reason.trim() || undefined)}
-            className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md bg-destructive text-white hover:opacity-90"
-          >
-            <X size={13} /> Ablehnen + Hinweis senden
-          </button>
-        ) : (
-          <>
-            <button
-              onClick={() => onDecide(card.approvalId, "deny")}
-              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md border border-input hover:bg-accent"
-            >
-              <X size={13} /> Ablehnen
-            </button>
-            <button
-              onClick={() => setReasonOpen(true)}
-              className="px-3 py-1.5 text-xs rounded-md border border-input hover:bg-accent"
-            >
-              Ablehnen mit Hinweis…
-            </button>
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function MessageBubble({ msg }: { msg: Msg }) {
-  if (msg.role === "user") {
-    return (
-      <div className="ml-auto max-w-[85%] bg-primary text-primary-foreground rounded-lg px-3 py-2 text-sm">
-        <pre className="whitespace-pre-wrap font-sans">{msg.content}</pre>
-      </div>
-    );
-  }
-  if (msg.role === "plan") {
-    let subtasks: PlannedSubtask[] = [];
-    try { subtasks = JSON.parse(msg.meta || "{}").subtasks || []; } catch { /* */ }
-    return (
-      <div className="max-w-[95%] border border-primary/40 bg-primary/5 rounded-lg px-3 py-2 text-sm">
-        <div className="flex items-center gap-1.5 font-semibold text-primary mb-1"><Network size={14} /> Orchestrierungsplan</div>
-        <ol className="space-y-1 list-decimal list-inside">
-          {subtasks.map((s) => (
-            <li key={s.id} className="text-sm">
-              {s.title}
-              <span className="ml-1.5 inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-accent text-[11px]">
-                <Cpu size={10} /> {s.workerId}
-              </span>
-            </li>
-          ))}
-        </ol>
-      </div>
-    );
-  }
-  if (msg.role === "synthesis") {
-    return (
-      <div className="max-w-[95%] border border-green-500/40 bg-green-500/5 rounded-lg px-3 py-2 text-sm">
-        <div className="flex items-center gap-1.5 font-semibold text-green-500 mb-1"><Sparkles size={14} /> Zusammenfassung</div>
-        <pre className="whitespace-pre-wrap font-sans">{msg.content}</pre>
-      </div>
-    );
-  }
-  if (msg.role === "assistant") {
-    let worker = "";
-    let title = "";
-    try { const m = JSON.parse(msg.meta || "{}"); worker = m.worker || ""; title = m.title || ""; } catch { /* */ }
-    return (
-      <div className="max-w-[90%] bg-accent rounded-lg px-3 py-2 text-sm">
-        {worker && (
-          <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground mb-1">
-            <Cpu size={11} /> {worker}{title && ` · ${title}`}
-          </div>
-        )}
-        <pre className="whitespace-pre-wrap font-sans">{msg.content}</pre>
-      </div>
-    );
-  }
-  if (msg.role === "knowledge") {
-    let sources: string[] = [];
-    try { sources = JSON.parse(msg.meta || "{}").sources || []; } catch { /* */ }
-    return (
-      <div className="max-w-[90%] rounded-lg px-3 py-2 text-xs border border-violet-500/40 bg-violet-500/5 text-violet-300 flex items-start gap-1.5">
-        <BookOpen size={13} className="mt-0.5 shrink-0" />
-        <div>
-          <span className="font-medium">Wissensbasis genutzt</span>
-          {sources.length > 0 && <span className="text-muted-foreground"> · {sources.join(", ")}</span>}
-        </div>
-      </div>
-    );
-  }
-  if (msg.role === "tool_use") {
-    let input = "";
-    try { const m = JSON.parse(msg.meta || "{}"); input = JSON.stringify(m.input, null, 2); } catch { /* */ }
-    return (
-      <div className="max-w-[90%] border border-border rounded-lg px-3 py-2 text-xs">
-        <div className="flex items-center gap-1.5 font-medium text-blue-400"><Wrench size={12} /> {msg.content}</div>
-        {input && input !== "undefined" && (
-          <pre className="mt-1 whitespace-pre-wrap text-muted-foreground max-h-32 overflow-y-auto">{input.slice(0, 1200)}</pre>
-        )}
-      </div>
-    );
-  }
-  if (msg.role === "tool_result") {
-    let isError = false;
-    try { isError = JSON.parse(msg.meta || "{}").isError; } catch { /* */ }
-    return (
-      <div className={`max-w-[90%] rounded-lg px-3 py-2 text-xs border ${isError ? "border-red-500/40" : "border-border"}`}>
-        <div className="flex items-center gap-1.5 text-muted-foreground"><FileText size={12} /> Ergebnis</div>
-        <pre className="mt-1 whitespace-pre-wrap max-h-40 overflow-y-auto">{(msg.content || "").slice(0, 2000)}</pre>
-      </div>
-    );
-  }
-  if (msg.role === "error") {
-    return (
-      <div className="max-w-[90%] rounded-lg px-3 py-2 text-xs border border-red-500/40 text-red-400 flex items-start gap-1.5">
-        <AlertCircle size={13} className="mt-0.5 shrink-0" />
-        <pre className="whitespace-pre-wrap">{msg.content}</pre>
-      </div>
-    );
-  }
-  return null;
 }

@@ -4,6 +4,7 @@ import { abortRun, beginRun, endRun, monotonicNow, type HubEvent, type RunHandle
 import { denyAllPending } from "./approvals";
 import { runTurn, stopSession, type AssistantSessionRow, type NormalizedEvent } from "./runner";
 import { TranscriptWriter } from "./transcript";
+import { notifySession } from "@/lib/push";
 
 export type DbSession = NonNullable<Awaited<ReturnType<typeof prisma.assistantSession.findUnique>>>;
 
@@ -97,6 +98,7 @@ export async function launchRun(opts: {
     } catch (err) {
       console.error("[launchRun] status update failed", err);
     }
+    void notifySession(sessionId, "run_end", { status, title: opts.title }); // before endRun: run_end detaches live SSE listeners
     endRun(sessionId, runId, status);
   })();
 
