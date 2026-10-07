@@ -144,7 +144,7 @@ export const createAssistantSessionSchema = z.object({
   model: z.string().max(100).optional().default(""),
   title: z.string().max(200).optional().default(""),
   cwd: z.string().max(1000).optional().default(""),
-  permissionMode: z.enum(["default", "acceptEdits", "plan", "bypassPermissions"]).optional().default("default"),
+  permissionMode: z.enum(["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"]).optional().default("default"),
   allowedTools: z.string().max(500).optional().default("Read,Grep,Glob"),
   approvalMode: z.enum(["off", "edits", "all"]).optional().default("off"),
   sandbox: z.boolean().optional().default(false),
@@ -220,7 +220,7 @@ export const telegramConfigSchema = z.object({
   token: z.string().max(200).optional(),
   allowedChatIds: z.array(z.number().int()).max(50).optional(),
   cwd: z.string().max(1000).optional(),
-  permissionMode: z.enum(["default", "acceptEdits", "plan", "bypassPermissions"]).optional(),
+  permissionMode: z.enum(["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"]).optional(),
   approvalMode: z.enum(["off", "edits", "all"]).optional(),
   provider: z.enum(["claude", "gemini", "opencode", "codex", "aider"]).optional(),
   model: z.string().max(100).optional(),
@@ -235,5 +235,5 @@ export const telegramControlSchema = z.object({
 // --- Helper ---
 
 export function formatZodError(error: z.ZodError): string {
-  return error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
+  return error.issues.map((i) => (i.path.length ? `${i.path.join(".")}: ${i.message}` : i.message)).join("; ");
 }

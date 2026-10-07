@@ -47,3 +47,6 @@ next-env.d.ts
 
 # sqlite database
 *.db
+
+# server-side secret key for encrypted settings (src/lib/secret-box.ts)
+.codemaestro/

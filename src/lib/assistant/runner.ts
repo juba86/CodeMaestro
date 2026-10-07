@@ -1,8 +1,10 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
+import { StringDecoder } from "string_decoder";
 import { writeFileSync, unlinkSync, existsSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 import { approvalTimeoutMs, hookToken } from "./approvals";
+import { GITHUB_SANDBOX_DOMAINS, githubEnv } from "@/lib/github";
 
 export interface AssistantSessionRow {
   id: string;
@@ -43,7 +45,9 @@ export class ApprovalHookMissingError extends Error {
 
 // Builds a Claude Code --settings file (PreToolUse approval hook + optional
 // sandbox) for this turn. Returns the file path, or null if neither is needed.
-function buildSettingsFile(session: AssistantSessionRow): string | null {
+// `github`: GitHub credentials are injected this turn, so a sandboxed run must
+// be able to reach GitHub (git/gh over HTTPS honour the sandbox proxy).
+function buildSettingsFile(session: AssistantSessionRow, opts: { github: boolean }): string | null {
   const approval = session.approvalMode && session.approvalMode !== "off";
   const wantQuestions = !!session.interactive;
   if (!approval && !session.sandbox && !wantQuestions) return null;
@@ -68,7 +72,14 @@ function buildSettingsFile(session: AssistantSessionRow): string | null {
   }
   const settings: Record<string, unknown> = {};
   if (preToolUse.length) settings.hooks = { PreToolUse: preToolUse };
-  if (session.sandbox) settings.sandbox = { enabled: true };
+  if (session.sandbox) {
+    // Only widens the network allow-list; filesystem limits stay and git/gh are
+    // not excluded from the sandbox (an excluded `gh *` could run arbitrary
+    // gh extensions unsandboxed).
+    settings.sandbox = opts.github
+      ? { enabled: true, network: { allowedDomains: GITHUB_SANDBOX_DOMAINS } }
+      : { enabled: true };
+  }
 
   const file = path.join(tmpdir(), `pb-settings-${session.id}-${Date.now()}.json`);
   writeFileSync(file, JSON.stringify(settings));
@@ -125,10 +136,16 @@ function killTree(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals)
   }
 }
 
+// SIGINT first: Claude Code ends an interrupted turn cleanly on SIGINT, while
+// SIGTERM (exit 143) leaves the turn unfinished in its session transcript.
+// Escalate if the process group doesn't exit.
 function terminate(child: ChildProcessWithoutNullStreams) {
-  killTree(child, "SIGTERM");
-  const t = setTimeout(() => { if (child.exitCode === null) killTree(child, "SIGKILL"); }, 5000);
-  t.unref?.();
+  killTree(child, "SIGINT");
+  const alive = () => child.exitCode === null && child.signalCode === null;
+  const t1 = setTimeout(() => { if (alive()) killTree(child, "SIGTERM"); }, 3000);
+  const t2 = setTimeout(() => { if (alive()) killTree(child, "SIGKILL"); }, 8000);
+  t1.unref?.();
+  t2.unref?.();
 }
 
 /** Terminates every CLI process of a session. Returns true if any was running. */
@@ -159,8 +176,17 @@ export function isMarker(externalId: string | null | undefined): boolean {
   return !!externalId && externalId.includes(MARKER_SEP);
 }
 
+/**
+ * Providers whose approval gate / sandbox CodeMaestro can enforce (through
+ * Claude Code's PreToolUse hook + settings). Others run their tools directly.
+ */
+export function supportsApprovalGate(provider: string): boolean {
+  return provider === "claude";
+}
+
 function claudeArgs(session: AssistantSessionRow, prompt: string, settingsFile: string | null): string[] {
-  const args = ["-p", prompt, "--output-format", "stream-json", "--verbose"];
+  // --include-partial-messages streams text token by token (stream_event).
+  const args = ["-p", prompt, "--output-format", "stream-json", "--verbose", "--include-partial-messages"];
   if (session.externalId) args.push("--resume", session.externalId);
   if (session.model) args.push("--model", session.model);
   args.push("--permission-mode", session.permissionMode || "default");
@@ -262,7 +288,13 @@ interface ClaudeStreamLine {
   subtype?: string;
   session_id?: string;
   model?: string;
-  message?: { content?: Array<{ type: string; text?: string; thinking?: string; name?: string; input?: unknown; id?: string; tool_use_id?: string; content?: unknown; is_error?: boolean }> };
+  message?: { id?: string; content?: Array<{ type: string; text?: string; thinking?: string; name?: string; input?: unknown; id?: string; tool_use_id?: string; content?: unknown; is_error?: boolean }> };
+  // --include-partial-messages: raw Messages API stream events.
+  event?: {
+    type: string;
+    message?: { id?: string };
+    delta?: { type: string; text?: string; thinking?: string };
+  };
   result?: string;
   total_cost_usd?: number;
   is_error?: boolean;
@@ -284,7 +316,25 @@ export async function runTurn(
   const isGemini = session.provider === "gemini";
   const kind: "claude" | "gemini" | "plain" = plain ? "plain" : isGemini ? "gemini" : "claude";
 
+  // Connected GitHub account (Settings → GitHub): token + git credential
+  // helper for every provider, so the agent can push and use gh. Empty when
+  // not connected or disabled; never throws. Awaited before the abort check so
+  // nothing async sits between that check and spawn + abort-listener setup.
+  const ghEnv = await githubEnv();
+  const github = Object.keys(ghEnv).length > 0;
+
   if (opts.signal?.aborted) {
+    return { externalId: session.externalId, costUsd: 0, isError: true };
+  }
+
+  // Fail closed: never run a provider without the approval gate the session
+  // asked for (only Claude Code's hooks can enforce it today).
+  if (session.approvalMode && session.approvalMode !== "off" && !supportsApprovalGate(session.provider)) {
+    emit({
+      type: "error",
+      content: "Das Freigabe-Gate wird für diesen Provider nicht unterstützt. Bitte eine Session ohne Freigabe-Modus anlegen oder Claude Code verwenden.",
+    });
+    emit({ type: "done" });
     return { externalId: session.externalId, costUsd: 0, isError: true };
   }
 
@@ -292,7 +342,7 @@ export async function runTurn(
   let settingsFile: string | null = null;
   if (kind === "claude") {
     try {
-      settingsFile = buildSettingsFile(session);
+      settingsFile = buildSettingsFile(session, { github });
     } catch (err) {
       emit({ type: "error", content: err instanceof Error ? err.message : String(err) });
       emit({ type: "done" });
@@ -306,7 +356,7 @@ export async function runTurn(
       ? geminiArgs(session, prompt)
       : claudeArgs(session, prompt, settingsFile);
 
-  const env: NodeJS.ProcessEnv = { ...process.env };
+  const env: NodeJS.ProcessEnv = { ...process.env, ...ghEnv };
   if (isGemini && apiKey) {
     env.GEMINI_API_KEY = apiKey;
     env.GOOGLE_API_KEY = apiKey;
@@ -335,6 +385,10 @@ export async function runTurn(
     return { externalId: session.externalId, costUsd: 0, isError: true };
   }
 
+  // The prompt is passed as an argument; close stdin so no CLI waits for
+  // piped input.
+  child.stdin.end();
+
   trackProc(session.id, child);
   const onAbort = () => terminate(child);
   opts.signal?.addEventListener("abort", onAbort, { once: true });
@@ -344,6 +398,31 @@ export async function runTurn(
   let isError = false;
   let stdoutBuffer = "";
   let stderr = "";
+  // Decode UTF-8 across chunk boundaries (a multi-byte character can be split).
+  const outDecoder = new StringDecoder("utf8");
+  const errDecoder = new StringDecoder("utf8");
+
+  // Token deltas are coalesced (~80 ms) so a long answer doesn't flood the run
+  // buffer with one event per token; anything else flushes pending text first.
+  let pending: { type: "text" | "thinking"; content: string } | null = null;
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+  const flushPending = () => {
+    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+    if (pending) { const p = pending; pending = null; emit({ type: p.type, content: p.content }); }
+  };
+  const emitDelta = (type: "text" | "thinking", content: string) => {
+    if (pending && pending.type !== type) flushPending();
+    pending = pending ? { type, content: pending.content + content } : { type, content };
+    if (pending.content.length >= 2000) flushPending();
+    else if (!flushTimer) flushTimer = setTimeout(flushPending, 80);
+  };
+  const emitNow = (e: NormalizedEvent) => { flushPending(); emit(e); };
+
+  // Messages whose text/thinking already streamed as deltas; their final
+  // "assistant" event must not repeat it.
+  let currentMessageId: string | undefined;
+  const streamedText = new Set<string>();
+  const streamedThinking = new Set<string>();
 
   const handleClaudeLine = (line: string) => {
     const trimmed = line.trim();
@@ -356,17 +435,33 @@ export async function runTurn(
     }
     if (obj.type === "system" && obj.subtype === "init") {
       if (obj.session_id) externalId = obj.session_id;
-      emit({ type: "init", sessionId: obj.session_id, model: obj.model });
+      emitNow({ type: "init", sessionId: obj.session_id, model: obj.model });
+      return;
+    }
+    if (obj.type === "stream_event" && obj.event) {
+      const ev = obj.event;
+      if (ev.type === "message_start") {
+        currentMessageId = ev.message?.id;
+      } else if (ev.type === "content_block_delta" && ev.delta) {
+        if (ev.delta.type === "text_delta" && ev.delta.text) {
+          if (currentMessageId) streamedText.add(currentMessageId);
+          emitDelta("text", ev.delta.text);
+        } else if (ev.delta.type === "thinking_delta" && ev.delta.thinking) {
+          if (currentMessageId) streamedThinking.add(currentMessageId);
+          emitDelta("thinking", ev.delta.thinking);
+        }
+      }
       return;
     }
     if (obj.type === "assistant" && obj.message?.content) {
+      const id = obj.message.id;
       for (const block of obj.message.content) {
         if (block.type === "text" && block.text) {
-          emit({ type: "text", content: block.text });
+          if (!(id && streamedText.has(id))) emitNow({ type: "text", content: block.text });
         } else if (block.type === "thinking" && block.thinking) {
-          emit({ type: "thinking", content: block.thinking });
+          if (!(id && streamedThinking.has(id))) emitNow({ type: "thinking", content: block.thinking });
         } else if (block.type === "tool_use") {
-          emit({ type: "tool_use", name: block.name, input: block.input, toolUseId: block.id });
+          emitNow({ type: "tool_use", name: block.name, input: block.input, toolUseId: block.id });
         }
       }
       return;
@@ -377,7 +472,7 @@ export async function runTurn(
           const c = typeof block.content === "string"
             ? block.content
             : JSON.stringify(block.content);
-          emit({ type: "tool_result", toolUseId: block.tool_use_id, content: c, isError: block.is_error });
+          emitNow({ type: "tool_result", toolUseId: block.tool_use_id, content: c, isError: block.is_error });
         }
       }
       return;
@@ -386,13 +481,14 @@ export async function runTurn(
       if (obj.session_id) externalId = obj.session_id;
       if (typeof obj.total_cost_usd === "number") costUsd = obj.total_cost_usd;
       isError = !!obj.is_error;
-      emit({ type: "result", content: obj.result, costUsd, isError });
+      emitNow({ type: "result", content: obj.result, costUsd, isError });
     }
   };
 
   return await new Promise<TurnResult>((resolve) => {
     child.stdout.on("data", (chunk: Buffer) => {
-      const text = chunk.toString();
+      const text = outDecoder.write(chunk);
+      if (!text) return;
       if (kind === "gemini") {
         stdoutBuffer += text;
         return; // gemini returns a single JSON object; parse at close
@@ -409,7 +505,8 @@ export async function runTurn(
     });
 
     child.stderr.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString();
+      // Keep only the tail — it holds the useful error and bounds memory.
+      stderr = (stderr + errDecoder.write(chunk)).slice(-20_000);
     });
 
     child.on("error", (err) => {
@@ -422,6 +519,11 @@ export async function runTurn(
       untrackProc(session.id, child);
       opts.signal?.removeEventListener("abort", onAbort);
       if (settingsFile) { try { unlinkSync(settingsFile); } catch { /* ignore */ } }
+      const tail = outDecoder.end();
+      if (tail) {
+        if (kind === "plain") emit({ type: "text", content: tail });
+        else stdoutBuffer += tail;
+      }
 
       if (kind === "gemini") {
         try {
@@ -443,10 +545,11 @@ export async function runTurn(
       } else if (stdoutBuffer.trim()) {
         handleClaudeLine(stdoutBuffer);
       }
+      flushPending();
 
       if (code !== 0 && !isError) {
         isError = true;
-        const stopped = opts.signal?.aborted || signal === "SIGTERM" || signal === "SIGKILL";
+        const stopped = opts.signal?.aborted || signal === "SIGINT" || signal === "SIGTERM" || signal === "SIGKILL" || code === 130 || code === 143;
         emit({ type: "error", content: stopped ? "Gestoppt." : (stderr.trim() || `${bin} exited with code ${code}`) });
       }
       emit({ type: "done" });

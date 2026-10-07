@@ -24,7 +24,7 @@ interface Status {
   boundChats: number;
 }
 
-const PERMISSION_MODES = ["default", "acceptEdits", "plan", "bypassPermissions"];
+const PERMISSION_MODES = ["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"];
 const APPROVAL_MODES = ["off", "edits", "all"];
 const PROVIDERS = ["claude", "gemini", "opencode", "codex", "aider"];
 

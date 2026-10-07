@@ -8,8 +8,9 @@ export const dynamic = "force-dynamic";
  * Attaches to a session's run as an SSE stream (works with EventSource).
  * Replays buffered events after `?since=<seq>` (or the Last-Event-ID header an
  * EventSource sends on auto-reconnect), then streams live until `run_end`.
- * With no run active it sends `{type:"idle"}` and closes. Disconnecting only
- * detaches this listener — the run itself keeps going.
+ * `?run=<runId>` pins the resume position to that run (a newer run replays
+ * from its start). With no run active it sends `{type:"idle"}` and closes.
+ * Disconnecting only detaches this listener — the run itself keeps going.
  */
 export async function GET(
   req: NextRequest,
@@ -21,5 +22,6 @@ export async function GET(
   const since = Number.isFinite(fromHeader) && fromHeader > 0
     ? fromHeader
     : Number.isFinite(fromQuery) && fromQuery > 0 ? fromQuery : 0;
-  return sseResponse(id, since, req.signal);
+  const runId = req.nextUrl.searchParams.get("run") || undefined;
+  return sseResponse(id, since, req.signal, runId);
 }

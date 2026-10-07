@@ -2,6 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
 import { createAssistantSessionSchema, formatZodError } from "@/lib/validation/schemas";
 import { resolveWorkdir } from "@/lib/assistant/security";
+import { isSessionBusy } from "@/lib/assistant/run-hub";
+import { supportsApprovalGate } from "@/lib/assistant/runner";
+
+export const runtime = "nodejs";
 
 export async function GET() {
   const sessions = await prisma.assistantSession.findMany({
@@ -15,7 +19,8 @@ export async function GET() {
       model: s.model,
       title: s.title || s.cwd,
       cwd: s.cwd,
-      status: s.status,
+      // A DB "running" without a live run is stale (e.g. after a crash).
+      status: s.status === "running" && !isSessionBusy(s.id) ? "idle" : s.status,
       totalCostUsd: s.totalCostUsd,
       messageCount: s._count.messages,
       updatedAt: s.updatedAt,
@@ -47,9 +52,12 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const session = await prisma.assistantSession.create({
-      data: { ...parsed.data, cwd },
-    });
+    // The approval gate/sandbox are enforced through provider hooks; never
+    // store a gate the provider cannot honor (the runner would refuse to run).
+    const data = supportsApprovalGate(parsed.data.provider)
+      ? { ...parsed.data, cwd }
+      : { ...parsed.data, cwd, approvalMode: "off" as const, sandbox: false };
+    const session = await prisma.assistantSession.create({ data });
     return NextResponse.json({ session }, { status: 201 });
   } catch (err) {
     console.error("[POST /api/assistant/sessions]", err);

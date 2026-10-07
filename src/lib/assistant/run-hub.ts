@@ -242,7 +242,14 @@ const HEARTBEAT_MS = 15_000;
  * When the session has no run, sends a single `{type:"idle"}` and closes.
  * Closing the connection only detaches the listener — the run keeps going.
  */
-export function sseResponse(sessionId: string, sinceSeq: number, signal: AbortSignal): Response {
+export function sseResponse(sessionId: string, sinceSeq: number, signal: AbortSignal, expectedRunId?: string): Response {
+  // A resume position only makes sense within the same run: if the client's
+  // position belongs to an older run (other run id, or beyond this run's last
+  // event), replay the current run from the start instead of skipping it.
+  const current = hub().runs.get(sessionId);
+  if (current && ((expectedRunId && expectedRunId !== current.info.runId) || sinceSeq > current.info.lastSeq)) {
+    sinceSeq = 0;
+  }
   const encoder = new TextEncoder();
   let cleanup = () => {};
 

@@ -183,7 +183,13 @@ export async function listWorkspaces(): Promise<{ path: string; label: string }[
   return out;
 }
 
-// Tools that are never auto-allowed via the simple allowlist UI (still usable in
-// permission modes that prompt, which we don't expose headless). Kept minimal.
-export const SELECTABLE_TOOLS = ["Read", "Grep", "Glob", "Bash", "Edit", "Write", "WebSearch", "WebFetch"];
-export const PERMISSION_MODES = ["default", "acceptEdits", "plan", "bypassPermissions"];
+// Tools offered by the allowlist UI (passed as --allowedTools). "Bash(git *)" /
+// "Bash(gh *)" allow just git and the GitHub CLI (push, PRs) without granting
+// arbitrary shell access — pair them with Settings → GitHub.
+export const SELECTABLE_TOOLS = [
+  "Read", "Grep", "Glob", "Bash", "Bash(git *)", "Bash(gh *)", "Edit", "Write", "WebSearch", "WebFetch",
+];
+// Claude Code permission modes. "auto" lets Claude Code's classifier decide
+// (falls back to default where unavailable); "dontAsk" denies anything that
+// would prompt (only allowlisted tools and approved hook calls run).
+export const PERMISSION_MODES = ["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"];

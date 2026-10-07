@@ -135,3 +135,23 @@ describe("run-hub", () => {
     endRun(s, run.info.runId, "idle");
   });
 });
+
+describe("run-hub resume across runs", () => {
+  it("replays a newer run from the start when the client's position belongs to an older run", async () => {
+    const s = `test-session-rerun-${Date.now()}`;
+    const old = beginRun(s, "turn", "pwa");
+    for (let i = 0; i < 5; i++) old.publish({ type: "text", content: `old${i}` });
+    endRun(s, old.info.runId, "idle");
+    const next = beginRun(s, "turn", "telegram");
+    next.publish({ type: "text", content: "new" });
+    endRun(s, next.info.runId, "idle");
+
+    // Stale seq (6) from the old run, beyond the new run's lastSeq (3).
+    const a = await new Response(sseResponse(s, 6, new AbortController().signal).body).text();
+    expect(a).toContain('"new"');
+    // Explicit run pin with a seq that exists in the new run.
+    const b = await new Response(sseResponse(s, 2, new AbortController().signal, old.info.runId).body).text();
+    expect(b).toContain('"run_start"');
+    expect(b).toContain('"new"');
+  });
+});
