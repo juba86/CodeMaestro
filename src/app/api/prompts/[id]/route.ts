@@ -82,9 +82,9 @@ export async function PUT(
 
     const nextVersion = (existing.versions[0]?.version || 0) + 1;
 
-    // Use a transaction for atomic tag + prompt update
-    const prompt = await prisma.$transaction(async (tx) => {
-      const updated = await tx.prompt.update({
+    // Use a transaction for atomic tag + prompt update (response is re-fetched below)
+    await prisma.$transaction(async (tx) => {
+      await tx.prompt.update({
         where: { id },
         data: {
           title: title ?? existing.title,
@@ -114,8 +114,6 @@ export async function PUT(
           });
         }
       }
-
-      return updated;
     });
 
     // Re-fetch with updated tags

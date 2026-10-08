@@ -84,7 +84,7 @@ describe("startLoopRun", () => {
     expect(state.persisted[0]?.content).toBe("🔁 Loop: Fix the failing tests in src/foo");
     expect(JSON.parse(state.persisted[0]?.meta ?? "{}").loop).toMatchObject({ maxIterations: 5, freshContext: true });
     expect(JSON.stringify(state.persisted[0])).not.toContain("sk-secret");
-    expect(state.turns[0].opts.rowOverrides).toEqual({ externalId: null });
+    expect(state.turns[0].opts.rowOverrides).toEqual({ externalId: null, ephemeral: true });
     expect(h.info.title).toBe("[loop] Fix the failing tests in src/foo");
   });
 
@@ -94,6 +94,8 @@ describe("startLoopRun", () => {
     expect(h.outcome).toEqual({ isError: false });
     expect(state.published.at(-1)).toEqual({ type: "loop_end", reason: "blocked", iterations: 1 });
     expect(state.turns).toHaveLength(1);
+    // A loop that keeps its context continues the session's own conversation.
+    expect(state.turns[0].opts.rowOverrides).toBeUndefined();
   });
 
   it("stops on error when asked and runs to the cap otherwise", async () => {

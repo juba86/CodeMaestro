@@ -384,6 +384,9 @@ describe("continuing the session's conversation", () => {
     const planner = state.turns.find((t) => isPlanner(t.prompt))!;
     expect(planner.row).toMatchObject({ externalId: "conv-1", forkSession: true, ephemeral: true });
     expect(planner.prompt).toContain("this session's history with the user");
+    // Reviews (and non-Claude workers) start fresh: never claim they see it.
+    expect(planner.prompt).not.toContain("the workers see it too");
+    expect(planner.prompt).toContain("reviewers and non-Claude workers do not see this conversation");
     const work = state.turns.find((t) => t.prompt.includes("build it") && !isReview(t.prompt))!;
     expect(work.row).toMatchObject({ externalId: "conv-1", forkSession: true, ephemeral: true, interactive: true });
     expect(work.prompt).toContain("AskUserQuestion");

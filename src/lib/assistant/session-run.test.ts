@@ -33,13 +33,13 @@ vi.mock("@/lib/db/client", () => ({
       }),
       findMany: vi.fn(async ({ where, orderBy, take }: {
         where: { sessionId: string; role: string; meta: { contains: string } };
-        orderBy: { createdAt: "asc" | "desc" };
-        take: number;
+        orderBy?: { createdAt: "asc" | "desc" };
+        take?: number;
       }) => {
         const rows = db.messages
           .filter((m) => m.sessionId === where.sessionId && m.role === where.role && m.meta.includes(where.meta.contains))
           .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
-        return (orderBy.createdAt === "desc" ? rows.reverse() : rows).slice(0, take);
+        return (orderBy?.createdAt === "desc" ? rows.reverse() : rows).slice(0, take);
       }),
       findUnique: vi.fn(async ({ where }: { where: { id: string } }) => db.messages.find((m) => m.id === where.id) ?? null),
       update: vi.fn(async ({ where, data }: { where: { id: string }; data: Partial<Row> }) => {
@@ -118,6 +118,67 @@ describe("orchestration handoff", () => {
     const second = await launchRun({ sessionId: id, kind: "turn", origin: "pwa", work: (ctx) => executeTurn(ctx, "weiter") });
     await second.finished;
     expect(prompts[1]).toBe("weiter");
+  });
+
+  it("hands over the newest 3 summaries and retires the older ones with them", async () => {
+    const id = `sr-${++n}`;
+    seedSession(id);
+    for (let i = 1; i <= 4; i++) {
+      db.messages.push({
+        id: `syn-o${i}`, sessionId: id, role: "synthesis", content: `Summary ${i}`,
+        meta: JSON.stringify({ handoff: "pending", task: `Task ${i}` }), createdAt: new Date(Date.now() - 10_000 + i * 1000),
+      });
+    }
+    const prompts: string[] = [];
+    runTurnMock.mockImplementation(async (_row, prompt: string) => {
+      prompts.push(prompt);
+      return { externalId: "conv-4", costUsd: 0, isError: false };
+    });
+
+    const first = await launchRun({ sessionId: id, kind: "turn", origin: "pwa", work: (ctx) => executeTurn(ctx, "weiter") });
+    await first.finished;
+    expect(prompts[0]).not.toContain("Summary 1");
+    for (const i of [2, 3, 4]) expect(prompts[0]).toContain(`Summary ${i}`);
+    expect(prompts[0].indexOf("Summary 2")).toBeLessThan(prompts[0].indexOf("Summary 4")); // oldest first
+    for (let i = 1; i <= 4; i++) {
+      expect(JSON.parse(db.messages.find((m) => m.id === `syn-o${i}`)!.meta).handoff).toBe("done");
+    }
+
+    // The superseded summary never comes back as "since your last reply".
+    const second = await launchRun({ sessionId: id, kind: "turn", origin: "pwa", work: (ctx) => executeTurn(ctx, "und dann") });
+    await second.finished;
+    expect(prompts[1]).toBe("und dann");
+  });
+
+  it("keeps summaries pending after a turn in a throwaway conversation (fresh-context loop)", async () => {
+    const id = `sr-${++n}`;
+    seedSession(id);
+    db.sessions.get(id)!.externalId = "own-conv";
+    db.messages.push({
+      id: "syn-f", sessionId: id, role: "synthesis", content: "API umgebaut.",
+      meta: JSON.stringify({ handoff: "pending", task: "API" }), createdAt: new Date(Date.now() - 1000),
+    });
+    const prompts: string[] = [];
+    runTurnMock.mockImplementation(async (_row, prompt: string) => {
+      prompts.push(prompt);
+      return { externalId: "throwaway", costUsd: 0, isError: false };
+    });
+
+    const loop = await launchRun({
+      sessionId: id, kind: "loop", origin: "pwa",
+      work: (ctx) => executeTurn(ctx, "iteration", { rowOverrides: { externalId: null, ephemeral: true } }),
+    });
+    await loop.finished;
+    // The fresh iteration still learns about it …
+    expect(prompts[0]).toContain("API umgebaut.");
+    // … but the session's own conversation has not seen it yet.
+    expect(JSON.parse(db.messages.find((m) => m.id === "syn-f")!.meta).handoff).toBe("pending");
+
+    const turn = await launchRun({ sessionId: id, kind: "turn", origin: "pwa", work: (ctx) => executeTurn(ctx, "mach weiter") });
+    await turn.finished;
+    expect(runTurnMock.mock.calls[1][0].externalId).toBe("own-conv");
+    expect(prompts[1]).toContain("API umgebaut.");
+    expect(JSON.parse(db.messages.find((m) => m.id === "syn-f")!.meta).handoff).toBe("done");
   });
 
   it("keeps the summary pending when the turn failed", async () => {

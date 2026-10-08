@@ -70,15 +70,23 @@ export interface ChatParams {
   temperature?: number;
 }
 
+/** Earlier messages of a conversation, oldest first. */
+export interface ChatHistoryMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
 /**
  * Streams one completion. `onDelta` receives the text so far. Resolves with
  * the text and a stream error, if one ended it; rejects on HTTP errors with
- * the server's message (an AbortError passes through unchanged).
+ * the server's message (an AbortError passes through unchanged). `history`
+ * goes before `prompt` for follow-up questions.
  */
 export async function streamChat(opts: {
   provider: string;
   model: string;
   prompt: string;
+  history?: ChatHistoryMessage[];
   apiKey: string;
   baseUrl: string;
   params?: ChatParams;
@@ -89,7 +97,7 @@ export async function streamChat(opts: {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      messages: [{ role: "user", content: opts.prompt }],
+      messages: [...(opts.history ?? []), { role: "user", content: opts.prompt }],
       provider: opts.provider,
       model: opts.model,
       apiKey: opts.apiKey,

@@ -150,7 +150,9 @@ async function runLoop(ctx: RunContext, cfg: LoopConfig, resumable: boolean): Pr
         // Retrieval only helps when the prompt carries the full task.
         useKnowledge: cfg.useKnowledge && !continued,
         interactive: true,
-        rowOverrides: cfg.freshContext ? { externalId: null } : undefined,
+        // A fresh iteration is a one-shot conversation: not stored as a Claude
+        // Code conversation, so it is never offered as one to continue.
+        rowOverrides: cfg.freshContext ? { externalId: null, ephemeral: true } : undefined,
       });
     } catch (err) {
       if (ctx.signal.aborted) return end("stopped", i);

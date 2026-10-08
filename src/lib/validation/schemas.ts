@@ -246,7 +246,7 @@ export const orchestrateSchema = z.object({
   // Which worker plans (and synthesizes). "" / "auto" = the orchestra's
   // conductor (or an available model, without forcing a Claude account); a
   // worker id (e.g. "gemini", "ollama:...") pins it explicitly.
-  plannerWorkerId: z.string().max(220).optional(),
+  plannerWorkerId: z.string().max(ORCHESTRA_LIMITS.workerId).optional(),
   // Run with this (possibly unsaved) orchestra instead of the saved one.
   orchestra: orchestraConfigSchema.optional(),
 });
@@ -255,7 +255,7 @@ const plannedSubtaskSchema = z.object({
   id: z.string().min(1).max(50),
   title: z.string().max(300).optional().default(""),
   description: z.string().max(20000).optional().default(""),
-  workerId: z.string().min(1).max(220),
+  workerId: z.string().min(1).max(ORCHESTRA_LIMITS.workerId),
   dependsOn: z.array(z.string().max(50)).max(20).optional().default([]),
   editsFiles: z.boolean().optional().default(false),
   // The orchestra role that runs the subtask (role framing + review loop).
@@ -266,7 +266,7 @@ export const orchestrateRunSchema = z.object({
   prompt: z.string().min(1).max(100000),
   subtasks: z.array(plannedSubtaskSchema).min(1).max(20),
   clientProviders: z.array(clientProviderSchema).max(20).optional().default([]),
-  plannerWorkerId: z.string().max(220).optional(),
+  plannerWorkerId: z.string().max(ORCHESTRA_LIMITS.workerId).optional(),
   orchestra: orchestraConfigSchema.optional(),
 });
 

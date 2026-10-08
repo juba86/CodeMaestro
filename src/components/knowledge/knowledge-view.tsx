@@ -426,7 +426,6 @@ export function KnowledgeView() {
                 onValueChange={(v) => setMode(v as "text" | "file")}
                 stretch
                 aria-label="Art der Eingabe"
-                className="h-11 md:h-8"
               >
                 <SegmentedItem value="text">Text einfügen</SegmentedItem>
                 <SegmentedItem value="file">Textdatei laden</SegmentedItem>

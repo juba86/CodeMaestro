@@ -10,7 +10,13 @@ function CopyButton({ text, label }: { text: string; label: string }) {
   const { copied, copy } = useCopy();
   return (
     <>
-      <IconButton aria-label={copied ? "Kopiert" : label} size="icon-sm" onClick={() => void copy(text)}>
+      <IconButton
+        aria-label={copied ? "Kopiert" : label}
+        size="icon-sm"
+        // 44px touch target on phones / coarse pointers; 28px on desktop.
+        className="size-11 md:size-7 pointer-coarse:size-11"
+        onClick={() => void copy(text)}
+      >
         {copied ? <Check className="text-success" /> : <Copy />}
       </IconButton>
       <span className="sr-only" aria-live="polite">
@@ -48,7 +54,7 @@ export function CodeBlock({
       {...props}
     >
       {title ? (
-        <div className="flex h-9 items-center gap-2 border-b border-border pl-3 pr-1 md:h-8">
+        <div className="flex min-h-11 items-center gap-2 border-b border-border pl-3 pr-1 md:min-h-8 pointer-coarse:min-h-11">
           <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground">{title}</span>
           {noCopy ? null : <CopyButton text={code} label={copyLabel} />}
         </div>
@@ -58,7 +64,7 @@ export function CodeBlock({
         className={cn(
           "max-h-[inherit] overflow-auto p-3 font-mono text-xs leading-5 text-foreground focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring",
           wrap ? "whitespace-pre-wrap break-words" : "whitespace-pre",
-          !title && !noCopy && "pr-11",
+          !title && !noCopy && "pr-13 md:pr-11 pointer-coarse:pr-13",
         )}
       >
         <code>{code}</code>

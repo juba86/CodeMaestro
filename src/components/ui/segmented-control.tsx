@@ -42,7 +42,10 @@ export function SegmentedControl({
         }}
         className={cn(
           "inline-flex items-center gap-0.5 rounded-md border border-border bg-surface-2 p-0.5",
-          size === "md" ? "h-10 md:h-8" : "h-9 md:h-7",
+          // Items fill the root minus 1px border + 2px padding: 50px → 44px touch
+          // targets on phones and coarse pointers; desktop keeps 32/28px.
+          "h-12.5 pointer-coarse:h-12.5",
+          size === "md" ? "md:h-8" : "md:h-7",
           stretch && "flex w-full",
           className,
         )}

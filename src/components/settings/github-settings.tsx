@@ -277,7 +277,7 @@ function DeviceFlowRunning({ device, onUseToken }: { device: DeviceFlowApi; onUs
               {copied ? <Check className="text-success" /> : <Copy />}
             </IconButton>
           </div>
-          <Countdown expiresAt={flow.expiresAt} label="gültig noch" totalMs={15 * 60_000} className="data-[phase=normal]:text-muted-foreground" />
+          <Countdown expiresAt={flow.expiresAt} clock="local" label="gültig noch" totalMs={15 * 60_000} className="data-[phase=normal]:text-muted-foreground" />
         </div>
       </div>
       <p className="min-h-4 pt-2 text-xs text-muted-foreground" aria-live="polite">

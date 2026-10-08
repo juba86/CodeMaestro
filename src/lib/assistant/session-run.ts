@@ -176,10 +176,16 @@ export interface Handoff {
   summary: string;
 }
 
+const pendingHandoffWhere = (sessionId: string) => ({
+  sessionId,
+  role: "synthesis",
+  meta: { contains: `"handoff":"${HANDOFF_PENDING}"` },
+});
+
 /** Orchestration summaries the session's agent conversation has not seen yet (oldest first, at most 3). */
 export async function pendingHandoffs(sessionId: string): Promise<Handoff[]> {
   const rows = await prisma.assistantMessage.findMany({
-    where: { sessionId, role: "synthesis", meta: { contains: `"handoff":"${HANDOFF_PENDING}"` } },
+    where: pendingHandoffWhere(sessionId),
     orderBy: { createdAt: "desc" },
     take: 3,
     select: { id: true, content: true, meta: true },
@@ -227,14 +233,25 @@ export async function pendingHandoffContext(sessionId: string): Promise<string> 
   return handoffBlock(await pendingHandoffs(sessionId).catch(() => [] as Handoff[]));
 }
 
-async function markHandoffsDone(handoffs: Handoff[]): Promise<void> {
-  for (const h of handoffs) {
-    const row = await prisma.assistantMessage.findUnique({ where: { id: h.id }, select: { meta: true } }).catch(() => null);
+/**
+ * Ids of every pending handoff of the session — also the older ones that
+ * pendingHandoffs leaves out of the prompt. They are superseded by the newer
+ * summaries, so a turn that hands over the newest marks all of them done;
+ * otherwise they would come back later as "since your last reply".
+ */
+async function pendingHandoffIds(sessionId: string): Promise<string[]> {
+  const rows = await prisma.assistantMessage.findMany({ where: pendingHandoffWhere(sessionId), select: { id: true } });
+  return rows.map((r) => r.id);
+}
+
+async function markHandoffsDone(ids: string[]): Promise<void> {
+  for (const id of ids) {
+    const row = await prisma.assistantMessage.findUnique({ where: { id }, select: { meta: true } }).catch(() => null);
     if (!row) continue;
     let meta: Record<string, unknown> = {};
     try { meta = JSON.parse(row.meta || "{}"); } catch { /* replaced below */ }
     await prisma.assistantMessage
-      .update({ where: { id: h.id }, data: { meta: JSON.stringify({ ...meta, handoff: HANDOFF_DONE }) } })
+      .update({ where: { id }, data: { meta: JSON.stringify({ ...meta, handoff: HANDOFF_DONE }) } })
       .catch((err) => console.error("[executeTurn] handoff bookkeeping failed", err));
   }
 }
@@ -272,8 +289,14 @@ export async function executeTurn(ctx: RunContext, prompt: string, opts: TurnOpt
     } catch { /* RAG is best effort */ }
   }
 
+  // Whether this turn continues the session's own conversation. A turn that
+  // overrides externalId (a fresh-context loop iteration) runs in a throwaway
+  // conversation that is never stored on the session.
+  const keepContext = opts.rowOverrides?.externalId === undefined;
+
   // Orchestrations since the last turn ran in forks of this conversation.
   const handoffs = await pendingHandoffs(ctx.sessionId).catch(() => [] as Handoff[]);
+  const handoffIds = handoffs.length ? await pendingHandoffIds(ctx.sessionId).catch(() => handoffs.map((h) => h.id)) : [];
   if (handoffs.length) {
     effectivePrompt = withHandoffs(effectivePrompt, handoffs);
     emit({ type: "notice", content: handoffs.length === 1 ? "Zusammenfassung der Orchestrierung an den Agenten übergeben." : `${handoffs.length} Orchestrierungs-Zusammenfassungen an den Agenten übergeben.` });
@@ -282,10 +305,12 @@ export async function executeTurn(ctx: RunContext, prompt: string, opts: TurnOpt
   const row = toSessionRow(session, { interactive: !!opts.interactive, ...opts.rowOverrides });
   const result = await runTurn(row, effectivePrompt, opts.apiKey, emit, { signal: ctx.signal });
   ctx.writer.flushText();
-  // A turn that failed may not have reached the agent: hand over again next time.
-  if (handoffs.length && !result.isError) await markHandoffsDone(handoffs);
+  // A turn that failed may not have reached the agent: hand over again next
+  // time. A throwaway conversation (like an orchestration fork) leaves them
+  // pending too — the session's own conversation still has to be told. Runs
+  // are exclusive per session, so no handoff can appear between read and mark.
+  if (handoffIds.length && !result.isError && keepContext) await markHandoffsDone(handoffIds);
 
-  const keepContext = opts.rowOverrides?.externalId === undefined;
   try {
     await prisma.assistantSession.update({
       where: { id: ctx.sessionId },

@@ -33,9 +33,6 @@ function buildPrompt(params: SendMessageParams): string {
 export class GeminiCliProvider implements AIProvider {
   name = "gemini" as const;
 
-  // No key required; constructor kept for factory compatibility.
-  constructor(_apiKey?: string) {}
-
   getModels(): ModelInfo[] {
     return geminiCliModels();
   }
@@ -84,7 +81,8 @@ export class GeminiCliProvider implements AIProvider {
     yield { type: "done", content: "" };
   }
 
-  async validateCredentials(_apiKey: string): Promise<boolean> {
+  // No API key involved (CLI login): valid when the CLI answers.
+  async validateCredentials(): Promise<boolean> {
     try {
       const text = await this.run("Reply with: OK", undefined, 60000);
       return text.length > 0;

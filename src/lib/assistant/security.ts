@@ -42,7 +42,8 @@ export async function realAllowedRoots(): Promise<string[]> {
   return [...new Set(roots)];
 }
 
-function isInside(child: string, parent: string): boolean {
+/** Whether `child` is `parent` or lies below it (both absolute, resolved). */
+export function isInside(child: string, parent: string): boolean {
   const rel = path.relative(parent, child);
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
 }

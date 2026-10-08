@@ -39,6 +39,7 @@ import { Field, FieldLabel } from "@/components/ui/field";
 import { SimpleSelect } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { SendToAiButton } from "@/components/send-to-ai/send-to-ai";
 import { VersionDiff } from "./version-diff";
 import { TestCasePanel } from "./test-case-panel";
 import { ASSISTANT_HANDOFF_URL, loadIntoBuilder, structuredOf, writeAssistantHandoff } from "./load-into-builder";
@@ -328,6 +329,12 @@ export function PromptDetail({ promptId, mobile, onDeleted, onDuplicated }: Prom
         <Button variant="primary" onClick={handleRunInAssistant}>
           <SquareTerminal aria-hidden /> Im Assistent ausführen
         </Button>
+        {/* Keyed by prompt: another prompt starts a fresh conversation. */}
+        <SendToAiButton
+          key={prompt.id}
+          prompt={prompt.content}
+          playgroundHref={`/playground?prompt=${encodeURIComponent(prompt.id)}`}
+        />
         <Button variant="outline" onClick={() => router.push(`/playground?prompt=${encodeURIComponent(prompt.id)}`)}>
           <FlaskConical aria-hidden /> Im Playground testen
         </Button>

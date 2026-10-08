@@ -23,8 +23,10 @@ export function TabsList({
         data-variant={variant}
         className={cn(
           variant === "underline"
-            ? "flex h-11 shrink-0 items-stretch gap-4 overflow-x-auto border-b border-border scrollbar-none md:h-10"
-            : "inline-flex h-10 w-fit max-w-full items-center gap-0.5 self-start overflow-x-auto rounded-md border border-border bg-surface-2 p-0.5 scrollbar-none md:h-8",
+            ? // 45px − 1px border-b → 44px triggers on phones / coarse pointers.
+              "flex h-11.25 shrink-0 items-stretch gap-4 overflow-x-auto border-b border-border scrollbar-none md:h-10 pointer-coarse:h-11.25"
+            : // 50px − 1px border − 2px padding → 44px triggers on phones / coarse pointers.
+              "inline-flex h-12.5 w-fit max-w-full items-center gap-0.5 self-start overflow-x-auto rounded-md border border-border bg-surface-2 p-0.5 scrollbar-none md:h-8 pointer-coarse:h-12.5",
           className,
         )}
         {...props}

@@ -107,12 +107,19 @@ function buildSettingsFile(session: AssistantSessionRow, opts: { github: boolean
   const settings: Record<string, unknown> = {};
   if (preToolUse.length) settings.hooks = { PreToolUse: preToolUse };
   if (session.sandbox) {
-    // Only widens the network allow-list; filesystem limits stay and git/gh are
-    // not excluded from the sandbox (an excluded `gh *` could run arbitrary
-    // gh extensions unsandboxed).
-    settings.sandbox = opts.github
-      ? { enabled: true, network: { allowedDomains: GITHUB_SANDBOX_DOMAINS } }
-      : { enabled: true };
+    // allowUnsandboxedCommands: false — Claude Code ignores Bash's
+    // `dangerouslyDisableSandbox` instead of turning it into a permission
+    // prompt (or, with a plain `Bash` allow rule, running it outright). An
+    // approval card for such a call would show "Sandbox an" for a command
+    // that runs with full filesystem and network access.
+    // `github` only widens the network allow-list; filesystem limits stay and
+    // git/gh are not excluded from the sandbox (an excluded `gh *` could run
+    // arbitrary gh extensions unsandboxed).
+    settings.sandbox = {
+      enabled: true,
+      allowUnsandboxedCommands: false,
+      ...(opts.github ? { network: { allowedDomains: GITHUB_SANDBOX_DOMAINS } } : {}),
+    };
   }
 
   const file = path.join(tmpdir(), `pb-settings-${session.id}-${Date.now()}.json`);
@@ -475,15 +482,39 @@ const RESUME_MISSING = /No conversation found with session ID/i;
 /** One line per denied tool call, e.g. "Bash: npm install". */
 export function describeDenials(denials: ClaudeStreamLine["permission_denials"]): string[] {
   const out: string[] = [];
+  // Deduplicated on the full line: the stored lines are shortened, and two
+  // long commands that only share their start are still two calls.
+  const seen = new Set<string>();
   for (const d of denials ?? []) {
     const tool = d?.tool_name || "Werkzeug";
     const input = d?.tool_input ?? {};
     const target = [input.command, input.file_path, input.notebook_path, input.url, input.pattern, input.query]
       .find((v) => typeof v === "string" && v.trim());
     const line = target ? `${tool}: ${String(target).replace(/\s+/g, " ").trim()}` : tool;
-    if (!out.includes(line)) out.push(line.length > 200 ? `${line.slice(0, 199)}…` : line);
+    if (seen.has(line)) continue;
+    seen.add(line);
+    out.push(line.length > 200 ? `${line.slice(0, 199)}…` : line);
   }
   return out;
+}
+
+/**
+ * The notice for tool calls an unattended run denied, or null. A plan-mode
+ * run is read-only by design (e.g. an orchestrator subtask that does not
+ * change files): allowing tools in the session would not help there, and its
+ * own ExitPlanMode request is expected rather than blocked work.
+ */
+export function denialNotice(
+  denials: ClaudeStreamLine["permission_denials"],
+  permissionMode: string | undefined
+): string | null {
+  const plan = permissionMode === "plan";
+  const lines = describeDenials(plan ? (denials ?? []).filter((d) => d?.tool_name !== "ExitPlanMode") : denials);
+  if (!lines.length) return null;
+  const list = `${lines.slice(0, 8).join(" · ")}${lines.length > 8 ? " · …" : ""}`;
+  return plan
+    ? `Im Plan-Modus blockiert (${lines.length}): ${list}. Diese Ausführung ist schreibgeschützt – Befehle und Änderungen gehören in eine Teilaufgabe, die Dateien ändert, oder in eine normale Nachricht.`
+    : `Ohne Freigabe blockiert (${lines.length}): ${list}. Erlaube die Werkzeuge in der Session oder starte die Aufgabe als normale Nachricht, dann kommen Freigabe-Karten.`;
 }
 
 type TurnAttempt = TurnResult & { resumeMissing?: boolean };
@@ -678,6 +709,26 @@ async function runTurnOnce(
   const streamedText = new Set<string>();
   const streamedThinking = new Set<string>();
 
+  // Two assistant messages with text and nothing in between (no tool call,
+  // no thinking) would run together ("…erledigt.Jetzt …") in the transcript
+  // and in orchestrator output: their boundary becomes a paragraph break.
+  let lastTextMessageId: string | undefined;
+  let textOpen = false; // the last content emitted was text
+  let textTail = ""; // its last two characters
+  const textOf = (messageId: string | undefined, text: string): string => {
+    let out = text;
+    if (textOpen && messageId && lastTextMessageId && messageId !== lastTextMessageId) {
+      const trailing = textTail.endsWith("\n\n") ? 2 : textTail.endsWith("\n") ? 1 : 0;
+      const leading = text.startsWith("\n\n") ? 2 : text.startsWith("\n") ? 1 : 0;
+      out = "\n".repeat(Math.max(0, 2 - trailing - leading)) + text;
+    }
+    lastTextMessageId = messageId;
+    textOpen = true;
+    textTail = (textTail + out).slice(-2);
+    return out;
+  };
+  const closeText = () => { textOpen = false; };
+
   const handleClaudeLine = (line: string) => {
     const trimmed = line.trim();
     if (!trimmed) return;
@@ -700,9 +751,10 @@ async function runTurnOnce(
       } else if (ev.type === "content_block_delta" && ev.delta) {
         if (ev.delta.type === "text_delta" && ev.delta.text) {
           if (currentMessageId) streamedText.add(currentMessageId);
-          emitDelta("text", ev.delta.text);
+          emitDelta("text", textOf(currentMessageId, ev.delta.text));
         } else if (ev.delta.type === "thinking_delta" && ev.delta.thinking) {
           if (currentMessageId) streamedThinking.add(currentMessageId);
+          closeText();
           emitDelta("thinking", ev.delta.thinking);
         }
       }
@@ -712,10 +764,14 @@ async function runTurnOnce(
       const id = obj.message.id;
       for (const block of obj.message.content) {
         if (block.type === "text" && block.text) {
-          if (!(id && streamedText.has(id))) emitNow({ type: "text", content: block.text });
+          if (!(id && streamedText.has(id))) emitNow({ type: "text", content: textOf(id, block.text) });
         } else if (block.type === "thinking" && block.thinking) {
-          if (!(id && streamedThinking.has(id))) emitNow({ type: "thinking", content: block.thinking });
+          if (!(id && streamedThinking.has(id))) {
+            closeText();
+            emitNow({ type: "thinking", content: block.thinking });
+          }
         } else if (block.type === "tool_use") {
+          closeText();
           emitNow({ type: "tool_use", name: block.name, input: block.input, toolUseId: block.id });
         }
       }
@@ -724,6 +780,7 @@ async function runTurnOnce(
     if (obj.type === "user" && obj.message?.content) {
       for (const block of obj.message.content) {
         if (block.type === "tool_result") {
+          closeText();
           const c = typeof block.content === "string"
             ? block.content
             : JSON.stringify(block.content);
@@ -738,13 +795,8 @@ async function runTurnOnce(
       isError = !!obj.is_error;
       // Unattended runs deny what would need a prompt without asking; say so,
       // otherwise the agent's "waiting for approval" has no visible cause.
-      const denied = session.interactive ? [] : describeDenials(obj.permission_denials);
-      if (denied.length) {
-        emitNow({
-          type: "notice",
-          content: `Ohne Freigabe blockiert (${denied.length}): ${denied.slice(0, 8).join(" · ")}${denied.length > 8 ? " · …" : ""}. Erlaube die Werkzeuge in der Session oder starte die Aufgabe als normale Nachricht, dann kommen Freigabe-Karten.`,
-        });
-      }
+      const notice = session.interactive ? null : denialNotice(obj.permission_denials, session.permissionMode);
+      if (notice) emitNow({ type: "notice", content: notice });
       emitNow({ type: "result", content: obj.result, costUsd, isError });
     }
   };

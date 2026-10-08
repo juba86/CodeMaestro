@@ -98,13 +98,7 @@ export function Button({
   };
 
   const kbdNode = kbd ? (
-    <Kbd
-      aria-hidden
-      className={cn(
-        "hidden md:inline-flex",
-        variant === "primary" && "border-primary-foreground/25 bg-primary-foreground/10 text-primary-foreground",
-      )}
-    >
+    <Kbd aria-hidden variant={variant === "primary" ? "on-primary" : "default"} className="hidden md:inline-flex">
       {kbd}
     </Kbd>
   ) : null;

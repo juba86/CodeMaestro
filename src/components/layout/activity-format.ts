@@ -35,12 +35,18 @@ export function describePending(p: Pick<ActivityPending, "type" | "kind" | "tool
       : { kind: "question", label: "Frage", target: null, detail: null };
   }
   const tool = p.tool ?? "";
-  if (tool === "Bash" || tool === "bash" || p.command !== undefined) {
+  // The tool decides the kind; `command` alone only for events without one
+  // (other tools carry their target in `command` too, e.g. a URL or MCP input).
+  if (tool === "Bash" || tool === "bash" || (!tool && p.command !== undefined)) {
     const command = (p.command ?? "").trim();
     if (command && isPush(command)) return { kind: "push", label: "Nach GitHub pushen", target: null, detail: command };
     return { kind: "command", label: "Befehl ausführen", target: null, detail: command || null };
   }
   const file = p.filePath ? basename(p.filePath) : null;
+  if (tool && tool !== "Write" && tool !== "write" && !FILE_EDIT_TOOLS.has(tool)) {
+    // WebFetch, a read outside the project, an MCP tool …
+    return { kind: "tool", label: toolLabel(tool), target: file, detail: p.filePath ?? p.command?.trim() ?? null };
+  }
   if (tool === "Write" || tool === "write" || p.isWrite) {
     if (p.overwrites === false) return { kind: "create", label: "Neue Datei anlegen", target: file, detail: p.filePath ?? null };
     return { kind: "write", label: "Datei schreiben", target: file, detail: p.filePath ?? null };

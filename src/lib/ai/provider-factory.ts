@@ -26,7 +26,7 @@ export function createProvider(
     case "gemini":
       return new GeminiProvider(apiKey);
     case "ollama":
-      return new OllamaProvider(apiKey);
+      return new OllamaProvider(); // no API key needed
     case "openai":
     case "openai-local": {
       // Only configurableBaseUrl providers may be pointed elsewhere (see resolveBaseUrl).

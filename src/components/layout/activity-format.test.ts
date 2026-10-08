@@ -11,6 +11,15 @@ import {
 } from "./activity-format";
 
 describe("describePending", () => {
+  it("names generic tools by the tool, not as a command or file edit", () => {
+    const fetch = describePending({ type: "approval_request", tool: "WebFetch", command: "https://example.com" });
+    expect(fetch).toMatchObject({ kind: "tool", detail: "https://example.com" });
+    expect(fetch.label).not.toBe("Befehl ausführen");
+    const mcp = describePending({ type: "approval_request", tool: "mcp__db__query", filePath: "/p/data.sql", command: "{\"sql\":\"select 1\"}" });
+    expect(mcp).toMatchObject({ kind: "tool", target: "data.sql" });
+    expect(describePending({ type: "approval_request", command: "ls" })).toMatchObject({ kind: "command" });
+  });
+
   it("labels file gates with the file name", () => {
     const write = describePending({ type: "approval_request", tool: "Write", filePath: "/p/src/helpers.ts", isWrite: true, overwrites: true });
     expect(pendingTitle(write)).toBe("Datei schreiben: helpers.ts");

@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Callout } from "@/components/ui/callout";
 import { Card } from "@/components/ui/card";
-import { CommandBlock } from "@/components/ui/code-block";
+import { CodeBlock, CommandBlock } from "@/components/ui/code-block";
 import { Countdown } from "@/components/ui/countdown";
 import { DiffView } from "@/components/ui/diff-view";
 import { Sheet, SheetBody, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
@@ -219,8 +219,12 @@ export function ApprovalCard({ card }: { card: PendingCard }) {
             ) : null}
             <FullDiffSheet card={card} open={fullOpen} onOpenChange={setFullOpen} />
           </>
+        ) : card.command ? (
+          // Other tools: the target (URL, query, …) or, for MCP tools, every
+          // input field — together with the path, so nothing approved is hidden.
+          <CodeBlock code={card.command} title={path || undefined} wrap className="max-h-60" />
         ) : (
-          <p className="break-all font-mono text-xs text-muted-foreground">{path || card.command || card.tool}</p>
+          <p className="break-all font-mono text-xs text-muted-foreground">{path || card.tool}</p>
         )}
 
         {hintOpen ? (

@@ -166,16 +166,38 @@ async function readExisting(filePath?: string): Promise<string | null> {
   }
 }
 
-/** File path or a one-line summary of a generic tool call's input. */
-function describeOther(input: Record<string, unknown>): Pick<ApprovalEvent, "filePath" | "command"> {
-  const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : "");
-  const file = str(input.file_path) || str(input.notebook_path) || str(input.path);
-  if (file) return { filePath: file };
-  const target = str(input.url) || str(input.query) || str(input.pattern) || str(input.command) || str(input.prompt);
-  if (target) return { command: target.slice(0, 2000) };
+// Claude Code's own tools whose input is fully described by one target (a
+// path, URL, query, pattern or prompt).
+const SINGLE_TARGET_TOOLS = new Set(["Read", "Grep", "Glob", "LS", "NotebookRead", "WebFetch", "WebSearch", "Task", "Agent"]);
+const PATH_KEYS = ["file_path", "notebook_path", "path"] as const;
+
+function clippedJson(value: Record<string, unknown>): string {
   let json = "";
-  try { json = JSON.stringify(input); } catch { /* unserializable */ }
-  return json && json !== "{}" ? { command: json.slice(0, 2000) } : {};
+  try { json = JSON.stringify(value) ?? ""; } catch { /* unserializable */ }
+  return json && json !== "{}" ? json.slice(0, 2000) : "";
+}
+
+/**
+ * What a generic tool call targets. Claude Code's read/search/web tools: the
+ * file path or a one-line target. Any other tool (MCP servers, …): the path
+ * plus every other input field as JSON — a path alone would hide e.g. which
+ * repository, branch or content a GitHub MCP write goes to.
+ */
+function describeOther(tool: string, input: Record<string, unknown>): Pick<ApprovalEvent, "filePath" | "command"> {
+  const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : "");
+  const pathKey = PATH_KEYS.find((k) => str(input[k]));
+  const file = pathKey ? str(input[pathKey]) : "";
+  if (SINGLE_TARGET_TOOLS.has(tool)) {
+    if (file) return { filePath: file };
+    const target = str(input.url) || str(input.query) || str(input.pattern) || str(input.command) || str(input.prompt);
+    if (target) return { command: target.slice(0, 2000) };
+    const json = clippedJson(input);
+    return json ? { command: json } : {};
+  }
+  const rest = { ...input };
+  if (pathKey) delete rest[pathKey];
+  const json = clippedJson(rest);
+  return { ...(file ? { filePath: file } : {}), ...(json ? { command: json } : {}) };
 }
 
 async function buildEvent(approvalId: string, tool: string, input: ToolInput): Promise<ApprovalEvent> {
@@ -208,7 +230,7 @@ async function buildEvent(approvalId: string, tool: string, input: ToolInput): P
   if (tool !== "Edit") {
     // Any other tool that needs permission (WebFetch, a read outside the
     // project, an MCP tool, …): name its target instead of an empty diff.
-    return { type: "approval_request", approvalId, tool, ...describeOther(input as Record<string, unknown>) };
+    return { type: "approval_request", approvalId, tool, ...describeOther(tool, input as Record<string, unknown>) };
   }
   // Edit
   const diff = safeDiff(input.old_string || "", input.new_string || "");

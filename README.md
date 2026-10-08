@@ -67,6 +67,7 @@ CodeMaestro turns AI coding from a single-terminal habit into an operable system
 - **Model-aware**: recommendations, linter and the AI generator/refiner adapt to the target model (Claude 5 family, prefill/sampling support, reasoning-extraction risk).
 - 23 built-in templates, including 8 for agentic coding with Claude Code (TDD loop, repro-first bug fix, refactor with verification, autonomous loop with a progress file, CLAUDE.md generator, …).
 - Hand a prompt to the Code Assistant — as a single task or **as a loop**.
+- **Send it straight to your AI** („An KI senden", in the builder and the library): per API with any configured provider and follow-up questions, or in your own AI app with your own subscription — ChatGPT, Claude, Claude Code on the web, Gemini, Le Chat, Perplexity open with the prompt prefilled where the app allows it (always also copied to the clipboard; you send it yourself).
 
 ### ✅ Prompt Quality Linter
 - Deterministic score (A–F, 0–100) on every keystroke — no API calls.
@@ -148,9 +149,9 @@ New providers are catalog-driven — adding one is a few lines in `src/lib/ai/ca
 |---|---|
 | ![Assistant](docs/screenshots/assistant.png) | ![Knowledge](docs/screenshots/knowledge.png) |
 
-| Settings & Providers | Home |
+| Orchestra | Settings & Providers |
 |---|---|
-| ![Settings](docs/screenshots/settings.png) | ![Home](docs/screenshots/home.png) |
+| ![Orchestra](docs/screenshots/orchestra.png) | ![Settings](docs/screenshots/settings.png) |
 
 <sub>Screenshots are from a running self-hosted instance (dark theme).</sub>
 

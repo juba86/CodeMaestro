@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/db/client", () => ({ prisma: {} }));
 
-import { telegramSessionSafety } from "./telegram";
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, symlinkSync } from "fs";
+import { tmpdir } from "os";
+import path from "path";
+import { UPLOAD_SUBDIR, ensureUploadDir, telegramSessionSafety } from "./telegram";
 import { formatDuration, pause } from "./loop";
 import { supportsApprovalGate, supportsSandbox } from "./runner";
 
@@ -35,6 +38,25 @@ describe("telegramSessionSafety", () => {
         expect(r.sandbox && !supportsSandbox(r.provider), `${provider}/${approvalMode}`).toBe(false);
       }
     }
+  });
+});
+
+describe("ensureUploadDir", () => {
+  it("stores uploads inside the session's working directory, git-ignored", async () => {
+    const cwd = realpathSync(mkdtempSync(path.join(tmpdir(), "cm-tg-up-")));
+    const dir = await ensureUploadDir(cwd);
+    expect(dir).toBe(path.join(cwd, UPLOAD_SUBDIR));
+    expect(readFileSync(path.join(dir, ".gitignore"), "utf8")).toBe("*\n");
+    // Idempotent.
+    await expect(ensureUploadDir(cwd)).resolves.toBe(dir);
+  });
+
+  it("refuses a folder that leads out of the project through a symlink", async () => {
+    const cwd = mkdtempSync(path.join(tmpdir(), "cm-tg-up-"));
+    const outside = mkdtempSync(path.join(tmpdir(), "cm-tg-out-"));
+    mkdirSync(path.join(outside, "uploads"));
+    symlinkSync(outside, path.join(cwd, ".codemaestro"));
+    await expect(ensureUploadDir(cwd)).rejects.toThrow(/Projektordner/);
   });
 });
 

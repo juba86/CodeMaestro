@@ -129,7 +129,9 @@ function Shell({ pathname, children }: { pathname: string; children: React.React
               }
             />
           )}
-          {isPromptRoute(pathname) ? <PromptsHubNav pathname={pathname} /> : null}
+          {/* The hub sub-nav belongs to the AppBar: a screen that brings its own
+              bar (e.g. the phone prompt detail with its back link) hides both. */}
+          {isPromptRoute(pathname) && !appBarHidden ? <PromptsHubNav pathname={pathname} /> : null}
           <main
             id="main"
             tabIndex={-1}

@@ -43,8 +43,6 @@ function buildPrompt(params: SendMessageParams): string {
 export class ClaudeCliProvider implements AIProvider {
   name = "claude" as const;
 
-  constructor(_apiKey?: string) {}
-
   getModels(): ModelInfo[] {
     return claudeCliModels();
   }
@@ -92,7 +90,8 @@ export class ClaudeCliProvider implements AIProvider {
     yield { type: "done", content: "" };
   }
 
-  async validateCredentials(_apiKey: string): Promise<boolean> {
+  // No API key involved (CLI login): valid when the CLI answers.
+  async validateCredentials(): Promise<boolean> {
     try {
       const text = await this.run("Reply with: OK", undefined, 60000);
       return text.length > 0;

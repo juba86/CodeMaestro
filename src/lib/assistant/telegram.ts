@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/db/client";
-import { resolveWorkdir } from "./security";
+import { isInside, resolveWorkdir } from "./security";
 import { resolveApproval, listPending, type ApprovalEvent, type QuestionItem } from "./approvals";
 import {
   SessionBusyError,
@@ -10,7 +10,7 @@ import {
   type RunEndStatus,
   type RunHandle,
 } from "./run-hub";
-import { executeTurn, launchRun, persistUserMessage, stopRunNow } from "./session-run";
+import { executeTurn, launchRun, stopRunNow } from "./session-run";
 import { formatDuration, pause, startLoopRun } from "./loop";
 import { supportsApprovalGate } from "./runner";
 import { getTelegramConfig, type TelegramConfig } from "./telegram-config";
@@ -170,10 +170,28 @@ async function editMessage(
 
 // --- Incoming media -----------------------------------------------------------
 
-// Where downloaded Telegram attachments are stored. Inside the app dir so it sits
-// within the assistant's allowed working tree; the absolute path is handed to the
-// turn so the assistant can Read/process it.
-const UPLOAD_DIR = path.join(process.cwd(), "telegram-uploads");
+// Where downloaded Telegram attachments are stored, relative to the session's
+// working directory. The agent only works inside that folder (Claude Code gets
+// --add-dir <cwd>; a file elsewhere needs an approval or is denied outright,
+// and other agents are confined to it as well), so the upload goes there — and
+// stays readable in later turns and orchestrations. The absolute path is
+// handed to the turn so the assistant can Read/process it.
+export const UPLOAD_SUBDIR = path.join(".codemaestro", "uploads");
+
+/**
+ * Creates <cwd>/.codemaestro/uploads and returns its real path. The folder
+ * belongs to the agent's project, so it must not lead out of it through a
+ * symlink; a .gitignore keeps uploads out of the project's commits.
+ */
+export async function ensureUploadDir(cwd: string): Promise<string> {
+  const root = await fs.realpath(cwd);
+  const dir = path.join(root, UPLOAD_SUBDIR);
+  await fs.mkdir(dir, { recursive: true });
+  const real = await fs.realpath(dir);
+  if (!isInside(real, root)) throw new Error(`Upload-Ordner zeigt aus dem Projektordner heraus: ${dir}`);
+  await fs.writeFile(path.join(real, ".gitignore"), "*\n", { flag: "wx" }).catch(() => { /* exists */ });
+  return real;
+}
 
 // Pick the best downloadable image from a message: the largest photo size, or an
 // image-typed document. Returns null for non-image messages.
@@ -190,21 +208,25 @@ function pickAttachment(msg: TgMessage): { fileId: string; ext: string } | null 
 }
 
 // Resolves a Telegram file_id to bytes (getFile → file download) and writes it to
-// UPLOAD_DIR. Returns the absolute local path, or null on any failure.
-async function downloadTelegramFile(token: string, fileId: string, ext: string): Promise<string | null> {
+// the session's upload folder (see UPLOAD_SUBDIR). Returns the absolute local
+// path, or null on any failure.
+async function downloadTelegramFile(token: string, sessionId: string, fileId: string, ext: string): Promise<string | null> {
   try {
+    const session = await prisma.assistantSession.findUnique({ where: { id: sessionId }, select: { cwd: true } });
+    if (!session) return null;
+    const dir = await ensureUploadDir(await resolveWorkdir(session.cwd));
     const info = await tg<{ file_path?: string }>(token, "getFile", { file_id: fileId });
     if (!info?.file_path) return null;
     const res = await fetch(`${TG_API}/file/bot${token}/${info.file_path}`, { signal: AbortSignal.timeout(60_000) });
     if (!res.ok) return null;
     const buf = Buffer.from(await res.arrayBuffer());
-    await fs.mkdir(UPLOAD_DIR, { recursive: true });
     const stamp = `${Date.now()}_${Math.round(Math.random() * 1e6)}`;
     const safeExt = /^\.[A-Za-z0-9]{1,8}$/.test(ext) ? ext : ".bin";
-    const dest = path.join(UPLOAD_DIR, `tg_${stamp}${safeExt}`);
-    await fs.writeFile(dest, buf);
+    const dest = path.join(dir, `tg_${stamp}${safeExt}`);
+    await fs.writeFile(dest, buf, { flag: "wx" }); // never through an existing file or link
     return dest;
-  } catch {
+  } catch (err) {
+    console.error("[telegram] upload failed", err);
     return null;
   }
 }
@@ -444,12 +466,14 @@ async function startTelegramTurn(token: string, chatId: number, sessionId: strin
   if (!(await canStartRun(token, chatId, sessionId))) return;
   let handle: RunHandle;
   try {
-    await persistUserMessage(sessionId, prompt);
     handle = await launchRun({
       sessionId,
       kind: "turn",
       origin: "telegram",
       title: `Telegram: ${prompt}`,
+      // Persisted only once the session is claimed, so a concurrent start
+      // (PWA, another chat) leaves no orphaned message.
+      userMessage: { content: prompt },
       work: (ctx) => executeTurn(ctx, prompt, { useKnowledge, interactive: true }),
     });
   } catch (err) {
@@ -891,16 +915,23 @@ async function handleMessage(token: string, config: TelegramConfig, msg: TgMessa
   // instruction; without one we fall back to a neutral note.
   const attach = pickAttachment(msg);
   if (attach) {
-    const saved = await downloadTelegramFile(token, attach.fileId, attach.ext);
+    // The file goes into the session's working directory (see UPLOAD_SUBDIR),
+    // so the session is needed first — and nothing is written while an agent
+    // runs in that folder.
+    const sessionId = await getActiveSession(token, chatId, config);
+    if (isSessionBusy(sessionId)) {
+      await sendMessage(token, chatId, BUSY_TEXT);
+      return;
+    }
+    const saved = await downloadTelegramFile(token, sessionId, attach.fileId, attach.ext);
     if (!saved) {
       await sendMessage(token, chatId, "⚠️ Bild konnte nicht heruntergeladen werden.");
       return;
     }
     const caption = (msg.caption || "").trim();
-    const note = `Der Nutzer hat ein Bild über Telegram gesendet. Es wurde lokal gespeichert unter:\n${saved}\nVerarbeite es bei Bedarf mit deinen Tools (z. B. Read).`;
+    const note = `Der Nutzer hat ein Bild über Telegram gesendet. Es wurde im Projektordner gespeichert unter:\n${saved}\nVerarbeite es bei Bedarf mit deinen Tools (z. B. Read).`;
     const prompt = caption ? `${caption}\n\n[${note}]` : note;
     await sendMessage(token, chatId, `🖼️ Bild empfangen (${path.basename(saved)}). Verarbeite…`);
-    const sessionId = await getActiveSession(token, chatId, config);
     await startTelegramTurn(token, chatId, sessionId, prompt, config.useKnowledge);
     return;
   }

@@ -77,8 +77,8 @@ export function isChatAllowed(chatId: number, allowed: number[]): boolean {
 /** A short one-line summary of a tool call for the Telegram transcript. */
 export function formatToolLine(name?: string, input?: unknown): string {
   const n = name || "tool";
-  const i = input as { file_path?: string; command?: string; pattern?: string } | undefined;
-  const detail = i?.file_path || i?.command || i?.pattern || "";
+  const i = input as { file_path?: string; command?: string; pattern?: string; url?: string; query?: string } | undefined;
+  const detail = i?.file_path || i?.command || i?.pattern || i?.url || i?.query || "";
   const short = detail ? ` ${sliceHead(String(detail), 80)}` : "";
   return `🔧 ${n}${short}`;
 }
@@ -110,11 +110,16 @@ export function expiryHint(expiresAt: number | undefined, now = Date.now()): str
   return `⏳ Timeout in ${min} min`;
 }
 
-/** Text of a tool-approval card (Bash command or file diff preview). */
+/**
+ * Text of a tool-approval card: the Bash command, or the tool with its file
+ * and — for other tools — its target (WebFetch URL, search query, an MCP
+ * tool's input), plus a diff preview of file changes.
+ */
 export function formatApprovalText(e: ApprovalCardInput, now = Date.now()): string {
   const head = e.tool === "Bash"
     ? `🔸 Freigabe (Bash):\n${clipText(e.command || "", 1500)}`
-    : `🔸 Freigabe: ${e.tool || "Tool"} ${e.filePath || ""}${e.overwrites ? " (überschreibt bestehende Datei)" : ""}`;
+    : `🔸 Freigabe: ${e.tool || "Tool"} ${e.filePath || ""}${e.overwrites ? " (überschreibt bestehende Datei)" : ""}`.trimEnd() +
+      (e.command ? `\n${clipText(e.command, 1500)}` : "");
   const diffPreview = clipText(
     (e.diff || [])
       .map((d) => (d.op === "add" ? "+ " : d.op === "del" ? "- " : "  ") + d.text)

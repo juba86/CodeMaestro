@@ -5,7 +5,7 @@ import path from "path";
 
 vi.mock("@/lib/github", () => ({ githubEnv: vi.fn(async () => ({})), GITHUB_SANDBOX_DOMAINS: [] }));
 
-import { PERMISSION_PROMPT_TOOL, describeDenials, runTurn, isRunning, isPlainAgent, mapToolsForGemini, stopSession, type AssistantSessionRow, type NormalizedEvent } from "./runner";
+import { PERMISSION_PROMPT_TOOL, denialNotice, describeDenials, runTurn, isRunning, isPlainAgent, mapToolsForGemini, stopSession, type AssistantSessionRow, type NormalizedEvent } from "./runner";
 
 // A stand-in `claude` binary on PATH that replays a scripted stream-json run.
 const binDir = mkdtempSync(path.join(tmpdir(), "cm-fake-claude-"));
@@ -18,10 +18,12 @@ const mode = process.env.FAKE_MODE || "stream";
 const argv = process.argv.slice(2);
 const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
 if (mode === "argv") {
-  // Record the arguments and the --mcp-config file as seen during the run.
+  // Record the arguments and the --mcp-config / --settings files as seen during the run.
   const i = argv.indexOf("--mcp-config");
   const mcp = i >= 0 ? JSON.parse(fs.readFileSync(argv[i + 1], "utf8")) : null;
-  fs.writeFileSync(process.env.FAKE_ARGV, JSON.stringify({ argv, mcp, timeout: process.env.MCP_TOOL_TIMEOUT }));
+  const j = argv.indexOf("--settings");
+  const settings = j >= 0 ? JSON.parse(fs.readFileSync(argv[j + 1], "utf8")) : null;
+  fs.writeFileSync(process.env.FAKE_ARGV, JSON.stringify({ argv, mcp, settings, timeout: process.env.MCP_TOOL_TIMEOUT }));
   out({ type: "system", subtype: "init", session_id: "s-argv", model: "m" });
   out({ type: "result", result: "ok", total_cost_usd: 0, is_error: false, session_id: "s-argv" });
 } else if (mode === "missing" && argv.includes("--resume")) {
@@ -31,6 +33,25 @@ if (mode === "argv") {
   out({ type: "system", subtype: "init", session_id: "s-d", model: "m" });
   out({ type: "result", result: "Ich warte auf die Freigabe.", total_cost_usd: 0, is_error: false, session_id: "s-d",
     permission_denials: [{ tool_name: "Bash", tool_use_id: "t", tool_input: { command: "npm install" } }, { tool_name: "Bash", tool_use_id: "u", tool_input: { command: "npm install" } }] });
+} else if (mode === "twomsg") {
+  // Consecutive assistant messages with text and nothing in between.
+  out({ type: "system", subtype: "init", session_id: "s-2m", model: "m" });
+  out({ type: "stream_event", event: { type: "message_start", message: { id: "msg_a" } } });
+  out({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "Erledigt." } } });
+  out({ type: "assistant", message: { id: "msg_a", content: [{ type: "text", text: "Erledigt." }] } });
+  out({ type: "stream_event", event: { type: "message_start", message: { id: "msg_b" } } });
+  out({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "Jetzt " } } });
+  out({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "weiter.\\n\\n" } } });
+  out({ type: "assistant", message: { id: "msg_b", content: [{ type: "text", text: "Jetzt weiter.\\n\\n" }] } });
+  // Already ends in a blank line: nothing added. Final-only message (no deltas).
+  out({ type: "assistant", message: { id: "msg_c", content: [{ type: "text", text: "Ende." }] } });
+  // Thinking in between: a new block anyway, no break.
+  out({ type: "assistant", message: { id: "msg_d", content: [{ type: "thinking", thinking: "hm" }, { type: "text", text: "Nachtrag." }] } });
+  out({ type: "result", result: "Nachtrag.", total_cost_usd: 0, is_error: false, session_id: "s-2m" });
+} else if (mode === "plandenied") {
+  out({ type: "system", subtype: "init", session_id: "s-p", model: "m" });
+  out({ type: "result", result: "Plan steht.", total_cost_usd: 0, is_error: false, session_id: "s-p",
+    permission_denials: [{ tool_name: "Bash", tool_input: { command: "npm test" } }, { tool_name: "ExitPlanMode", tool_input: { plan: "x" } }] });
 } else if (mode === "hang") {
   out({ type: "system", subtype: "init", session_id: "s-hang", model: "m" });
   process.on("SIGINT", () => process.exit(130));
@@ -72,6 +93,14 @@ function row(id: string, extra: Partial<AssistantSessionRow> = {}): AssistantSes
 }
 
 describe("runTurn (claude stream-json)", () => {
+  it("separates consecutive text messages with a paragraph break", async () => {
+    process.env.FAKE_MODE = "twomsg";
+    const events: NormalizedEvent[] = [];
+    await runTurn(row("r1b"), "hi", undefined, (e) => events.push(e));
+    const text = events.filter((e) => e.type === "text").map((e) => e.content).join("");
+    expect(text).toBe("Erledigt.\n\nJetzt weiter.\n\nEnde.Nachtrag.");
+  });
+
   it("streams partial text once, keeps tool order and decodes split UTF-8", async () => {
     process.env.FAKE_MODE = "stream";
     const events: NormalizedEvent[] = [];
@@ -131,6 +160,15 @@ describe("runTurn (claude conversation handling)", () => {
     expect(existsSync(argv[mcpAt + 1])).toBe(false); // removed after the run
   });
 
+  it("closes the sandbox's escape hatch (dangerouslyDisableSandbox)", async () => {
+    process.env.FAKE_MODE = "argv";
+    const file = path.join(workDir, "argv-sandbox.json");
+    process.env.FAKE_ARGV = file;
+    await runTurn(row("r4b", { sandbox: true, interactive: true }), "x", undefined, () => {});
+    const { settings } = JSON.parse(readFileSync(file, "utf8"));
+    expect(settings.sandbox).toEqual({ enabled: true, allowUnsandboxedCommands: false });
+  });
+
   it("keeps unattended runs without the permission tool and without forking", async () => {
     process.env.FAKE_MODE = "argv";
     const file = path.join(workDir, "argv2.json");
@@ -171,6 +209,30 @@ describe("runTurn (claude conversation handling)", () => {
       "WebFetch: https://x.dev",
       "Task",
     ]);
+  });
+
+  it("counts a long command denied twice once, and two long commands with the same start twice", () => {
+    const long = `cd /repo && ${"npm run build -- --verbose ".repeat(12)}`;
+    const twice = describeDenials([{ tool_name: "Bash", tool_input: { command: long } }, { tool_name: "Bash", tool_input: { command: long } }]);
+    expect(twice).toHaveLength(1);
+    expect(twice[0].length).toBe(200);
+    expect(twice[0].endsWith("…")).toBe(true);
+    const other = describeDenials([{ tool_name: "Bash", tool_input: { command: long } }, { tool_name: "Bash", tool_input: { command: `${long}x` } }]);
+    expect(other).toHaveLength(2);
+  });
+
+  it("explains denials of a read-only (plan-mode) run without the useless 'allow the tools' advice", async () => {
+    process.env.FAKE_MODE = "plandenied";
+    const events: NormalizedEvent[] = [];
+    await runTurn(row("r9", { permissionMode: "plan" }), "x", undefined, (e) => events.push(e));
+    const notice = events.find((e) => e.type === "notice")?.content ?? "";
+    expect(notice).toContain("Im Plan-Modus blockiert (1): Bash: npm test");
+    expect(notice).toContain("schreibgeschützt");
+    expect(notice).not.toContain("ExitPlanMode");
+    expect(notice).not.toContain("Erlaube die Werkzeuge");
+    // Only the expected plan request: nothing to report.
+    expect(denialNotice([{ tool_name: "ExitPlanMode" }], "plan")).toBeNull();
+    expect(denialNotice([{ tool_name: "ExitPlanMode" }], "default")).toContain("Erlaube die Werkzeuge");
   });
 });
 

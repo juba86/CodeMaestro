@@ -349,17 +349,6 @@ export function NewSessionSheet({ open, onOpenChange, sessions, initialCwd, titl
                     className="min-h-11 p-2.5"
                   />
                 ))}
-                {conversationList.length > CONVERSATIONS_COLLAPSED ? (
-                  <Button
-                    variant="ghost"
-                    className="min-h-11 justify-start text-muted-foreground md:min-h-10"
-                    aria-expanded={expanded}
-                    onClick={() => setExpandedCwd(expanded ? null : cwd)}
-                  >
-                    <ChevronRight aria-hidden className={cn("transition-transform", expanded && "rotate-90")} />
-                    {expanded ? "Weniger anzeigen" : `Ältere anzeigen (${conversationList.length - CONVERSATIONS_COLLAPSED})`}
-                  </Button>
-                ) : null}
                 <RadioCard
                   value={NEW_CONVERSATION}
                   title="Neue Unterhaltung starten"
@@ -367,6 +356,19 @@ export function NewSessionSheet({ open, onOpenChange, sessions, initialCwd, titl
                   className="min-h-11 p-2.5"
                 />
               </RadioGroup>
+              {/* Outside the RadioGroup: a plain button among its roving-focus
+                  items traps Shift+Tab between itself and the checked card. */}
+              {conversationList.length > CONVERSATIONS_COLLAPSED ? (
+                <Button
+                  variant="ghost"
+                  className="min-h-11 w-full justify-start text-muted-foreground md:min-h-10"
+                  aria-expanded={expanded}
+                  onClick={() => setExpandedCwd(expanded ? null : cwd)}
+                >
+                  <ChevronRight aria-hidden className={cn("transition-transform", expanded && "rotate-90")} />
+                  {expanded ? "Weniger anzeigen" : `Ältere anzeigen (${conversationList.length - CONVERSATIONS_COLLAPSED})`}
+                </Button>
+              ) : null}
               {action.kind === "open" ? (
                 <Callout
                   title="Schon in CodeMaestro geöffnet"

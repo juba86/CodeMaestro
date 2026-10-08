@@ -927,8 +927,10 @@ function plannerWorkers(workers: Worker[]): Worker[] {
 
 // Role-less planning: the planner routes each subtask to a worker directly.
 // Said to a planner that continues the session's conversation (sessionThread).
+// Only forked Claude Code workers continue that conversation; reviewers and
+// every other worker start fresh, so the descriptions must carry the context.
 const HISTORY_LINE =
-  "\nThe conversation above is this session's history with the user. Use it to understand what the task refers to (e.g. \"continue\" or \"as discussed\"); the workers see it too.";
+  "\nThe conversation above is this session's history with the user. Use it to understand what the task refers to (e.g. \"continue\" or \"as discussed\"), but write every subtask description self-contained: name the files, decisions and open points it refers to, because reviewers and non-Claude workers do not see this conversation.";
 
 function workerPlannerPrompt(session: AssistantSessionRow, task: string, workers: Worker[], prefLine: string, guidance: string): string {
   const profile = plannerWorkers(workers)

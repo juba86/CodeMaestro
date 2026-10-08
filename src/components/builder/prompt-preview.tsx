@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { copyText } from "@/components/ui/copy-text";
 import { ASSISTANT_HANDOFF_URL, writeAssistantHandoff } from "@/components/library/load-into-builder";
+import { SendToAiButton } from "@/components/send-to-ai/send-to-ai";
 import { XmlTagPalette } from "./xml-tag-palette";
 import { fieldDomId } from "./lint-labels";
 import { StepFooter } from "./step-footer";
@@ -120,6 +121,8 @@ export function PromptPreview({ onBack, onNext }: { onBack: () => void; onNext: 
           <Button variant="primary" onClick={handleRunInAssistant} disabledReason={emptyReason}>
             <SquareTerminal aria-hidden /> Im Assistent ausführen
           </Button>
+          {/* The playground edits the same draft, so it can pick up from here. */}
+          <SendToAiButton prompt={xmlContent} playgroundHref="/playground" disabledReason={emptyReason} />
           <Button variant="outline" onClick={handleTestInPlayground} disabledReason={emptyReason}>
             <FlaskConical aria-hidden /> Im Playground testen
           </Button>

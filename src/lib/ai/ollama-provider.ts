@@ -57,9 +57,6 @@ export async function fetchOllamaModels(): Promise<ModelInfo[]> {
 export class OllamaProvider implements AIProvider {
   name = "ollama" as const;
 
-  // Ollama needs no API key; the constructor signature is kept for the factory.
-  constructor(_apiKey?: string) {}
-
   getModels(): ModelInfo[] {
     // Models are dynamic — fetched via fetchOllamaModels() in the models route.
     return [];
@@ -161,7 +158,8 @@ export class OllamaProvider implements AIProvider {
     yield { type: "done", content: "" };
   }
 
-  async validateCredentials(_apiKey: string): Promise<boolean> {
+  // Ollama needs no API key: validity means the daemon answers.
+  async validateCredentials(): Promise<boolean> {
     try {
       const res = await fetch(`${OLLAMA_BASE_URL}/api/tags`, { cache: "no-store" });
       return res.ok;
