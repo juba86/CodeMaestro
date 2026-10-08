@@ -1,43 +1,48 @@
 "use client";
 
-import { Brain, Check, Cpu, Eye, Loader2, MessageSquareText, RefreshCw, Wrench } from "lucide-react";
+import { useEffect } from "react";
+import { Brain, Check, Cpu, Eye, MessageSquareText, RefreshCw, Wrench } from "lucide-react";
 import { toast } from "sonner";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Callout } from "@/components/ui/callout";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   PiInstallHint, SMALL_CONTEXT, formatContext, sortPiModels, usePiStatus, type PiModel,
 } from "@/components/assistant/pi-status";
-
-const CODE = "px-1 bg-accent rounded";
-const BADGE = "text-[10px] px-1.5 py-0.5 rounded inline-flex items-center gap-1 whitespace-nowrap";
+import { publishPiHint } from "./settings-hints";
+import { Code, InfoRows, SectionHeader, SettingsCard } from "./settings-ui";
 
 function ModelBadges({ model }: { model: PiModel }) {
   const small = model.contextWindow > 0 && model.contextWindow < SMALL_CONTEXT;
   return (
     <div className="flex flex-wrap gap-1">
       {model.toolsOk ? (
-        <span className={`${BADGE} bg-green-500/15 text-green-600 dark:text-green-400`} title="Unterstützt Tool-Aufrufe">
-          <Wrench size={10} /> Tools ✓ · kann Dateien bearbeiten
-        </span>
+        <Badge variant="success" icon={<Wrench aria-hidden />} title="Unterstützt Tool-Aufrufe">
+          Tools ✓ · kann Dateien bearbeiten
+        </Badge>
       ) : (
-        <span className={`${BADGE} bg-accent text-muted-foreground`} title="Keine Tool-Unterstützung — antwortet nur in Text">
-          <MessageSquareText size={10} /> Tools ✗ · nur Text
-        </span>
+        <Badge variant="neutral" icon={<MessageSquareText aria-hidden />} title="Keine Tool-Unterstützung – antwortet nur in Text">
+          Tools ✗ · nur Text
+        </Badge>
       )}
-      {model.reasoning && (
-        <span className={`${BADGE} bg-violet-500/15 text-violet-600 dark:text-violet-400`}>
-          <Brain size={10} /> Thinking
-        </span>
-      )}
-      {model.vision && (
-        <span className={`${BADGE} bg-sky-500/15 text-sky-600 dark:text-sky-400`}>
-          <Eye size={10} /> Vision
-        </span>
-      )}
-      <span
-        className={`${BADGE} ${small ? "bg-amber-500/15 text-amber-600 dark:text-amber-400" : "bg-accent text-muted-foreground"}`}
-        title={small ? "Wenig Kontext — für Agenten-Arbeit mindestens 64k empfohlen" : "Wirksamer Kontext auf dem KI-Server"}
+      {model.reasoning ? (
+        <Badge variant="brand" icon={<Brain aria-hidden />}>
+          Thinking
+        </Badge>
+      ) : null}
+      {model.vision ? (
+        <Badge variant="info" icon={<Eye aria-hidden />}>
+          Vision
+        </Badge>
+      ) : null}
+      <Badge
+        variant={small ? "warning" : "neutral"}
+        title={small ? "Wenig Kontext – für Agenten-Arbeit mindestens 64k empfohlen" : "Wirksamer Kontext auf dem KI-Server"}
       >
         Kontext {formatContext(model.contextWindow)}
-      </span>
+        {small ? <span className="sr-only"> (wenig Kontext, mindestens 64k empfohlen)</span> : null}
+      </Badge>
     </div>
   );
 }
@@ -47,130 +52,184 @@ export function PiSettings() {
   const models = status ? sortPiModels(status.models) : [];
   const editing = models.filter((m) => m.toolsOk).length;
 
+  useEffect(() => {
+    if (status) publishPiHint({ installed: status.installed, error: status.error });
+  }, [status]);
+
   async function resync() {
     const s = await refresh(true);
     if (!s) toast.error("Synchronisieren fehlgeschlagen.");
     else if (s.error) toast.error(`Synchronisiert mit Fehler: ${s.error}`);
-    else toast.success(`${s.models.length} Modell(e) synchronisiert.`);
+    else toast.success(s.models.length === 1 ? "1 Modell synchronisiert." : `${s.models.length} Modelle synchronisiert.`);
   }
 
+  const statusBadge = status?.installed ? (
+    <Badge variant="success" icon={<Check aria-hidden />}>
+      installiert{status.version ? ` · v${status.version.replace(/^v/, "")}` : ""}
+    </Badge>
+  ) : status ? (
+    <Badge variant="warning">nicht installiert</Badge>
+  ) : null;
+
   return (
-    <section className="space-y-4">
-      <div className="flex items-center gap-2">
-        <Cpu size={18} className="text-primary" />
-        <h2 className="text-lg font-semibold">Lokale Modelle (pi)</h2>
-        {status?.installed ? (
-          <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-green-500/15 text-green-500 flex items-center gap-1">
-            <Check size={11} /> installiert{status.version ? ` · v${status.version.replace(/^v/, "")}` : ""}
+    <div className="space-y-4">
+      <SectionHeader
+        title="Lokale Agenten (pi)"
+        meta={statusBadge}
+        description={
+          <>
+            Der Coding-Agent{" "}
+            <a href="https://pi.dev" target="_blank" rel="noreferrer" className="text-primary-text underline decoration-primary-text/40 underline-offset-2 hover:decoration-primary-text">
+              pi
+            </a>{" "}
+            macht jedes Modell auf deinem lokalen KI-Server (Ollama) im Assistenten nutzbar – inklusive Dateien lesen und
+            bearbeiten sowie Befehle ausführen. Wähle dazu beim Anlegen einer Session den Agenten{" "}
+            <span className="font-medium text-foreground">pi · lokale Modelle</span>.
+          </>
+        }
+      />
+
+      {!status && !error ? (
+        <SettingsCard aria-busy>
+          <span className="sr-only" role="status">
+            Status wird geladen …
           </span>
-        ) : status ? (
-          <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-accent text-muted-foreground">nicht installiert</span>
-        ) : null}
-      </div>
+          <div className="space-y-2">
+            <Skeleton className="h-4 w-2/3" />
+            <Skeleton className="h-4 w-1/2" />
+            <Skeleton className="h-4 w-3/5" />
+          </div>
+        </SettingsCard>
+      ) : null}
 
-      <p className="text-xs text-muted-foreground">
-        Der Coding-Agent <a href="https://pi.dev" target="_blank" rel="noreferrer" className="underline hover:text-foreground">pi</a> macht
-        jedes Modell auf deinem lokalen KI-Server (Ollama) im Code-Assistant nutzbar — inklusive Dateien lesen und bearbeiten
-        sowie Befehle ausführen. Wähle dazu beim Anlegen einer Session den Provider <span className="font-medium">pi · lokale Modelle</span>.
-      </p>
+      {error ? (
+        <Callout
+          variant="danger"
+          title="Status konnte nicht geladen werden"
+          action={
+            <Button variant="outline" loading={loading} onClick={() => void refresh(false)}>
+              Erneut versuchen
+            </Button>
+          }
+        >
+          {error}
+        </Callout>
+      ) : null}
 
-      {!status && !error && (
-        <p className="text-xs text-muted-foreground flex items-center gap-1.5">
-          <Loader2 size={12} className="animate-spin" /> Lade Status …
-        </p>
-      )}
-      {error && <p className="text-xs text-red-500">{error}</p>}
+      {status && !status.installed ? <PiInstallHint hint={status.installHint} /> : null}
 
-      {status && !status.installed && <PiInstallHint hint={status.installHint} />}
+      {status ? (
+        <SettingsCard title="KI-Server" icon={<Cpu />}>
+          <InfoRows
+            rows={[
+              {
+                label: "Ollama",
+                value: (
+                  <>
+                    {status.ollamaBaseUrl ? <Code>{status.ollamaBaseUrl}</Code> : "–"}
+                    <span className="block text-xs text-muted-foreground">
+                      über <Code>OLLAMA_BASE_URL</Code> in der .env änderbar
+                    </span>
+                  </>
+                ),
+              },
+              ...(status.contextFallback > 0
+                ? [
+                    {
+                      label: "Standard-Kontext",
+                      value: (
+                        <>
+                          {formatContext(status.contextFallback)} für Modelle ohne <Code>num_ctx</Code>
+                          <span className="block text-xs text-muted-foreground">
+                            muss zum <Code>OLLAMA_CONTEXT_LENGTH</Code> des KI-Servers passen (sonst{" "}
+                            <Code>PI_OLLAMA_CONTEXT_LENGTH</Code> setzen)
+                          </span>
+                        </>
+                      ),
+                    },
+                  ]
+                : []),
+              ...(status.installed && status.bin
+                ? [{ label: "Programm", value: <span className="block truncate font-mono text-xs" title={status.bin}>{status.bin}</span> }]
+                : []),
+              ...(status.agentDir
+                ? [{ label: "Konfiguration", value: <span className="block truncate font-mono text-xs" title={status.agentDir}>{status.agentDir}</span> }]
+                : []),
+            ]}
+          />
+        </SettingsCard>
+      ) : null}
 
-      {status && (
-        <div className="space-y-1 text-xs text-muted-foreground">
-          <p>
-            KI-Server (Ollama):{" "}
-            {status.ollamaBaseUrl ? <code className={CODE}>{status.ollamaBaseUrl}</code> : "—"}
-            {" "}· über <code className={CODE}>OLLAMA_BASE_URL</code> in der .env änderbar
-          </p>
-          {status.contextFallback > 0 && (
-            <p>
-              Kontext für Modelle ohne <code className={CODE}>num_ctx</code>: {formatContext(status.contextFallback)} · muss zum{" "}
-              <code className={CODE}>OLLAMA_CONTEXT_LENGTH</code> des KI-Servers passen (sonst{" "}
-              <code className={CODE}>PI_OLLAMA_CONTEXT_LENGTH</code> setzen)
+      {status?.error ? (
+        <Callout variant="warning" title="Synchronisierung">
+          {status.error}
+        </Callout>
+      ) : null}
+
+      {status || error ? (
+        <SettingsCard
+          title="Synchronisierte Modelle"
+          description={status ? `${models.length} ${models.length === 1 ? "Modell" : "Modelle"}${models.length ? `, ${editing} mit Datei-Edit` : ""}` : undefined}
+          badge={
+            <Button variant="outline" loading={loading} onClick={() => void resync()}>
+              <RefreshCw />
+              Neu synchronisieren
+            </Button>
+          }
+          bodyClassName={models.length > 0 ? "p-0" : undefined}
+        >
+          {status && models.length === 0 ? (
+            <p className="text-sm text-muted-foreground md:text-ui">
+              Keine Modelle gefunden. Läuft Ollama unter der Adresse oben? Modelle mit <Code>ollama pull &lt;modell&gt;</Code>{" "}
+              laden und dann neu synchronisieren.
             </p>
-          )}
-          {status.installed && status.bin && (
-            <p className="truncate" title={status.bin}>Programm: <code className={CODE}>{status.bin}</code></p>
-          )}
-          {status.agentDir && (
-            <p className="truncate" title={status.agentDir}>Konfiguration: <code className={CODE}>{status.agentDir}</code></p>
-          )}
-        </div>
-      )}
+          ) : null}
+          {models.length > 0 ? (
+            <ul className="divide-y divide-border">
+              {models.map((m) => (
+                <li key={m.id} className="space-y-1.5 px-4 py-2.5">
+                  <div className="flex min-w-0 items-baseline gap-2">
+                    <span className="truncate text-sm font-medium md:text-ui" title={m.name}>
+                      {m.name}
+                    </span>
+                    {m.name !== m.id ? (
+                      <code className="truncate font-mono text-xs text-muted-foreground" title={m.id}>
+                        {m.id}
+                      </code>
+                    ) : null}
+                  </div>
+                  <ModelBadges model={m} />
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </SettingsCard>
+      ) : null}
 
-      {status?.error && (
-        <p className="text-xs text-amber-600 dark:text-amber-400">Synchronisierung: {status.error}</p>
-      )}
-
-      <div className="space-y-2">
-        <div className="flex items-center gap-2">
-          <h3 className="text-sm font-medium">
-            Synchronisierte Modelle{status ? ` (${models.length}${models.length ? `, ${editing} mit Datei-Edit` : ""})` : ""}
-          </h3>
-          <button
-            onClick={resync}
-            disabled={loading}
-            className="ml-auto px-3 py-1.5 text-sm rounded-md border border-input hover:bg-accent disabled:opacity-50 flex items-center gap-1.5"
-          >
-            {loading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-            Neu synchronisieren
-          </button>
-        </div>
-
-        {status && models.length === 0 && (
-          <p className="text-xs text-muted-foreground rounded-md border border-border p-3">
-            Keine Modelle gefunden. Läuft Ollama unter der Adresse oben? Modelle mit{" "}
-            <code className={CODE}>ollama pull &lt;modell&gt;</code> laden und dann neu synchronisieren.
-          </p>
-        )}
-
-        {models.length > 0 && (
-          <ul className="divide-y divide-border rounded-md border border-border">
-            {models.map((m) => (
-              <li key={m.id} className="px-3 py-2 space-y-1">
-                <div className="flex items-baseline gap-2 min-w-0">
-                  <span className="text-sm font-medium truncate" title={m.name}>{m.name}</span>
-                  {m.name !== m.id && (
-                    <code className="text-[11px] text-muted-foreground truncate" title={m.id}>{m.id}</code>
-                  )}
-                </div>
-                <ModelBadges model={m} />
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-
-      <div className="rounded-md border border-border bg-accent/30 p-3 text-xs text-muted-foreground space-y-1.5">
-        <p className="font-medium text-foreground">So funktioniert es</p>
-        <ul className="list-disc pl-4 space-y-1">
+      <details className="group rounded-lg border border-border bg-card text-sm md:text-ui">
+        <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 px-4 py-2 font-medium text-foreground marker:hidden md:min-h-10 [&::-webkit-details-marker]:hidden">
+          <span aria-hidden className="text-subtle-foreground transition-transform group-open:rotate-90">›</span>
+          So funktioniert es
+        </summary>
+        <ul className="list-disc space-y-1.5 border-t border-border py-3 pl-9 pr-4 text-muted-foreground">
           <li>
-            Jedes Modell auf dem KI-Server wird automatisch für pi registriert — neue Modelle nach{" "}
-            <code className={CODE}>ollama pull</code> erscheinen nach „Neu synchronisieren“.
+            Jedes Modell auf dem KI-Server wird automatisch für pi registriert – neue Modelle nach <Code>ollama pull</Code>{" "}
+            erscheinen nach „Neu synchronisieren“.
           </li>
           <li>
-            Nur Modelle mit Tool-Unterstützung können Dateien lesen und bearbeiten oder Befehle ausführen. Modelle ohne
-            Tools antworten nur in Text.
+            Nur Modelle mit Tool-Unterstützung können Dateien lesen und bearbeiten oder Befehle ausführen. Modelle ohne Tools
+            antworten nur in Text.
           </li>
           <li>
-            Der Kontext ist der, mit dem Ollama das Modell tatsächlich lädt (<code className={CODE}>OLLAMA_CONTEXT_LENGTH</code>{" "}
-            bzw. <code className={CODE}>num_ctx</code>). Für Agenten-Arbeit sind mindestens 64k empfehlenswert.
+            Der Kontext ist der, mit dem Ollama das Modell tatsächlich lädt (<Code>OLLAMA_CONTEXT_LENGTH</Code> bzw.{" "}
+            <Code>num_ctx</Code>). Für Agenten-Arbeit sind mindestens 64k empfehlenswert.
           </li>
-          <li>Das Freigabe-Gate (Diff/Befehl bestätigen) funktioniert auch mit pi; die Sandbox gibt es nur mit Claude Code.</li>
+          <li>Die Freigabe (Diff/Befehl bestätigen) funktioniert auch mit pi; die Sandbox gibt es nur mit Claude Code.</li>
           <li>
-            CodeMaestro nutzt ein eigenes pi-Konfigurationsverzeichnis — dein <code className={CODE}>~/.pi</code> bleibt
-            unberührt.
+            CodeMaestro nutzt ein eigenes pi-Konfigurationsverzeichnis – dein <Code>~/.pi</Code> bleibt unberührt.
           </li>
         </ul>
-      </div>
-    </section>
+      </details>
+    </div>
   );
 }

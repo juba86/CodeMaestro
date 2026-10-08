@@ -1,8 +1,21 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Loader2, Check, X, Send } from "lucide-react";
+import { Check, Send, Trash2 } from "lucide-react";
 import { toast } from "sonner";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Callout } from "@/components/ui/callout";
+import { confirm } from "@/components/ui/confirm";
+import { Field, FieldHint, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { SecretInput } from "@/components/ui/secret-input";
+import { SimpleSelect } from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
+import { SwitchRow } from "@/components/ui/switch";
+import { approvalModeLabel, permissionModeLabel, providerLabel } from "@/lib/labels";
+import { publishTelegramHint } from "./settings-hints";
+import { Code, SectionHeader, SettingsCard } from "./settings-ui";
 
 interface PublicConfig {
   enabled: boolean;
@@ -28,9 +41,19 @@ const PERMISSION_MODES = ["default", "acceptEdits", "plan", "auto", "dontAsk", "
 const APPROVAL_MODES = ["off", "edits", "all"];
 const PROVIDERS = ["claude", "gemini", "opencode", "codex", "aider", "pi"];
 
+function parseChatIds(s: string): number[] {
+  return s
+    .split(/[\s,]+/)
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .map(Number)
+    .filter((n) => Number.isInteger(n));
+}
+
 export function TelegramSettings() {
   const [config, setConfig] = useState<PublicConfig | null>(null);
-  const [status, setStatus] = useState<Status | null>(null);
+  const [status, setStatusState] = useState<Status | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [token, setToken] = useState("");
   const [chatIds, setChatIds] = useState("");
   const [workspaces, setWorkspaces] = useState<{ path: string; label: string }[]>([]);
@@ -48,9 +71,18 @@ export function TelegramSettings() {
     useKnowledge: true,
   });
 
+  function setStatus(s: Status | null) {
+    setStatusState(s);
+    publishTelegramHint(s);
+  }
+
   async function refresh() {
     const d = await fetch("/api/assistant/telegram").then((r) => r.json()).catch(() => null);
-    if (!d?.config) return;
+    if (!d?.config) {
+      setLoadFailed(true);
+      return;
+    }
+    setLoadFailed(false);
     setConfig(d.config);
     setStatus(d.status);
     setChatIds((d.config.allowedChatIds || []).join(", "));
@@ -66,20 +98,13 @@ export function TelegramSettings() {
   }
 
   useEffect(() => {
-    refresh();
+    void refresh();
     fetch("/api/assistant/workspaces").then((r) => r.json()).then((d) => setWorkspaces(d.workspaces || [])).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- load once on mount
   }, []);
 
-  function parseChatIds(s: string): number[] {
-    return s
-      .split(/[\s,]+/)
-      .map((x) => x.trim())
-      .filter(Boolean)
-      .map(Number)
-      .filter((n) => Number.isInteger(n));
-  }
-
-  async function save() {
+  /** `tokenOverride`: "" removes the stored token (what the old „-" convention sent). */
+  async function save(tokenOverride?: string) {
     setSaving(true);
     try {
       const payload: Record<string, unknown> = {
@@ -92,8 +117,8 @@ export function TelegramSettings() {
         model: draft.model,
         useKnowledge: draft.useKnowledge,
       };
-      // Only send the token if the user typed a new one (empty leaves it; "-" clears).
-      if (token.trim() === "-") payload.token = "";
+      // Only send the token if the user typed a new one (empty leaves it).
+      if (tokenOverride !== undefined) payload.token = tokenOverride;
       else if (token.trim()) payload.token = token.trim();
 
       const res = await fetch("/api/assistant/telegram", {
@@ -109,13 +134,24 @@ export function TelegramSettings() {
       setToken("");
       setConfig(d.config);
       setStatus(d.status);
-      if (d.startError) toast.error(`Gespeichert, aber Bridge-Start fehlgeschlagen: ${d.startError}`);
-      else toast.success(draft.enabled ? "Gespeichert — Bridge läuft." : "Gespeichert.");
+      if (d.startError) toast.error(`Gespeichert, aber die Bridge startet nicht: ${d.startError}`);
+      else if (tokenOverride === "") toast.success("Token entfernt");
+      else toast.success(draft.enabled ? "Gespeichert – Bridge läuft" : "Gespeichert");
     } catch {
       toast.error("Speichern fehlgeschlagen.");
     } finally {
       setSaving(false);
     }
+  }
+
+  async function removeToken() {
+    const ok = await confirm({
+      title: "Token entfernen?",
+      description: "Der Bot-Token wird vom Server gelöscht. Die Bridge läuft erst wieder, wenn du einen neuen Token einträgst.",
+      confirmLabel: "Entfernen",
+      tone: "danger",
+    });
+    if (ok) await save("");
   }
 
   async function testTokenNow() {
@@ -127,136 +163,204 @@ export function TelegramSettings() {
         body: JSON.stringify({ action: "test", token: token.trim() || undefined }),
       });
       const d = await res.json();
-      if (d.ok) toast.success(`Token gültig${d.username ? ` — @${d.username}` : ""}.`);
-      else toast.error(d.error || "Token ungültig.");
+      if (d.ok) toast.success("Verbindung funktioniert", { description: d.username ? `Bot @${d.username}` : undefined });
+      else toast.error(`Verbindung fehlgeschlagen: ${d.error || "Token ungültig"}`);
     } catch {
-      toast.error("Test fehlgeschlagen.");
+      toast.error("Verbindung fehlgeschlagen: Server nicht erreichbar");
     } finally {
       setTesting(false);
     }
   }
 
+  const statusPill = status?.running ? (
+    <Badge variant="success" icon={<Check aria-hidden />}>
+      aktiv{status.botUsername ? ` · @${status.botUsername}` : ""}
+    </Badge>
+  ) : status ? (
+    <Badge variant="neutral">inaktiv</Badge>
+  ) : null;
+
+  const workspaceOptions = [
+    // Empty = the server's first allowed folder (resolveWorkdir default).
+    { value: "", label: "Standard", description: "erster erlaubter Projektordner des Servers" },
+    ...workspaces.map((w) => ({ value: w.path, label: w.label, description: w.label !== w.path ? w.path : undefined })),
+    // Keep a saved folder selectable even when it is not in the list (anymore).
+    ...(draft.cwd && !workspaces.some((w) => w.path === draft.cwd) ? [{ value: draft.cwd, label: draft.cwd }] : []),
+  ];
+
   return (
-    <section className="space-y-4">
-      <div className="flex items-center gap-2">
-        <Send size={18} className="text-primary" />
-        <h2 className="text-lg font-semibold">Telegram-Fallback</h2>
-        {status?.running ? (
-          <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-green-500/15 text-green-500 flex items-center gap-1">
-            <Check size={11} /> aktiv{status.botUsername ? ` · @${status.botUsername}` : ""}
-          </span>
-        ) : (
-          <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-accent text-muted-foreground">inaktiv</span>
-        )}
-      </div>
+    <div className="space-y-4">
+      <SectionHeader
+        title="Telegram"
+        meta={statusPill}
+        description={
+          <>
+            Die PWA bleibt primär (über Tailscale). Wenn du nicht im Tailscale bist, kannst du den Assistenten optional per
+            Telegram steuern. Kein Zwang – aktivieren nur, wenn gewünscht. Bot-Token über <Code>@BotFather</Code> erstellen.
+          </>
+        }
+      />
 
-      <p className="text-xs text-muted-foreground">
-        Die PWA bleibt primär (über Tailscale). Wenn du nicht im Tailscale bist, kannst du den
-        Assistant optional per Telegram steuern. Kein Zwang — aktivieren nur wenn gewünscht.
-        Bot-Token via <code className="px-1 bg-accent rounded">@BotFather</code> erstellen.
-      </p>
-
-      {status?.error && <p className="text-xs text-red-500">Fehler: {status.error}</p>}
-
-      <label className="flex items-center gap-2 text-sm">
-        <input type="checkbox" checked={draft.enabled} onChange={(e) => setDraft((d) => ({ ...d, enabled: e.target.checked }))} />
-        Telegram-Bridge aktivieren
-      </label>
-
-      <label className="flex items-center gap-2 text-sm">
-        <input type="checkbox" checked={draft.useKnowledge} onChange={(e) => setDraft((d) => ({ ...d, useKnowledge: e.target.checked }))} />
-        Wissensbasis (RAG) in Antworten einbeziehen
-      </label>
-
-      <div className="space-y-1.5">
-        <label className="text-sm font-medium">Bot-Token</label>
-        <div className="flex gap-2">
-          <input
-            type="password"
-            className="flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm"
-            placeholder={config?.hasToken ? `gespeichert (${config.tokenMasked}) — leer lassen, „-" zum Löschen` : "123456:AA…"}
-            value={token}
-            onChange={(e) => setToken(e.target.value)}
-          />
-          <button
-            onClick={testTokenNow}
-            disabled={testing}
-            className="px-3 py-2 text-sm rounded-md border border-input hover:bg-accent disabled:opacity-50 flex items-center gap-1"
-          >
-            {testing ? <Loader2 size={14} className="animate-spin" /> : "Token testen"}
-          </button>
-        </div>
-      </div>
-
-      <div className="space-y-1.5">
-        <label className="text-sm font-medium">Erlaubte Chat-IDs</label>
-        <input
-          type="text"
-          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-          placeholder="z.B. 123456789, 987654321 — per /whoami im Bot herausfinden"
-          value={chatIds}
-          onChange={(e) => setChatIds(e.target.value)}
+      {loadFailed && !config ? (
+        <Callout
+          variant="danger"
+          title="Telegram-Einstellungen konnten nicht geladen werden"
+          action={
+            <Button variant="outline" onClick={() => void refresh()}>
+              Erneut versuchen
+            </Button>
+          }
         />
-        <p className="text-xs text-muted-foreground">
-          Nur diese Telegram-Chats dürfen den Bot steuern. Schreib dem Bot <code className="px-1 bg-accent rounded">/whoami</code>, um deine ID zu erfahren.
-        </p>
-      </div>
+      ) : null}
 
-      <div className="space-y-1.5">
-        <label className="text-sm font-medium">Arbeitsverzeichnis</label>
-        <select
-          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-          value={draft.cwd}
-          onChange={(e) => setDraft((d) => ({ ...d, cwd: e.target.value }))}
-        >
-          <option value="">— wählen —</option>
-          {workspaces.map((w) => (
-            <option key={w.path} value={w.path}>{w.label}</option>
-          ))}
-        </select>
-      </div>
+      {status?.error ? (
+        <Callout variant="danger" title="Fehler der Bridge">
+          {status.error}
+        </Callout>
+      ) : null}
 
-      <div className="grid grid-cols-2 gap-3">
-        <div className="space-y-1.5">
-          <label className="text-sm font-medium">Provider</label>
-          <select className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm" value={draft.provider} onChange={(e) => setDraft((d) => ({ ...d, provider: e.target.value }))}>
-            {PROVIDERS.map((p) => <option key={p} value={p}>{p}</option>)}
-          </select>
-        </div>
-        <div className="space-y-1.5">
-          <label className="text-sm font-medium">Permission-Mode</label>
-          <select className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm" value={draft.permissionMode} onChange={(e) => setDraft((d) => ({ ...d, permissionMode: e.target.value }))}>
-            {PERMISSION_MODES.map((p) => <option key={p} value={p}>{p}</option>)}
-          </select>
-        </div>
-        <div className="space-y-1.5">
-          <label className="text-sm font-medium">Approval-Gate</label>
-          <select className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm" value={draft.approvalMode} onChange={(e) => setDraft((d) => ({ ...d, approvalMode: e.target.value }))}>
-            {APPROVAL_MODES.map((p) => <option key={p} value={p}>{p === "off" ? "aus" : p === "edits" ? "bei Datei-Edits" : "bei Edits + Bash"}</option>)}
-          </select>
-        </div>
-        <div className="space-y-1.5">
-          <label className="text-sm font-medium">Modell (optional)</label>
-          <input type="text" className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm" placeholder="leer = Default" value={draft.model} onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))} />
-        </div>
-      </div>
-
-      <div className="flex items-center gap-2">
-        <button
-          onClick={save}
-          disabled={saving}
-          className="px-4 py-2 text-sm rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 flex items-center gap-1"
-        >
-          {saving ? <Loader2 size={14} className="animate-spin" /> : null}
-          Speichern & anwenden
-        </button>
-        {status && (
-          <span className="text-xs text-muted-foreground flex items-center gap-1">
-            {status.running ? <Check size={12} className="text-green-500" /> : <X size={12} className="text-muted-foreground" />}
-            {status.running ? `Bridge läuft (${status.boundChats} Chats)` : "Bridge gestoppt"}
+      {!config && !loadFailed ? (
+        <SettingsCard aria-busy>
+          <span className="sr-only" role="status">
+            Einstellungen werden geladen …
           </span>
-        )}
-      </div>
-    </section>
+          <div className="space-y-3">
+            <Skeleton className="h-6 w-1/2" />
+            <Skeleton className="h-10 w-full md:h-8" />
+            <Skeleton className="h-10 w-full md:h-8" />
+          </div>
+        </SettingsCard>
+      ) : null}
+
+      {config ? (
+        <>
+          <SettingsCard title="Bridge" icon={<Send />}>
+            <div className="flex flex-col divide-y divide-border">
+              <SwitchRow
+                label="Telegram-Bridge aktivieren"
+                description="Startet den Bot beim Speichern; aus = Bot gestoppt."
+                checked={draft.enabled}
+                onCheckedChange={(v) => setDraft((d) => ({ ...d, enabled: v }))}
+              />
+              <SwitchRow
+                label="Wissensbasis in Antworten einbeziehen"
+                checked={draft.useKnowledge}
+                onCheckedChange={(v) => setDraft((d) => ({ ...d, useKnowledge: v }))}
+              />
+            </div>
+          </SettingsCard>
+
+          <SettingsCard title="Zugang">
+            <div className="flex flex-col gap-4">
+              <Field>
+                <FieldLabel>Bot-Token</FieldLabel>
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <SecretInput
+                    groupClassName="sm:flex-1"
+                    placeholder={config.hasToken ? `gespeichert (${config.tokenMasked}) – leer lassen zum Behalten` : "123456:AA…"}
+                    revealLabel="Token anzeigen"
+                    value={token}
+                    onChange={(e) => setToken(e.target.value)}
+                  />
+                  <Button variant="outline" loading={testing} onClick={() => void testTokenNow()}>
+                    Token testen
+                  </Button>
+                </div>
+                {config.hasToken ? (
+                  <FieldHint>Ein neuer Token ersetzt den gespeicherten beim Speichern.</FieldHint>
+                ) : null}
+              </Field>
+              {config.hasToken ? (
+                <Button variant="danger-ghost" className="self-start" disabled={saving} onClick={() => void removeToken()}>
+                  <Trash2 />
+                  Token entfernen
+                </Button>
+              ) : null}
+
+              <Field>
+                <FieldLabel>Erlaubte Chat-IDs</FieldLabel>
+                <Input
+                  // No numeric keypad: group ids are negative and lists need commas.
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="z. B. 123456789, -1001234567890"
+                  value={chatIds}
+                  onChange={(e) => setChatIds(e.target.value)}
+                />
+                <FieldHint>
+                  Nur diese Telegram-Chats dürfen den Bot steuern. Schreib dem Bot <Code>/whoami</Code>, um deine ID zu
+                  erfahren.
+                </FieldHint>
+              </Field>
+            </div>
+          </SettingsCard>
+
+          <SettingsCard title="Sessions aus Telegram" description="So starten Läufe, die per Telegram kommen.">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field className="sm:col-span-2">
+                <FieldLabel>Arbeitsverzeichnis</FieldLabel>
+                <SimpleSelect
+                  options={workspaceOptions}
+                  value={draft.cwd}
+                  onValueChange={(v) => setDraft((d) => ({ ...d, cwd: v }))}
+                  placeholder="Ordner wählen"
+                />
+              </Field>
+              <Field>
+                <FieldLabel>Agent</FieldLabel>
+                <SimpleSelect
+                  options={PROVIDERS.map((p) => ({ value: p, label: providerLabel(p) }))}
+                  value={draft.provider}
+                  onValueChange={(v) => setDraft((d) => ({ ...d, provider: v }))}
+                />
+              </Field>
+              <Field>
+                <FieldLabel optional="optional">Modell</FieldLabel>
+                <Input
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="leer = Standard"
+                  value={draft.model}
+                  onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))}
+                />
+              </Field>
+              <Field>
+                <FieldLabel>Berechtigungen</FieldLabel>
+                <SimpleSelect
+                  options={PERMISSION_MODES.map((m) => ({ value: m, label: permissionModeLabel(m) }))}
+                  value={draft.permissionMode}
+                  onValueChange={(v) => setDraft((d) => ({ ...d, permissionMode: v }))}
+                />
+              </Field>
+              <Field>
+                <FieldLabel>Freigabe</FieldLabel>
+                <SimpleSelect
+                  options={APPROVAL_MODES.map((m) => ({ value: m, label: approvalModeLabel(m) }))}
+                  value={draft.approvalMode}
+                  onValueChange={(v) => setDraft((d) => ({ ...d, approvalMode: v }))}
+                />
+              </Field>
+            </div>
+            {draft.permissionMode === "bypassPermissions" ? (
+              <Callout variant="warning" className="mt-4">
+                Ohne Rückfrage führt der Agent Befehle aus, ohne dich zu fragen – auch wenn du über Telegram nicht erreichbar
+                bist.
+              </Callout>
+            ) : null}
+          </SettingsCard>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <Button variant="primary" loading={saving} onClick={() => void save()}>
+              Speichern & anwenden
+            </Button>
+            {status ? (
+              <span className="text-sm text-muted-foreground md:text-ui" aria-live="polite">
+                {status.running ? `Bridge läuft (${status.boundChats} ${status.boundChats === 1 ? "Chat" : "Chats"})` : "Bridge gestoppt"}
+              </span>
+            ) : null}
+          </div>
+        </>
+      ) : null}
+    </div>
   );
 }
