@@ -41,6 +41,7 @@ vi.mock("@/lib/ai/provider-factory", () => ({
   }),
 }));
 vi.mock("./runner", () => ({
+  isMarker: (id: string | null | undefined) => !!id && id.includes("~"),
   runTurn: async (row: TurnRow, prompt: string, _key: unknown, emit: TurnEmit) => {
     state.turns.push({ row, prompt });
     return state.turnImpl!(row, prompt, emit);
@@ -256,13 +257,15 @@ describe("subtasks that change no files", () => {
 
     const turn = (text: string) => state.turns.find((t) => t.prompt.includes(text))!;
     const readOnly = {
-      id: "s1", externalId: null, provider: "claude", model: "", cwd: "/tmp/proj",
+      id: "s1", externalId: null, forkSession: false, ephemeral: true, provider: "claude", model: "", cwd: "/tmp/proj",
       permissionMode: "plan", allowedTools: "Read,WebFetch", approvalMode: "off", sandbox: true, interactive: false,
     };
     expect(turn("design it").row).toEqual(readOnly);
     expect(turn("explain it").row).toEqual(readOnly); // role-less: the subtask's flag decides
     expect(turn("build it").row).toEqual({
       ...readOnly, permissionMode: "acceptEdits", allowedTools: "Read,Edit,Bash,WebFetch", approvalMode: "edits",
+      // Someone can answer: questions and permission prompts become cards.
+      interactive: true,
     });
     expect(turn("design it").prompt).toContain("with read-only access");
     expect(turn("build it").prompt).not.toContain("read-only");
@@ -357,5 +360,60 @@ describe("planner limits", () => {
     const c = collector();
     await o.executePlan(session, "t", res.subtasks, c.io);
     expect(c.events.find((e) => e.type === "subtask_start")).toMatchObject({ workerId, workerLabel: `Local: ${model}` });
+  });
+});
+
+// --- The session's conversation ---------------------------------------------------
+
+describe("continuing the session's conversation", () => {
+  it("forks it for the Claude Code planner and workers; reviews and the summary run fresh", async () => {
+    const o = await loadOrchestrator(["claude"]);
+    state.turnImpl = async (_row, prompt, emit) => {
+      if (isPlanner(prompt)) {
+        emit({ type: "text", content: JSON.stringify({ subtasks: [{ id: "s1", title: "Bauen", roleId: "coder", description: "build it", dependsOn: [] }] }) });
+      } else if (isReview(prompt)) {
+        emit({ type: "text", content: "passt\n<verdict>pass</verdict>" });
+      } else {
+        emit({ type: "text", content: "done" });
+      }
+      return ok;
+    };
+    const c = collector();
+    await o.orchestrate({ ...session, externalId: "conv-1" }, "mach weiter", c.io, { orchestra: config() });
+
+    const planner = state.turns.find((t) => isPlanner(t.prompt))!;
+    expect(planner.row).toMatchObject({ externalId: "conv-1", forkSession: true, ephemeral: true });
+    expect(planner.prompt).toContain("this session's history with the user");
+    const work = state.turns.find((t) => t.prompt.includes("build it") && !isReview(t.prompt))!;
+    expect(work.row).toMatchObject({ externalId: "conv-1", forkSession: true, ephemeral: true, interactive: true });
+    expect(work.prompt).toContain("AskUserQuestion");
+    const fresh = state.turns.filter((t) => isReview(t.prompt) || isSynthesis(t.prompt));
+    expect(fresh.length).toBeGreaterThan(0);
+    for (const t of fresh) expect(t.row).toMatchObject({ externalId: null, forkSession: false });
+    expect(state.turns.find((t) => isSynthesis(t.prompt))!.prompt).toContain("short numbered list");
+
+    // The summary is handed over to the session's next turn.
+    const synth = c.rows.find((r) => r.role === "synthesis")!;
+    expect(JSON.parse(synth.meta!)).toEqual({ handoff: "pending", task: "mach weiter" });
+  });
+
+  it("only continues real Claude Code conversations of Claude Code sessions", async () => {
+    const o = await loadOrchestrator(["claude"]);
+    const claude = { kind: "claude-cli" } as Parameters<typeof o.sessionThread>[1];
+    expect(o.sessionThread({ ...session, externalId: "conv-1" }, claude)).toBe("conv-1");
+    expect(o.sessionThread({ ...session, externalId: null }, claude)).toBeNull();
+    expect(o.sessionThread({ ...session, externalId: "opencode~s1" }, claude)).toBeNull();
+    expect(o.sessionThread({ ...session, provider: "pi", externalId: "conv-1" }, claude)).toBeNull();
+    expect(o.sessionThread({ ...session, externalId: "conv-1" }, { kind: "pi" } as typeof claude)).toBeNull();
+  });
+
+  it("tells unattended workers not to stop at a question", async () => {
+    const o = await loadOrchestrator(["claude"]);
+    await o.executePlan(session, "task", [
+      { id: "s1", title: "Lesen", description: "look around", workerId: "claude", dependsOn: [], editsFiles: false },
+    ], collector().io);
+    const t = state.turns.find((x) => x.prompt.includes("look around"))!;
+    expect(t.row).toMatchObject({ interactive: false });
+    expect(t.prompt).toContain("Nobody can answer questions while you work");
   });
 });

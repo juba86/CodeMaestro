@@ -609,6 +609,9 @@ function followRun(token: string, chatId: number, handle: RunHandle): void {
       case "tool_result":
         if (e.isError) append("  ↳ ⚠️ Tool-Fehler\n");
         break;
+      case "notice":
+        if (typeof e.content === "string" && e.content) append(`\nℹ️ ${e.content}\n`);
+        break;
       case "knowledge": {
         const sources = Array.isArray(e.sources) ? (e.sources as string[]) : [];
         if (sources.length) append(`📚 Wissensbasis: ${sources.length} Quelle(n) (${sources.join(", ")})\n`);

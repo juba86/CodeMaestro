@@ -5,7 +5,7 @@ import { planSubtasks, discoverAllWorkers, canEditFiles, toWorkerInfo } from "@/
 import { resolveOrchestra } from "@/lib/assistant/orchestra";
 import { resolveWorkdir } from "@/lib/assistant/security";
 import { SessionBusyError, isSessionBusy } from "@/lib/assistant/run-hub";
-import { toSessionRow } from "@/lib/assistant/session-run";
+import { pendingHandoffContext, toSessionRow } from "@/lib/assistant/session-run";
 
 export const runtime = "nodejs";
 export const maxDuration = 600;
@@ -60,6 +60,7 @@ export async function POST(
       clientProviders,
       plannerWorkerId,
       orchestra,
+      history: await pendingHandoffContext(id),
       signal: req.signal,
     });
     if (costUsd > 0) {

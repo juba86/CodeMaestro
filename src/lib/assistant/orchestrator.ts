@@ -2,11 +2,11 @@ import { promises as fs, constants as fsConstants } from "fs";
 import path from "path";
 import os from "node:os";
 import { prisma } from "@/lib/db/client";
-import { runTurn, type AssistantSessionRow } from "./runner";
+import { isMarker, runTurn, type AssistantSessionRow } from "./runner";
 import { piInfo, syncOllamaModels, type PiModel } from "./pi";
 import type { HubEvent } from "./run-hub";
-import type { RunContext, RunOutcome } from "./session-run";
-import type { TranscriptRow } from "./transcript";
+import { pendingHandoffContext, type RunContext, type RunOutcome } from "./session-run";
+import { HANDOFF_PENDING, type TranscriptRow } from "./transcript";
 import { fetchOllamaModels } from "@/lib/ai/ollama-provider";
 import { createProvider } from "@/lib/ai/provider-factory";
 import { getProvider } from "@/lib/ai/catalog";
@@ -113,6 +113,11 @@ export interface OrchestrationOptions {
   plannerWorkerId?: string;
   /** Roles, their models and review loops. Without enabled roles the planner routes to workers directly. */
   orchestra?: OrchestraConfig | null;
+  /**
+   * Summaries of earlier orchestrations the session's conversation has not
+   * seen yet (session-run.pendingHandoffContext), for the planner and workers.
+   */
+  history?: string;
 }
 
 /** Where an orchestration reports to: live events, ordered transcript rows, Stop. */
@@ -503,9 +508,22 @@ function roleFraming(role: OrchestraRole | undefined): string {
  */
 function workingIn(cwd: string, worker: Worker, edits: boolean): string {
   const readOnly = worker.kind !== "ollama" && worker.kind !== "api" && !edits;
-  return readOnly
+  const where = readOnly
     ? `(You are working in ${cwd} with read-only access: read the project as needed, leave the files as they are, and give your result in your reply.)`
     : `(You are working in ${cwd}.)`;
+  return `${where}\n${askingLine(worker, edits)}`;
+}
+
+/**
+ * How a worker gets decisions from the user. Only a Claude Code run that may
+ * change files is interactive (see cliAccess): its AskUserQuestion becomes a
+ * clickable card and the run waits for the answer. Everyone else runs
+ * unattended, so a question at the end of the reply would stall the task.
+ */
+function askingLine(worker: Worker, edits: boolean): string {
+  return worker.kind === "claude-cli" && edits
+    ? "If you need a decision from the user, ask with the AskUserQuestion tool: the user answers in the app and you continue. Don't end your reply with an open question instead."
+    : "Nobody can answer questions while you work: where a decision is open, take the most sensible option, say which assumption you made, and list remaining questions for the user at the end of your reply.";
 }
 
 /** Keeps the start and the end of a long text (reports end with the summary). */
@@ -524,6 +542,8 @@ interface StreamOpts {
   /** Error events reported by a CLI run. */
   onError?: (msg: string) => void;
   onLog?: (msg: string) => void;
+  /** Notices of a CLI run (blocked tool calls, a conversation that is gone); falls back to onLog. */
+  onNotice?: (msg: string) => void;
 }
 
 interface TextResult {
@@ -565,6 +585,17 @@ function piWorkTools(session: AssistantSessionRow): string {
 const CLI_PROVIDER: Partial<Record<Worker["kind"], string>> = { "claude-cli": "claude", "gemini-cli": "gemini", pi: "pi" };
 
 /**
+ * The session's Claude Code conversation, when `worker` can continue it: a
+ * Claude Code planner or worker of a Claude Code session resumes a fork of it
+ * (--resume … --fork-session), so it knows what was discussed and done before
+ * ("mach weiter" works) without writing into the session's own thread.
+ */
+export function sessionThread(session: AssistantSessionRow, worker: Worker): string | null {
+  const id = session.externalId;
+  return worker.kind === "claude-cli" && session.provider === "claude" && id && !isMarker(id) ? id : null;
+}
+
+/**
  * How a CLI worker runs:
  * - "work": a subtask that changes files — the session's mode, tools, gate
  *   and sandbox (read-only when the worker cannot enforce them);
@@ -589,7 +620,9 @@ function cliAccess(
       allowedTools: pi ? piWorkTools(session) : session.allowedTools,
       approvalMode: session.approvalMode,
       sandbox: session.sandbox,
-      interactive: false,
+      // Questions (AskUserQuestion), plan approvals and permission prompts
+      // reach the user as cards; the worker waits for the answer.
+      interactive: true,
     };
   }
   // Read-only from here on: a "read" subtask, or a worker that cannot enforce
@@ -641,11 +674,17 @@ async function runCli(
   worker: Worker,
   prompt: string,
   mode: CliMode,
-  o: StreamOpts
+  o: StreamOpts,
+  thread: string | null = null
 ): Promise<TextResult> {
   const row: AssistantSessionRow = {
     id: session.id, // same key as the run, so Stop kills this child too
-    externalId: null, // fresh run; subtasks coordinate via the shared filesystem
+    // A fork of the session's conversation (see sessionThread), else a fresh
+    // run; subtasks coordinate via the shared filesystem either way.
+    externalId: thread,
+    forkSession: !!thread,
+    // One-shot: not stored as a resumable conversation of the project.
+    ephemeral: true,
     provider: CLI_PROVIDER[worker.kind] ?? "claude",
     model: worker.model,
     cwd: session.cwd,
@@ -671,7 +710,9 @@ async function runCli(
       return;
     }
     if (e.type === "tool_use" || e.type === "tool_result" || e.type === "thinking") blockEnded = true;
-    if (e.type === "error" && e.content) {
+    if (e.type === "notice" && e.content) {
+      (o.onNotice ?? o.onLog)?.(`${worker.label}: ${e.content}`);
+    } else if (e.type === "error" && e.content) {
       reported = true;
       o.onError?.(e.content);
     } else if (e.type === "result" && e.isError && e.content) {
@@ -827,11 +868,17 @@ async function runChat(worker: Worker, prompt: string, o: StreamOpts): Promise<s
 
 // Runs a worker for plain TEXT output (planning / synthesis) on ANY configured
 // model: CLI workers run a tool-less turn; Ollama/API workers a streamed chat.
-async function runText(session: AssistantSessionRow, worker: Worker, prompt: string, o: StreamOpts): Promise<TextResult> {
+async function runText(
+  session: AssistantSessionRow,
+  worker: Worker,
+  prompt: string,
+  o: StreamOpts,
+  thread: string | null = null
+): Promise<TextResult> {
   if (worker.kind === "ollama" || worker.kind === "api") {
     return { text: await runChat(worker, prompt, o), costUsd: 0, isError: false };
   }
-  return runCli(session, worker, prompt, "text", o);
+  return runCli(session, worker, prompt, "text", o, thread);
 }
 
 // --- Planner --------------------------------------------------------------------
@@ -879,6 +926,10 @@ function plannerWorkers(workers: Worker[]): Worker[] {
 }
 
 // Role-less planning: the planner routes each subtask to a worker directly.
+// Said to a planner that continues the session's conversation (sessionThread).
+const HISTORY_LINE =
+  "\nThe conversation above is this session's history with the user. Use it to understand what the task refers to (e.g. \"continue\" or \"as discussed\"); the workers see it too.";
+
 function workerPlannerPrompt(session: AssistantSessionRow, task: string, workers: Worker[], prefLine: string, guidance: string): string {
   const profile = plannerWorkers(workers)
     .map((w) => {
@@ -1005,9 +1056,13 @@ async function plan(
   opts.onLog?.(choice.note);
   const scope: RoleScope = { workers, session, conductor: choice.worker };
 
+  // A Claude Code planner continues the session's conversation (a fork).
+  const thread = sessionThread(session, choice.worker);
+  const history = opts.history?.trim() ? `\n${clip(opts.history.trim(), 8000)}\n` : "";
+  const planGuidance = `${thread ? HISTORY_LINE : ""}${history}${guidance}`;
   const plannerPrompt = roles.length && opts.orchestra
-    ? rolePlannerPrompt(session, task, roles, opts.orchestra, prefLine, guidance)
-    : workerPlannerPrompt(session, task, workers, prefLine, guidance);
+    ? rolePlannerPrompt(session, task, roles, opts.orchestra, prefLine, planGuidance)
+    : workerPlannerPrompt(session, task, workers, prefLine, planGuidance);
 
   // Fallback: if the planner narrated instead of returning JSON (common for
   // simple questions), don't fail — run the whole task as a single subtask on a
@@ -1033,7 +1088,7 @@ async function plan(
       signal: opts.signal,
       onLog: opts.onLog,
       onError: (m) => { failure ||= m; },
-    });
+    }, thread);
     raw = r.text;
     costUsd = r.costUsd;
   } catch (err) {
@@ -1273,7 +1328,8 @@ export async function executePlan(
       if (worker.kind === "ollama" || worker.kind === "api") {
         await runChat(worker, prompt, stream);
       } else {
-        const r = await runCli(session, worker, prompt, st.editsFiles ? "work" : "read", stream);
+        // Claude Code workers continue a fork of the session's conversation.
+        const r = await runCli(session, worker, prompt, st.editsFiles ? "work" : "read", stream, sessionThread(session, worker));
         costUsd += r.costUsd;
         if (r.isError && !signal?.aborted) isError = true;
       }
@@ -1402,6 +1458,8 @@ export async function executePlan(
 
   const results = new Map<string, string>();
   const reviews = new Map<string, { reviewer: string; verdict: ReviewVerdict; rounds: number }>();
+  // Earlier orchestrations the forked conversation does not know about.
+  const history = opts.history?.trim() ? `\n\n${clip(opts.history.trim(), 4000)}` : "";
 
   for (const { st, worker } of assigned) {
     if (signal?.aborted) return stop();
@@ -1419,7 +1477,7 @@ export async function executePlan(
     // Same condition as runWork → cliAccess: write access only for a subtask
     // that changes files on a worker that may do so in this session.
     const where = workingIn(session.cwd, worker, st.editsFiles && canEditFiles(worker, session));
-    const prompt = `${role ? `${roleFraming(role)}Your subtask:\n${body}` : body}${context}\n\n${where}`;
+    const prompt = `${role ? `${roleFraming(role)}Your subtask:\n${body}` : body}${context}${history}\n\n${where}`;
 
     const errors: string[] = [];
     const fail = (msg: string) => {
@@ -1438,6 +1496,7 @@ export async function executePlan(
       },
       onError: fail,
       onLog: (m) => log(m),
+      onNotice: (m) => log(`„${st.title}“ — ${m}`, true),
     });
     if (errors.length) isError = true;
 
@@ -1484,7 +1543,7 @@ export async function executePlan(
     })
     .join("\n\n");
   const caveats = reviews.size ? "any follow-ups or caveats (including review findings that remain open)" : "any follow-ups or caveats";
-  const synthPrompt = `You orchestrated multiple AI workers on this task:\n"${task}"\n\nHere is what each worker produced:\n\n${summaryInput}\n\nWrite a concise final summary for the user: what was accomplished across the subtasks, any files changed, and ${caveats}. The reports above are your source, so answer from them without using tools.${conductorGuidance(orchestra)}`;
+  const synthPrompt = `You orchestrated multiple AI workers on this task:\n"${task}"\n\nHere is what each worker produced:\n\n${summaryInput}\n\nWrite a concise final summary for the user: what was accomplished across the subtasks, any files changed, and ${caveats}. If the workers left questions or decisions open for the user, end with them as a short numbered list, so the user can answer in the next message. The reports above are your source, so answer from them without using tools.${conductorGuidance(orchestra)}`;
 
   log(`Zusammenfassung: ${conductor.worker.label}`);
   let synth = "";
@@ -1501,7 +1560,9 @@ export async function executePlan(
   } catch (err) {
     synthErrors.push(err instanceof Error ? err.message : String(err));
   }
-  if (synth.trim()) record({ role: "synthesis", content: synth.trim() });
+  // `handoff`: the session's next turn passes this summary on to the agent's
+  // own conversation, which did not see the orchestration (see session-run).
+  if (synth.trim()) record({ role: "synthesis", content: synth.trim(), meta: JSON.stringify({ handoff: HANDOFF_PENDING, task: clip(task, 2000) }) });
   if (signal?.aborted) return stop();
   if (synthErrors.length) {
     const msg = `Zusammenfassung fehlgeschlagen: ${synthErrors[0]}`;
@@ -1557,9 +1618,10 @@ export async function orchestrateRun(
     record: (row) => ctx.writer.add(row),
     signal: ctx.signal,
   };
+  const withHistory = { ...opts, history: opts.history ?? (await pendingHandoffContext(ctx.sessionId)) };
   const res = opts.subtasks?.length
-    ? await executePlan(session, task, opts.subtasks, io, opts)
-    : await orchestrate(session, task, io, opts);
+    ? await executePlan(session, task, opts.subtasks, io, withHistory)
+    : await orchestrate(session, task, io, withHistory);
   if (res.costUsd > 0) {
     await prisma.assistantSession
       .update({ where: { id: ctx.sessionId }, data: { totalCostUsd: { increment: res.costUsd } } })

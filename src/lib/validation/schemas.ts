@@ -154,6 +154,11 @@ export const createAssistantSessionSchema = z.object({
   allowedTools: z.string().max(500).optional().default("Read,Grep,Glob"),
   approvalMode: z.enum(["off", "edits", "all"]).optional().default("off"),
   sandbox: z.boolean().optional().default(false),
+  // Continue an existing Claude Code conversation of the folder (`--resume`).
+  resumeSessionId: z
+    .string()
+    .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, "Ungültige Unterhaltungs-ID.")
+    .optional(),
 });
 
 export const assistantMessageSchema = z.object({

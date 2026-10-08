@@ -85,7 +85,9 @@ CodeMaestro turns AI coding from a single-terminal habit into an operable system
 ### 🤖 Code Assistant
 - Drive **Claude Code**, **Gemini CLI**, **pi** (local models), OpenCode, Codex CLI and Aider on a real working directory, with token-by-token streaming of text and tool calls.
 - **Resumable runs**: work runs server-side; the UI re-attaches after closing the window, reloads, standby or network changes and replays everything it missed (see [docs/ASSISTANT_RUNS.md](./docs/ASSISTANT_RUNS.md)).
-- **Approval gate**: diff or shell command before Edit/Write/Bash, overwrite warnings, expiry countdown, approve / deny / deny-with-reason (the reason goes to the model). Interactive questions and plan approval as clickable cards. Pending decisions wait up to 30 minutes and survive a closed window.
+- **Approval gate**: diff or shell command before Edit/Write/Bash, overwrite warnings, expiry countdown, approve / deny / deny-with-reason (the reason goes to the model). Pending decisions wait up to 30 minutes and survive a closed window.
+- **Claude's questions are answerable**: a permission-prompt tool makes Claude Code's choice questions (AskUserQuestion) and plan approvals clickable cards even in headless runs — in turns, loops, Telegram and orchestrator subtasks — and turns commands outside the allowed tools into approval cards instead of silent denials.
+- **Projekt fortsetzen**: every turn resumes the session's Claude Code conversation (`--resume`); a new session can pick up any earlier Claude Code conversation of the folder (newest preselected); orchestrations run on a fork of it and hand their summary back to the next turn.
 - **Loop mode**: repeat a task until the agent prints `<promise>DONE</promise>`, hits the iteration cap, or reports `<promise>BLOCKED</promise>`; optional pause between iterations; fresh context per iteration with a progress file ("Ralph") or a continued conversation.
 - Permission modes incl. `auto` and `dontAsk`, tool presets (incl. `Git` / `GitHub CLI` only), sandbox, file upload, dev-server launcher (optionally exposed over HTTPS via `tailscale serve`).
 

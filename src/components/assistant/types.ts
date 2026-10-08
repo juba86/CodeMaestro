@@ -110,6 +110,7 @@ type RunEventBody =
   | { type: "knowledge"; sources?: string[] }
   | ApprovalEvent
   | { type: "log"; content?: string; notice?: boolean }
+  | { type: "notice"; content?: string }
   | { type: "plan"; subtasks?: PlannedSubtask[]; roles?: { id: string; name: string; editsFiles: boolean }[] }
   | {
       type: "subtask_start";

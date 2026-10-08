@@ -54,6 +54,7 @@ vi.mock("@/lib/ai/provider-factory", () => ({
   }),
 }));
 vi.mock("./runner", () => ({
+  isMarker: (id: string | null | undefined) => !!id && id.includes("~"),
   runTurn: async (row: TurnRow, prompt: string, _key: unknown, emit: TurnEmit, opts?: { signal?: AbortSignal }) => {
     state.turns.push({ row, prompt, signal: opts?.signal });
     return state.turnImpl!(row, prompt, emit);
@@ -225,9 +226,9 @@ describe("pi execution", () => {
     expect(res).toEqual({ costUsd: 0, isError: false, stopped: false });
     expect(state.turns).toHaveLength(1);
     expect(state.turns[0].row).toEqual({
-      id: "s1", externalId: null, provider: "pi", model: "qwen3-coder:30b", cwd: "/tmp/proj",
+      id: "s1", externalId: null, forkSession: false, ephemeral: true, provider: "pi", model: "qwen3-coder:30b", cwd: "/tmp/proj",
       // The session's tools + pi's read tools + Write (acceptEdits / the gate let Claude write as well).
-      permissionMode: "acceptEdits", allowedTools: "Read,Edit,Bash,Grep,Glob,Write", approvalMode: "edits", sandbox: false, interactive: false,
+      permissionMode: "acceptEdits", allowedTools: "Read,Edit,Bash,Grep,Glob,Write", approvalMode: "edits", sandbox: false, interactive: true,
     });
     expect(c.events.find((e) => e.type === "subtask_start")).toMatchObject({ workerId: PI_CODER, workerLabel: "pi · qwen3-coder:30b" });
     expect(c.events.filter((e) => e.type === "subtask_text").map((e) => e.content).join("")).toBe("edited src/a.ts");
@@ -271,7 +272,7 @@ describe("pi execution", () => {
     await o.planSubtasks(session, "t", { orchestra });
     const planner = state.turns.find((t) => isPlanner(t.prompt))!;
     expect(planner.row).toEqual({
-      id: "s1", externalId: null, provider: "pi", model: "gemma4:31b", cwd: "/tmp/proj", permissionMode: "plan", allowedTools: "Read,Grep,Glob",
+      id: "s1", externalId: null, forkSession: false, ephemeral: true, provider: "pi", model: "gemma4:31b", cwd: "/tmp/proj", permissionMode: "plan", allowedTools: "Read,Grep,Glob",
     });
 
     state.turns = [];
@@ -345,7 +346,7 @@ describe("pi execution", () => {
     }
     // The runner refuses Gemini with a gate set, so the row must not carry it.
     expect(state.turns[0].row).toEqual({
-      id: "s1", externalId: null, provider: "gemini", model: "", cwd: "/tmp/proj",
+      id: "s1", externalId: null, forkSession: false, ephemeral: true, provider: "gemini", model: "", cwd: "/tmp/proj",
       permissionMode: "default", allowedTools: "Read,WebSearch", approvalMode: "off", sandbox: false, interactive: false,
     });
     expect(c.rows.filter((r) => r.role === "system").map((r) => r.content)).toEqual([

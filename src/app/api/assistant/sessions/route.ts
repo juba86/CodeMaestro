@@ -4,6 +4,7 @@ import { createAssistantSessionSchema, formatZodError } from "@/lib/validation/s
 import { resolveWorkdir } from "@/lib/assistant/security";
 import { isSessionBusy } from "@/lib/assistant/run-hub";
 import { supportsApprovalGate, supportsSandbox } from "@/lib/assistant/runner";
+import { readClaudeSession } from "@/lib/assistant/claude-sessions";
 import { approvalModeLabel, providerLabel } from "@/lib/labels";
 
 export const runtime = "nodejs";
@@ -47,7 +48,8 @@ export async function POST(req: NextRequest) {
     // Refuse protection the agent cannot honour instead of silently dropping it
     // (the user asked for a gate and must not get an ungated agent with a 201).
     // The New-Session sheet never sends these combinations.
-    const { provider, approvalMode, sandbox } = parsed.data;
+    const { resumeSessionId, ...data } = parsed.data;
+    const { provider, approvalMode, sandbox } = data;
     if (approvalMode !== "off" && !supportsApprovalGate(provider)) {
       return NextResponse.json(
         {
@@ -67,9 +69,17 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // "Projekt fortsetzen": only Claude Code resumes its own conversations.
+    if (resumeSessionId && provider !== "claude") {
+      return NextResponse.json(
+        { error: "Nur Claude Code kann eine bisherige Unterhaltung fortsetzen.", code: "VALIDATION_ERROR" },
+        { status: 400 }
+      );
+    }
+
     let cwd: string;
     try {
-      cwd = await resolveWorkdir(parsed.data.cwd);
+      cwd = await resolveWorkdir(data.cwd);
     } catch (err) {
       return NextResponse.json(
         { error: err instanceof Error ? err.message : "Invalid working directory", code: "INVALID_CWD" },
@@ -77,10 +87,51 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const session = await prisma.assistantSession.create({ data: { ...parsed.data, cwd } });
-    return NextResponse.json({ session }, { status: 201 });
+    let title = data.title;
+    if (resumeSessionId) {
+      // Must be a conversation of THIS folder: --resume runs in the session's cwd.
+      const conversation = await readClaudeSession(cwd, resumeSessionId);
+      if (!conversation) {
+        return NextResponse.json(
+          { error: "Unterhaltung nicht gefunden – sie gehört nicht (mehr) zu diesem Projektordner.", code: "RESUME_NOT_FOUND" },
+          { status: 400 }
+        );
+      }
+      // externalId is unique: a conversation belongs to one CodeMaestro session.
+      const linked = await linkedSession(conversation.id);
+      if (linked) return alreadyLinked(linked);
+      if (!title.trim()) title = conversation.title.slice(0, 200);
+    }
+
+    try {
+      const session = await prisma.assistantSession.create({
+        data: { ...data, title, cwd, ...(resumeSessionId ? { externalId: resumeSessionId } : {}) },
+      });
+      return NextResponse.json({ session }, { status: 201 });
+    } catch (err) {
+      // Lost a race with another request linking the same conversation.
+      const linked = resumeSessionId && isUniqueViolation(err) ? await linkedSession(resumeSessionId) : null;
+      if (linked) return alreadyLinked(linked);
+      throw err;
+    }
   } catch (err) {
     console.error("[POST /api/assistant/sessions]", err);
     return NextResponse.json({ error: "Internal server error", code: "INTERNAL_ERROR" }, { status: 500 });
   }
+}
+
+async function linkedSession(externalId: string): Promise<string | null> {
+  const row = await prisma.assistantSession.findUnique({ where: { externalId }, select: { id: true } });
+  return row?.id ?? null;
+}
+
+function alreadyLinked(sessionId: string) {
+  return NextResponse.json(
+    { error: "Diese Unterhaltung ist schon in CodeMaestro geöffnet.", code: "ALREADY_LINKED", sessionId },
+    { status: 409 }
+  );
+}
+
+function isUniqueViolation(err: unknown): boolean {
+  return !!err && typeof err === "object" && (err as { code?: unknown }).code === "P2002";
 }

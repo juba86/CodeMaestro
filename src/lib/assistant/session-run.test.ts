@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
 // --- In-memory Prisma stand-in -------------------------------------------------
-type Row = { sessionId: string; role: string; content: string; meta: string; createdAt: Date };
+type Row = { id?: string; sessionId: string; role: string; content: string; meta: string; createdAt: Date };
 const db = vi.hoisted(() => ({
   sessions: new Map<string, Record<string, unknown>>(),
   messages: [] as Row[],
@@ -27,8 +27,26 @@ vi.mock("@/lib/db/client", () => ({
     },
     assistantMessage: {
       create: vi.fn(async ({ data }: { data: Row }) => {
-        db.messages.push(data);
-        return data;
+        const row = { id: `m${db.messages.length + 1}`, ...data };
+        db.messages.push(row);
+        return row;
+      }),
+      findMany: vi.fn(async ({ where, orderBy, take }: {
+        where: { sessionId: string; role: string; meta: { contains: string } };
+        orderBy: { createdAt: "asc" | "desc" };
+        take: number;
+      }) => {
+        const rows = db.messages
+          .filter((m) => m.sessionId === where.sessionId && m.role === where.role && m.meta.includes(where.meta.contains))
+          .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+        return (orderBy.createdAt === "desc" ? rows.reverse() : rows).slice(0, take);
+      }),
+      findUnique: vi.fn(async ({ where }: { where: { id: string } }) => db.messages.find((m) => m.id === where.id) ?? null),
+      update: vi.fn(async ({ where, data }: { where: { id: string }; data: Partial<Row> }) => {
+        const m = db.messages.find((x) => x.id === where.id);
+        if (!m) throw new Error("not found");
+        Object.assign(m, data);
+        return m;
       }),
     },
   },
@@ -73,6 +91,47 @@ let n = 0;
 beforeEach(() => {
   db.messages.length = 0;
   runTurnMock.mockReset();
+});
+
+describe("orchestration handoff", () => {
+  it("passes a pending orchestration summary to the next turn once", async () => {
+    const id = `sr-${++n}`;
+    seedSession(id);
+    db.messages.push({
+      id: "syn-1", sessionId: id, role: "synthesis", content: "Login gebaut.\n1. Datenbank A oder B?",
+      meta: JSON.stringify({ handoff: "pending", task: "Login bauen" }), createdAt: new Date(Date.now() - 1000),
+    });
+    const prompts: string[] = [];
+    runTurnMock.mockImplementation(async (_row, prompt: string) => {
+      prompts.push(prompt);
+      return { externalId: "conv-9", costUsd: 0, isError: false };
+    });
+
+    const first = await launchRun({ sessionId: id, kind: "turn", origin: "pwa", work: (ctx) => executeTurn(ctx, "B bitte") });
+    await first.finished;
+    expect(prompts[0]).toContain("<task>\nLogin bauen\n</task>");
+    expect(prompts[0]).toContain("1. Datenbank A oder B?");
+    expect(prompts[0].endsWith("B bitte")).toBe(true);
+    expect(JSON.parse(db.messages.find((m) => m.id === "syn-1")!.meta)).toMatchObject({ handoff: "done", task: "Login bauen" });
+    expect(db.messages.some((m) => m.role === "system" && m.content.includes("an den Agenten übergeben"))).toBe(true);
+
+    const second = await launchRun({ sessionId: id, kind: "turn", origin: "pwa", work: (ctx) => executeTurn(ctx, "weiter") });
+    await second.finished;
+    expect(prompts[1]).toBe("weiter");
+  });
+
+  it("keeps the summary pending when the turn failed", async () => {
+    const id = `sr-${++n}`;
+    seedSession(id);
+    db.messages.push({
+      id: "syn-2", sessionId: id, role: "synthesis", content: "Fertig.",
+      meta: JSON.stringify({ handoff: "pending" }), createdAt: new Date(Date.now() - 1000),
+    });
+    runTurnMock.mockImplementation(async () => ({ externalId: null, costUsd: 0, isError: true }));
+    const run = await launchRun({ sessionId: id, kind: "turn", origin: "pwa", work: (ctx) => executeTurn(ctx, "x") });
+    await run.finished;
+    expect(JSON.parse(db.messages.find((m) => m.id === "syn-2")!.meta).handoff).toBe("pending");
+  });
 });
 
 describe("launchRun + executeTurn", () => {
@@ -120,7 +179,8 @@ describe("launchRun + executeTurn", () => {
     const id = `sr-${++n}`;
     seedSession(id);
     runTurnMock.mockImplementation(async (_row, _p, _k, emit, opts: { signal: AbortSignal }) => {
-      await new Promise<void>((resolve) => opts.signal.addEventListener("abort", () => resolve()));
+      // Like the runner: an abort before the start ends the turn at once.
+      if (!opts.signal.aborted) await new Promise<void>((resolve) => opts.signal.addEventListener("abort", () => resolve()));
       emit({ type: "error", content: "Gestoppt." });
       return { externalId: null, costUsd: 0, isError: true };
     });

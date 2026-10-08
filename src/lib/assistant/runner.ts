@@ -32,13 +32,29 @@ export interface AssistantSessionRow {
   allowedTools: string;
   approvalMode?: string; // off | edits | all
   sandbox?: boolean;
-  // When true (live PWA turns), install a PreToolUse hook for Claude's interactive
-  // tools (AskUserQuestion / ExitPlanMode) so the UI can surface clickable options.
-  // Left off for orchestrator/Telegram turns that have no question UI.
+  // When true (someone can answer: PWA/Telegram turns, orchestrator subtasks
+  // that change files), Claude Code gets CodeMaestro's permission-prompt tool
+  // (scripts/assistant-permission-mcp.mjs): AskUserQuestion / ExitPlanMode
+  // become available headless and surface as clickable cards, and tool calls
+  // that would need a permission prompt become approval cards instead of
+  // being denied silently. Left off for unattended runs (loops, read-only
+  // workers), which keep `claude -p`'s silent deny.
   interactive?: boolean;
+  // With externalId: continue a copy of that conversation (--fork-session)
+  // instead of the conversation itself — orchestrator workers get the
+  // session's context without writing into its thread.
+  forkSession?: boolean;
+  // One-shot Claude run (orchestrator planner, workers, reviews): not stored
+  // as a conversation (--no-session-persistence), so it never shows up as a
+  // project conversation to continue.
+  ephemeral?: boolean;
 }
 
 const HOOK_PATH = path.join(process.cwd(), "scripts", "assistant-approval-hook.mjs");
+// Permission-prompt tool (stdio MCP server) for interactive Claude runs.
+const PERMISSION_MCP_PATH = path.join(process.cwd(), "scripts", "assistant-permission-mcp.mjs");
+const PERMISSION_MCP_SERVER = "codemaestro";
+export const PERMISSION_PROMPT_TOOL = `mcp__${PERMISSION_MCP_SERVER}__permission`;
 // pi approval gate (a pi extension; pi refuses to start when it fails to load).
 const PI_EXTENSION_PATH = path.join(process.cwd(), "scripts", "pi-approval-extension.ts");
 
@@ -104,8 +120,47 @@ function buildSettingsFile(session: AssistantSessionRow, opts: { github: boolean
   return file;
 }
 
+/** Child env of the approval bridge (hook and permission tool). */
+function bridgeEnv(session: AssistantSessionRow): Record<string, string> {
+  return {
+    PB_BASE_URL: internalBaseUrl(),
+    PB_SESSION_ID: session.id,
+    PB_HOOK_TOKEN: hookToken(),
+    PB_APPROVAL_TIMEOUT_MS: String(approvalTimeoutMs()),
+  };
+}
+
+/**
+ * Writes the --mcp-config file that registers the permission-prompt tool for
+ * an interactive Claude run, or returns null (not interactive / script
+ * missing — then `claude -p` keeps denying silently, as before). The bridge
+ * env goes into the file (0600) rather than the command line, where the hook
+ * token would show up in `ps`.
+ */
+function buildPermissionMcpFile(session: AssistantSessionRow): string | null {
+  if (!session.interactive || !existsSync(PERMISSION_MCP_PATH)) return null;
+  const config = {
+    mcpServers: {
+      [PERMISSION_MCP_SERVER]: {
+        type: "stdio",
+        command: process.execPath,
+        args: [PERMISSION_MCP_PATH],
+        env: bridgeEnv(session),
+      },
+    },
+  };
+  const file = path.join(tmpdir(), `pb-mcp-${session.id}-${Date.now()}.json`);
+  writeFileSync(file, JSON.stringify(config), { mode: 0o600 });
+  return file;
+}
+
+const removeFile = (file: string | null) => {
+  if (file) { try { unlinkSync(file); } catch { /* ignore */ } }
+};
+
 export interface NormalizedEvent {
-  type: "init" | "text" | "thinking" | "tool_use" | "tool_result" | "result" | "error" | "done" | "knowledge";
+  // "notice": an informational line for the transcript (stored as a system row).
+  type: "init" | "text" | "thinking" | "tool_use" | "tool_result" | "result" | "error" | "done" | "knowledge" | "notice";
   content?: string;
   name?: string;
   input?: unknown;
@@ -213,15 +268,21 @@ export function supportsSandbox(provider: string): boolean {
   return provider === "claude";
 }
 
-function claudeArgs(session: AssistantSessionRow, prompt: string, settingsFile: string | null): string[] {
+function claudeArgs(session: AssistantSessionRow, prompt: string, settingsFile: string | null, mcpFile: string | null = null): string[] {
   // --include-partial-messages streams text token by token (stream_event).
   const args = ["-p", prompt, "--output-format", "stream-json", "--verbose", "--include-partial-messages"];
-  if (session.externalId) args.push("--resume", session.externalId);
+  if (session.externalId) {
+    args.push("--resume", session.externalId);
+    if (session.forkSession) args.push("--fork-session");
+  }
+  if (session.ephemeral) args.push("--no-session-persistence");
   if (session.model) args.push("--model", session.model);
   args.push("--permission-mode", session.permissionMode || "default");
   const tools = (session.allowedTools || "").trim();
   if (tools) args.push("--allowedTools", tools);
   if (settingsFile) args.push("--settings", settingsFile);
+  // --mcp-config takes several values; the next option ends the list.
+  if (mcpFile) args.push("--mcp-config", mcpFile, "--permission-prompt-tool", PERMISSION_PROMPT_TOOL);
   // Confine file access to the working directory.
   args.push("--add-dir", session.cwd);
   return args;
@@ -363,10 +424,7 @@ function piTurn(session: AssistantSessionRow, models: Array<{ id: string; toolsO
 
   const env: Record<string, string> = { ...piEnv() };
   if (gated.length) {
-    env.PB_BASE_URL = internalBaseUrl();
-    env.PB_SESSION_ID = session.id;
-    env.PB_HOOK_TOKEN = hookToken();
-    env.PB_APPROVAL_TIMEOUT_MS = String(approvalTimeoutMs());
+    Object.assign(env, bridgeEnv(session));
     env.CM_PI_GATED = gated.join(",");
   }
   return { args, env, mapper: new PiEventMapper(model) };
@@ -406,12 +464,38 @@ interface ClaudeStreamLine {
   result?: string;
   total_cost_usd?: number;
   is_error?: boolean;
+  // Tool calls `claude -p` denied because nobody could approve them.
+  permission_denials?: Array<{ tool_name?: string; tool_input?: Record<string, unknown> }>;
 }
+
+// Claude Code's error for `--resume <id>` when the conversation is not stored
+// for this working directory (moved project, cleaned ~/.claude, other user).
+const RESUME_MISSING = /No conversation found with session ID/i;
+
+/** One line per denied tool call, e.g. "Bash: npm install". */
+export function describeDenials(denials: ClaudeStreamLine["permission_denials"]): string[] {
+  const out: string[] = [];
+  for (const d of denials ?? []) {
+    const tool = d?.tool_name || "Werkzeug";
+    const input = d?.tool_input ?? {};
+    const target = [input.command, input.file_path, input.notebook_path, input.url, input.pattern, input.query]
+      .find((v) => typeof v === "string" && v.trim());
+    const line = target ? `${tool}: ${String(target).replace(/\s+/g, " ").trim()}` : tool;
+    if (!out.includes(line)) out.push(line.length > 200 ? `${line.slice(0, 199)}…` : line);
+  }
+  return out;
+}
+
+type TurnAttempt = TurnResult & { resumeMissing?: boolean };
 
 /**
  * Runs one assistant turn by spawning the CLI, parsing its stream-json/json
  * output, and invoking `emit` for each normalized event. Resolves when the
  * process exits. The child is registered in `procs` so it can be stopped.
+ *
+ * A Claude conversation that cannot be resumed (`--resume` finds nothing for
+ * this working directory) is not a dead end: the turn reports it once and
+ * runs again as a new conversation.
  */
 export async function runTurn(
   session: AssistantSessionRow,
@@ -420,6 +504,23 @@ export async function runTurn(
   emit: (e: NormalizedEvent) => void,
   opts: { signal?: AbortSignal } = {}
 ): Promise<TurnResult> {
+  const first = await runTurnOnce(session, prompt, apiKey, emit, opts);
+  if (!first.resumeMissing) return { externalId: first.externalId, costUsd: first.costUsd, isError: first.isError };
+  emit({
+    type: "notice",
+    content: `Die bisherige Claude-Code-Unterhaltung (${session.externalId?.slice(0, 8)}…) gibt es in ${session.cwd} nicht mehr — es startet eine neue Unterhaltung.`,
+  });
+  const retry = await runTurnOnce({ ...session, externalId: null, forkSession: false }, prompt, apiKey, emit, opts);
+  return { externalId: retry.externalId, costUsd: retry.costUsd, isError: retry.isError };
+}
+
+async function runTurnOnce(
+  session: AssistantSessionRow,
+  prompt: string,
+  apiKey: string | undefined,
+  emit: (e: NormalizedEvent) => void,
+  opts: { signal?: AbortSignal }
+): Promise<TurnAttempt> {
   const plain = isPlainAgent(session.provider);
   const isGemini = session.provider === "gemini";
   const isPi = session.provider === "pi";
@@ -483,12 +584,16 @@ export async function runTurn(
     pi = prep;
   }
 
-  // Approval hook + sandbox are Claude-Code-specific (PreToolUse settings).
+  // Approval hook + sandbox are Claude-Code-specific (PreToolUse settings), as
+  // is the permission-prompt tool of interactive runs.
   let settingsFile: string | null = null;
+  let mcpFile: string | null = null;
   if (kind === "claude") {
     try {
       settingsFile = buildSettingsFile(session, { github });
+      mcpFile = buildPermissionMcpFile(session);
     } catch (err) {
+      removeFile(settingsFile);
       emit({ type: "error", content: err instanceof Error ? err.message : String(err) });
       emit({ type: "done" });
       return { externalId: session.externalId, costUsd: 0, isError: true };
@@ -501,7 +606,7 @@ export async function runTurn(
       ? geminiArgs(session, prompt)
       : pi
         ? pi.args
-        : claudeArgs(session, prompt, settingsFile);
+        : claudeArgs(session, prompt, settingsFile, mcpFile);
 
   const env: NodeJS.ProcessEnv = { ...process.env, ...ghEnv };
   if (isGemini && apiKey) {
@@ -514,11 +619,12 @@ export async function runTurn(
   }
   // The approval hook (a child of claude) calls back into this server and
   // authenticates with a per-process token.
-  if (settingsFile) {
-    env.PB_BASE_URL = internalBaseUrl();
-    env.PB_SESSION_ID = session.id;
-    env.PB_HOOK_TOKEN = hookToken();
-    env.PB_APPROVAL_TIMEOUT_MS = String(approvalTimeoutMs());
+  if (settingsFile) Object.assign(env, bridgeEnv(session));
+  if (mcpFile) {
+    // The permission tool waits for the user as long as an approval may take;
+    // Claude Code must not give up on the MCP call first.
+    const wait = approvalTimeoutMs() + 120_000;
+    if (!(Number(env.MCP_TOOL_TIMEOUT) >= wait)) env.MCP_TOOL_TIMEOUT = String(wait);
   }
   if (pi) Object.assign(env, pi.env);
 
@@ -530,7 +636,8 @@ export async function runTurn(
   try {
     child = spawn(bin, args, { cwd: session.cwd, env, detached: process.platform !== "win32" });
   } catch (err) {
-    if (settingsFile) { try { unlinkSync(settingsFile); } catch { /* ignore */ } }
+    removeFile(settingsFile);
+    removeFile(mcpFile);
     emit({ type: "error", content: `Failed to start ${bin}: ${err instanceof Error ? err.message : String(err)}${installHint}` });
     return { externalId: session.externalId, costUsd: 0, isError: true };
   }
@@ -556,6 +663,7 @@ export async function runTurn(
   let externalId = session.externalId;
   let costUsd = 0;
   let isError = false;
+  let sawInit = false;
   let stdoutBuffer = "";
   let stderr = "";
   // Decode UTF-8 across chunk boundaries (a multi-byte character can be split).
@@ -580,6 +688,7 @@ export async function runTurn(
       return;
     }
     if (obj.type === "system" && obj.subtype === "init") {
+      sawInit = true;
       if (obj.session_id) externalId = obj.session_id;
       emitNow({ type: "init", sessionId: obj.session_id, model: obj.model });
       return;
@@ -627,6 +736,15 @@ export async function runTurn(
       if (obj.session_id) externalId = obj.session_id;
       if (typeof obj.total_cost_usd === "number") costUsd = obj.total_cost_usd;
       isError = !!obj.is_error;
+      // Unattended runs deny what would need a prompt without asking; say so,
+      // otherwise the agent's "waiting for approval" has no visible cause.
+      const denied = session.interactive ? [] : describeDenials(obj.permission_denials);
+      if (denied.length) {
+        emitNow({
+          type: "notice",
+          content: `Ohne Freigabe blockiert (${denied.length}): ${denied.slice(0, 8).join(" · ")}${denied.length > 8 ? " · …" : ""}. Erlaube die Werkzeuge in der Session oder starte die Aufgabe als normale Nachricht, dann kommen Freigabe-Karten.`,
+        });
+      }
       emitNow({ type: "result", content: obj.result, costUsd, isError });
     }
   };
@@ -645,7 +763,7 @@ export async function runTurn(
     else handleClaudeLine(line);
   };
 
-  return await new Promise<TurnResult>((resolve) => {
+  return await new Promise<TurnAttempt>((resolve) => {
     child.stdout.on("data", (chunk: Buffer) => {
       const text = outDecoder.write(chunk);
       if (!text) return;
@@ -678,7 +796,8 @@ export async function runTurn(
     child.on("close", (code, signal) => {
       untrackProc(session.id, child);
       opts.signal?.removeEventListener("abort", onAbort);
-      if (settingsFile) { try { unlinkSync(settingsFile); } catch { /* ignore */ } }
+      removeFile(settingsFile);
+      removeFile(mcpFile);
       const tail = outDecoder.end();
       if (tail) {
         if (kind === "plain") emit({ type: "text", content: tail });
@@ -721,6 +840,13 @@ export async function runTurn(
         handleClaudeLine(stdoutBuffer);
       }
       flushPending();
+
+      // `--resume` of a conversation that is gone: no output at all — runTurn
+      // reports it and starts a new conversation instead of failing the turn.
+      if (kind === "claude" && code !== 0 && !sawInit && session.externalId && !opts.signal?.aborted && RESUME_MISSING.test(stderr)) {
+        resolve({ externalId: null, costUsd: 0, isError: true, resumeMissing: true });
+        return;
+      }
 
       if (code !== 0 && !isError) {
         isError = true;

@@ -166,6 +166,18 @@ async function readExisting(filePath?: string): Promise<string | null> {
   }
 }
 
+/** File path or a one-line summary of a generic tool call's input. */
+function describeOther(input: Record<string, unknown>): Pick<ApprovalEvent, "filePath" | "command"> {
+  const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : "");
+  const file = str(input.file_path) || str(input.notebook_path) || str(input.path);
+  if (file) return { filePath: file };
+  const target = str(input.url) || str(input.query) || str(input.pattern) || str(input.command) || str(input.prompt);
+  if (target) return { command: target.slice(0, 2000) };
+  let json = "";
+  try { json = JSON.stringify(input); } catch { /* unserializable */ }
+  return json && json !== "{}" ? { command: json.slice(0, 2000) } : {};
+}
+
 async function buildEvent(approvalId: string, tool: string, input: ToolInput): Promise<ApprovalEvent> {
   if (tool === "Bash") {
     return { type: "approval_request", approvalId, tool, command: input.command || "" };
@@ -192,6 +204,11 @@ async function buildEvent(approvalId: string, tool: string, input: ToolInput): P
   if (tool === "NotebookEdit") {
     const diff = safeDiff("", input.new_source || "");
     return { type: "approval_request", approvalId, tool, filePath: input.notebook_path, diff };
+  }
+  if (tool !== "Edit") {
+    // Any other tool that needs permission (WebFetch, a read outside the
+    // project, an MCP tool, …): name its target instead of an empty diff.
+    return { type: "approval_request", approvalId, tool, ...describeOther(input as Record<string, unknown>) };
   }
   // Edit
   const diff = safeDiff(input.old_string || "", input.new_string || "");

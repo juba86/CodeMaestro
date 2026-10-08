@@ -217,6 +217,12 @@ function applyItems(state: LiveState, e: RunEvent): LiveState {
     case "error":
       if (!e.content) return state;
       return push(state, row({ role: "error", content: e.content, at, subtaskId: e.subtaskId }, e.subtaskId ? { subtaskId: e.subtaskId } : undefined));
+    case "notice":
+      // Persisted as a system row by the transcript writer.
+      return e.content ? push(state, row({ role: "system", content: e.content, at }, { notice: true })) : state;
+    case "log":
+      // Orchestrator notes marked as notices are persisted as system rows too.
+      return e.notice && e.content ? push(state, row({ role: "system", content: e.content, at }, { notice: true })) : state;
     case "knowledge": {
       // Same rule as the transcript writer: nothing retrieved → no row.
       const sources = e.sources ?? [];

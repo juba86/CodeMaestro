@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { ChevronRight, RefreshCw, Rocket } from "lucide-react";
+import { ArrowRight, ChevronRight, History, RefreshCw, Rocket } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button, IconButton } from "@/components/ui/button";
@@ -17,32 +17,47 @@ import { Sheet, SheetBody, SheetContent, SheetDescription, SheetHeader, SheetTit
 import { SwitchRow } from "@/components/ui/switch";
 import { ToggleChip } from "@/components/ui/toggle-chip";
 import { SELECTABLE_TOOLS } from "@/lib/assistant/tool-rules";
+import { formatRelative } from "@/lib/format";
 import { approvalModeLabel, permissionModeLabel, toolLabel } from "@/lib/labels";
 import { FolderBrowser, useBrowse } from "./folder-browser";
 import {
   AGENTS,
   APPROVAL_CAPABLE,
+  CONVERSATIONS_COLLAPSED,
+  NEW_CONVERSATION,
   NEW_SESSION_STORAGE_KEY,
   PRESET_DESCRIPTION,
   PRESET_LABEL,
   SANDBOX_CAPABLE,
   agentLabel,
+  alreadyLinkedSessionId,
   applyPreset,
   capabilityFields,
   capabilityNote,
   chipPressed,
   commandRulesHint,
+  conversationAction,
+  conversationChoice,
+  conversationTitle,
+  conversationsUrl,
   defaultPreset,
   draftSummary,
   matchPreset,
   needsAutonomyConsent,
+  offersResume,
+  parseConversations,
   parseStoredDraft,
   presetDisabledReason,
+  resumeFields,
+  startLabel,
   switchAgent,
   toggleChip,
   toolChips,
   ungatedWarning,
+  visibleConversations,
   type ApprovalMode,
+  type ClaudeConversation,
+  type ConversationPick,
   type PermissionPreset,
   type SessionDraft,
 } from "./new-session";
@@ -52,6 +67,16 @@ import type { SessionSummary } from "./types";
 
 const FALLBACK_TOOLS = [...SELECTABLE_TOOLS];
 const FALLBACK_MODES = ["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"];
+/** Wait while the user clicks through folders before asking for their conversations. */
+const CONVERSATIONS_DEBOUNCE_MS = 250;
+const CONVERSATIONS_TIMEOUT_MS = 8000;
+
+/** The folder's Claude Code conversations as last loaded (`cwd` = the folder they belong to). */
+interface ConversationList {
+  cwd: string;
+  list: ClaudeConversation[];
+  failed: boolean;
+}
 
 function initialDraft(): SessionDraft {
   return applyPreset({ provider: "claude", model: "", permissionMode: "default", allowedTools: [], approvalMode: "off", sandbox: false }, "gated");
@@ -68,7 +93,7 @@ export interface NewSessionSheetProps {
   onCreated: (sessionId: string) => void;
 }
 
-/** New Session sheet (DESIGN.md §6.2.3): folder, agent, model, permissions, advanced. */
+/** New Session sheet (DESIGN.md §6.2.3): folder, agent, conversation to continue, model, permissions, advanced. */
 export function NewSessionSheet({ open, onOpenChange, sessions, initialCwd, title, onCreated }: NewSessionSheetProps) {
   const [draft, setDraft] = React.useState<SessionDraft>(initialDraft);
   const [cwd, setCwd] = React.useState("");
@@ -79,6 +104,10 @@ export function NewSessionSheet({ open, onOpenChange, sessions, initialCwd, titl
   const [creating, setCreating] = React.useState(false);
   const { browse, error: browseError, load } = useBrowse(setCwd);
   const recent = React.useMemo(() => recentFolders(sessions, 5), [sessions]);
+  // „Projekt fortsetzen": the folder's Claude Code conversations and the user's pick.
+  const [conversations, setConversations] = React.useState<ConversationList | null>(null);
+  const [pick, setPick] = React.useState<ConversationPick | null>(null);
+  const [expandedCwd, setExpandedCwd] = React.useState<string | null>(null);
 
   // Restore the remembered settings and open the folder each time the sheet opens.
   const opened = React.useRef(false);
@@ -121,6 +150,63 @@ export function NewSessionSheet({ open, onOpenChange, sessions, initialCwd, titl
     };
   }, [open, initialCwd, load]);
 
+  // Load the folder's conversations (debounced while browsing; a stale answer is aborted).
+  const resumable = open && offersResume(draft.provider, cwd);
+  React.useEffect(() => {
+    if (!resumable) return;
+    const ctrl = new AbortController();
+    let cancelled = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const timer = setTimeout(async () => {
+      timeout = setTimeout(() => ctrl.abort(), CONVERSATIONS_TIMEOUT_MS);
+      let next: ConversationList;
+      try {
+        const res = await fetch(conversationsUrl(cwd), { cache: "no-store", signal: ctrl.signal });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        next = { cwd, list: parseConversations(await res.json()), failed: false };
+      } catch {
+        // Not fatal: the session simply starts a new conversation.
+        next = { cwd, list: [], failed: true };
+      } finally {
+        clearTimeout(timeout);
+      }
+      if (!cancelled) setConversations(next);
+    }, CONVERSATIONS_DEBOUNCE_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      clearTimeout(timeout);
+      ctrl.abort();
+    };
+  }, [resumable, cwd]);
+
+  const loaded = resumable && conversations?.cwd === cwd ? conversations : null;
+  const conversationList = loaded?.list ?? [];
+  const conversationsLoading = resumable && !loaded;
+  const choice = conversationChoice(pick, cwd, conversationList);
+  const action = conversationAction(draft.provider, choice, conversationList);
+  const expanded = expandedCwd === cwd;
+  const shownConversations = visibleConversations(conversationList, choice, expanded);
+  const linkedTitle =
+    action.kind === "open" ? sessions.find((s) => s.id === action.sessionId)?.title || conversationTitle(action.conversation) : "";
+
+  // Closing forgets the conversations and the pick: the next open lists them
+  // afresh (one may have been linked meanwhile) and preselects the newest again.
+  function changeOpen(next: boolean) {
+    if (!next) {
+      setConversations(null);
+      setPick(null);
+      setExpandedCwd(null);
+    }
+    onOpenChange(next);
+  }
+
+  /** Opens the CodeMaestro session that already continues the conversation. */
+  function openLinked(sessionId: string) {
+    changeOpen(false);
+    onCreated(sessionId);
+  }
+
   const isPi = draft.provider === "pi";
   const pi = usePiStatus(open && isPi);
   const piModels = pi.status ? sortPiModels(pi.status.models) : [];
@@ -136,16 +222,24 @@ export function NewSessionSheet({ open, onOpenChange, sessions, initialCwd, titl
 
   const startReason = !cwd
     ? "Erst einen Projektordner wählen."
-    : isPi && !pi.status?.installed
-      ? "pi ist auf dem Server nicht installiert."
-      : piBlocked
-        ? "Erst ein lokales Modell wählen."
-        : consentNeeded && !consent
-          ? "Bitte bestätigen, dass Befehle ohne Rückfrage laufen."
-          : undefined;
+    : action.kind === "open"
+      ? undefined // opening an existing session needs none of the checks below
+      : conversationsLoading
+        ? "Bisherige Unterhaltungen werden geladen …"
+        : isPi && !pi.status?.installed
+          ? "pi ist auf dem Server nicht installiert."
+          : piBlocked
+            ? "Erst ein lokales Modell wählen."
+            : consentNeeded && !consent
+              ? "Bitte bestätigen, dass Befehle ohne Rückfrage laufen."
+              : undefined;
 
   async function create() {
     if (startReason) return;
+    if (action.kind === "open") {
+      openLinked(action.sessionId);
+      return;
+    }
     setCreating(true);
     try {
       const body = {
@@ -156,6 +250,9 @@ export function NewSessionSheet({ open, onOpenChange, sessions, initialCwd, titl
         allowedTools: draft.allowedTools.join(","),
         // Never send a gate or sandbox the agent cannot honour (the server rejects it).
         ...capabilityFields(draft),
+        // Continue the chosen Claude Code conversation (`--resume`); its title
+        // becomes the session title unless a handoff brought one.
+        ...resumeFields(action),
         ...(title ? { title: title.slice(0, 200) } : {}),
       };
       const res = await fetch("/api/assistant/sessions", {
@@ -164,6 +261,13 @@ export function NewSessionSheet({ open, onOpenChange, sessions, initialCwd, titl
         body: JSON.stringify(body),
       });
       const d = await res.json().catch(() => ({}));
+      const linkedId = alreadyLinkedSessionId(res.status, d);
+      if (linkedId) {
+        // Another session took the conversation meanwhile: go there instead.
+        toast.info(d.error || "Diese Unterhaltung ist schon in CodeMaestro geöffnet.");
+        openLinked(linkedId);
+        return;
+      }
       if (!res.ok || !d.session?.id) {
         toast.error(d.error || "Konnte Session nicht anlegen.");
         return;
@@ -173,8 +277,8 @@ export function NewSessionSheet({ open, onOpenChange, sessions, initialCwd, titl
       } catch {
         /* storage unavailable */
       }
-      toast.success("Session angelegt.");
-      onOpenChange(false);
+      toast.success(action.kind === "resume" ? "Session angelegt – Claude Code setzt die Unterhaltung fort." : "Session angelegt.");
+      changeOpen(false);
       onCreated(d.session.id);
     } finally {
       setCreating(false);
@@ -184,7 +288,7 @@ export function NewSessionSheet({ open, onOpenChange, sessions, initialCwd, titl
   const chips = React.useMemo(() => toolChips(tools, toolLabel), [tools]);
 
   return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
+    <Sheet open={open} onOpenChange={changeOpen}>
       <SheetContent side="auto">
         <SheetHeader>
           <SheetTitle>Neue Session</SheetTitle>
@@ -228,6 +332,60 @@ export function NewSessionSheet({ open, onOpenChange, sessions, initialCwd, titl
             </RadioGroup>
             <p className="text-ui text-muted-foreground">{capabilityNote(draft.provider)}</p>
           </section>
+
+          {/* 2b. Bisherige Unterhaltung fortsetzen (Claude Code only) */}
+          {conversationList.length ? (
+            <section className="space-y-2" aria-labelledby="ns-resume">
+              <h3 id="ns-resume" className="text-sm font-semibold md:text-ui">
+                Bisherige Unterhaltung fortsetzen
+              </h3>
+              <RadioGroup aria-labelledby="ns-resume" value={choice} onValueChange={(id) => setPick({ cwd, id })} className="gap-1.5">
+                {shownConversations.map((c) => (
+                  <RadioCard
+                    key={c.id}
+                    value={c.id}
+                    title={<span className="line-clamp-1 [overflow-wrap:anywhere]">{conversationTitle(c)}</span>}
+                    description={`${formatRelative(c.updatedAt)}${c.linkedSessionId ? " · schon in CodeMaestro geöffnet" : ""}`}
+                    className="min-h-11 p-2.5"
+                  />
+                ))}
+                {conversationList.length > CONVERSATIONS_COLLAPSED ? (
+                  <Button
+                    variant="ghost"
+                    className="min-h-11 justify-start text-muted-foreground md:min-h-10"
+                    aria-expanded={expanded}
+                    onClick={() => setExpandedCwd(expanded ? null : cwd)}
+                  >
+                    <ChevronRight aria-hidden className={cn("transition-transform", expanded && "rotate-90")} />
+                    {expanded ? "Weniger anzeigen" : `Ältere anzeigen (${conversationList.length - CONVERSATIONS_COLLAPSED})`}
+                  </Button>
+                ) : null}
+                <RadioCard
+                  value={NEW_CONVERSATION}
+                  title="Neue Unterhaltung starten"
+                  description="Claude Code beginnt ohne den bisherigen Verlauf."
+                  className="min-h-11 p-2.5"
+                />
+              </RadioGroup>
+              {action.kind === "open" ? (
+                <Callout
+                  title="Schon in CodeMaestro geöffnet"
+                  action={
+                    <Button variant="secondary" onClick={() => openLinked(action.sessionId)}>
+                      <ArrowRight aria-hidden />
+                      Öffnen
+                    </Button>
+                  }
+                >
+                  Diese Unterhaltung läuft in der Session „{linkedTitle}“ weiter. Öffne sie dort, statt eine zweite Session anzulegen.
+                </Callout>
+              ) : action.kind === "resume" ? (
+                <p className="text-ui text-muted-foreground">Claude Code setzt den bisherigen Verlauf fort (--resume).</p>
+              ) : null}
+            </section>
+          ) : loaded?.failed ? (
+            <p className="text-ui text-muted-foreground">Bisherige Unterhaltungen konnten nicht geladen werden – die Session beginnt neu.</p>
+          ) : null}
 
           {/* 3. Modell */}
           <section className="space-y-2">
@@ -412,8 +570,8 @@ export function NewSessionSheet({ open, onOpenChange, sessions, initialCwd, titl
             {draftSummary(cwd ? folderName(cwd) : "", draft)}
           </p>
           <Button variant="primary" size="lg" className="shrink-0" onClick={() => void create()} loading={creating} disabledReason={startReason}>
-            <Rocket aria-hidden />
-            Session starten
+            {action.kind === "open" ? <ArrowRight aria-hidden /> : action.kind === "resume" ? <History aria-hidden /> : <Rocket aria-hidden />}
+            {startLabel(action)}
           </Button>
         </div>
       </SheetContent>
