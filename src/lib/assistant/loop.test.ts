@@ -8,19 +8,20 @@ const state = vi.hoisted(() => ({
   provider: "claude" as string | null,
   published: [] as Array<Record<string, unknown>>,
   rows: [] as Array<{ role: string; content: string }>,
-  persisted: [] as unknown[][],
+  // userMessage handed to launchRun (it persists the row once the session is claimed).
+  persisted: [] as Array<{ content: string; meta?: string } | undefined>,
   ac: new AbortController(),
 }));
 
 vi.mock("./session-run", () => ({
-  persistUserMessage: async (...a: unknown[]) => { state.persisted.push(a); },
   executeTurn: async (_ctx: unknown, prompt: string, opts: Record<string, unknown>) => {
     state.turns.push({ prompt, opts });
     const r = state.results.shift() ?? { isError: false, resultText: "working" };
     if (r instanceof Error) throw r;
     return { costUsd: 0, externalId: "ext-1", ...r };
   },
-  launchRun: async (o: { sessionId: string; kind: string; title: string; work: (ctx: unknown) => Promise<unknown> }) => {
+  launchRun: async (o: { sessionId: string; kind: string; title: string; userMessage?: { content: string; meta?: string }; work: (ctx: unknown) => Promise<unknown> }) => {
+    state.persisted.push(o.userMessage);
     const ctx = {
       sessionId: o.sessionId, runId: "r1", signal: state.ac.signal,
       publish: (e: Record<string, unknown>) => state.published.push(e),
@@ -80,7 +81,9 @@ describe("startLoopRun", () => {
     const h = (await startLoopRun("s1", { ...base, freshContext: true, apiKey: "sk-secret", intervalSec: 0 }, "pwa")) as unknown as Started;
     expect(h.outcome).toEqual({ isError: false });
     expect(state.published.at(-1)).toEqual({ type: "loop_end", reason: "promise", iterations: 2 });
-    expect(String(state.persisted[0][2])).not.toContain("sk-secret");
+    expect(state.persisted[0]?.content).toBe("🔁 Loop: Fix the failing tests in src/foo");
+    expect(JSON.parse(state.persisted[0]?.meta ?? "{}").loop).toMatchObject({ maxIterations: 5, freshContext: true });
+    expect(JSON.stringify(state.persisted[0])).not.toContain("sk-secret");
     expect(state.turns[0].opts.rowOverrides).toEqual({ externalId: null });
     expect(h.info.title).toBe("[loop] Fix the failing tests in src/foo");
   });

@@ -1,8 +1,11 @@
 // Pure logic of the New-Session sheet (DESIGN.md §6.2.3): permission presets,
 // capability rules per agent, the safety warning and the remembered settings.
 // Capabilities mirror the server (src/lib/assistant/runner.ts
-// supportsApprovalGate / supportsSandbox); the server enforces them anyway.
-import { providerLabel } from "@/lib/labels";
+// supportsApprovalGate / supportsSandbox); the server rejects a session that
+// asks for a gate or sandbox its agent cannot honour (400), so the sheet must
+// never send one (capabilityFields).
+import { TOOL_GROUP_LABEL, approvalModeLabel, providerLabel } from "@/lib/labels";
+import { toolGroupOf } from "@/lib/assistant/tool-rules";
 
 export const AGENTS = ["claude", "gemini", "opencode", "codex", "aider", "pi"] as const;
 export type AgentId = (typeof AGENTS)[number];
@@ -26,7 +29,9 @@ export interface SessionDraft {
 
 export const READ_TOOLS = ["Read", "Grep", "Glob"];
 export const EDIT_TOOLS = ["Read", "Grep", "Glob", "Edit", "Write", "Bash"];
-const CHANGING_TOOLS = ["Edit", "Write", "Bash", "Bash(git *)", "Bash(gh *)"];
+
+/** Tools that change things: edits and any shell command (git/gh rules included). */
+const isChangingTool = (t: string) => t === "Edit" || t === "Write" || t === "Bash" || t.startsWith("Bash(");
 
 export const PRESET_LABEL: Record<PermissionPreset, string> = {
   read: "Nur lesen",
@@ -121,7 +126,7 @@ export function ungatedWarning(draft: SessionDraft): string | null {
 
 /** True when the draft lets the agent change things without any gate (needs the confirmation). */
 export function needsAutonomyConsent(draft: SessionDraft): boolean {
-  const changes = draft.allowedTools.some((t) => CHANGING_TOOLS.includes(t));
+  const changes = draft.allowedTools.some(isChangingTool);
   const gate = APPROVAL_CAPABLE.has(draft.provider) ? draft.approvalMode : "off";
   return changes && gate === "off";
 }
@@ -132,11 +137,69 @@ export function draftSummary(folder: string, draft: SessionDraft): string {
   return [folder, agentLabel(draft.provider), preset ? PRESET_LABEL[preset] : "Eigene Einstellungen"].filter(Boolean).join(" · ");
 }
 
-/** Label for a tool chip (German verb, git/gh spelled out). */
+/** Label for a tool chip (German verb; git/gh rules by their group: „Git", „GitHub CLI"). */
 export function toolChipLabel(tool: string, label: (t: string) => string): string {
-  if (tool === "Bash(git *)") return "Git";
-  if (tool === "Bash(gh *)") return "GitHub CLI";
-  return label(tool);
+  const group = toolGroupOf(tool);
+  return group ? TOOL_GROUP_LABEL[group.id] : label(tool);
+}
+
+/** One chip of the tool allowlist: a single tool, or a whole git/gh rule group. */
+export interface ToolChip {
+  key: string;
+  label: string;
+  rules: string[];
+}
+
+/**
+ * Chips for the offered tools: each git/gh rule group collapses into ONE chip
+ * (placed where its first rule is) that toggles all of the group's rules.
+ */
+export function toolChips(tools: readonly string[], label: (t: string) => string): ToolChip[] {
+  const out: ToolChip[] = [];
+  const seen = new Set<string>();
+  for (const t of tools) {
+    const group = toolGroupOf(t);
+    if (!group) {
+      out.push({ key: t, label: label(t), rules: [t] });
+    } else if (!seen.has(group.id)) {
+      seen.add(group.id);
+      out.push({ key: group.id, label: TOOL_GROUP_LABEL[group.id], rules: tools.filter((x) => toolGroupOf(x)?.id === group.id) });
+    }
+  }
+  return out;
+}
+
+/** A chip is on when the draft allows all of its rules. */
+export function chipPressed(chip: ToolChip, allowedTools: readonly string[]): boolean {
+  return chip.rules.every((r) => allowedTools.includes(r));
+}
+
+/** Turns a chip's rules on or off (a legacy broad git/gh rule is replaced/removed too). */
+export function toggleChip(allowedTools: readonly string[], chip: ToolChip, on: boolean): string[] {
+  const legacy = chip.rules.map((r) => toolGroupOf(r)?.legacy).filter((r): r is string => !!r);
+  const drop = new Set([...chip.rules, ...legacy]);
+  const rest = allowedTools.filter((t) => !drop.has(t));
+  return on ? [...rest, ...chip.rules] : rest;
+}
+
+/**
+ * Honest note under the tool chips while Git / GitHub CLI are allowed without
+ * confirming every command (null otherwise; pi ignores these rules anyway).
+ */
+export function commandRulesHint(draft: SessionDraft): string | null {
+  if (draft.provider === "pi" || !draft.allowedTools.some((t) => toolGroupOf(t))) return null;
+  const base = "Git und GitHub CLI erlauben nur gängige Unterbefehle – Repository-Hooks und Git-Einstellungen können trotzdem beliebigen Code ausführen.";
+  if (!APPROVAL_CAPABLE.has(draft.provider)) return base;
+  if (draft.approvalMode === "all") return null;
+  return `${base} Mit Freigabe „${approvalModeLabel("all")}“ bestätigst du jeden Befehl.`;
+}
+
+/** The gate and sandbox fields to send: never one the agent cannot honour (the server rejects those). */
+export function capabilityFields(draft: SessionDraft): Pick<SessionDraft, "approvalMode" | "sandbox"> {
+  return {
+    approvalMode: APPROVAL_CAPABLE.has(draft.provider) ? draft.approvalMode : "off",
+    sandbox: SANDBOX_CAPABLE.has(draft.provider) && draft.sandbox,
+  };
 }
 
 export const NEW_SESSION_STORAGE_KEY = "cm-new-session";
@@ -163,7 +226,14 @@ export function parseStoredDraft(raw: string | null, tools: string[], permission
     out.permissionMode = o.permissionMode;
   }
   if (Array.isArray(o.allowedTools)) {
-    out.allowedTools = o.allowedTools.filter((t): t is string => typeof t === "string" && (tools.length === 0 || tools.includes(t)));
+    // A remembered broad "Bash(git *)" / "Bash(gh *)" becomes its narrow group.
+    const listed = o.allowedTools
+      .filter((t): t is string => typeof t === "string")
+      .flatMap((t) => {
+        const group = toolGroupOf(t);
+        return group && group.legacy === t ? [...group.rules] : [t];
+      });
+    out.allowedTools = [...new Set(listed)].filter((t) => tools.length === 0 || tools.includes(t));
   }
   if (o.approvalMode === "off" || o.approvalMode === "edits" || o.approvalMode === "all") out.approvalMode = o.approvalMode;
   if (typeof o.sandbox === "boolean") out.sandbox = o.sandbox;

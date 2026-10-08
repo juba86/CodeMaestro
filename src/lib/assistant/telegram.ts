@@ -11,7 +11,8 @@ import {
   type RunHandle,
 } from "./run-hub";
 import { executeTurn, launchRun, persistUserMessage, stopRunNow } from "./session-run";
-import { startLoopRun } from "./loop";
+import { formatDuration, pause, startLoopRun } from "./loop";
+import { supportsApprovalGate } from "./runner";
 import { getTelegramConfig, type TelegramConfig } from "./telegram-config";
 import {
   splitForTelegram,
@@ -35,6 +36,7 @@ import {
   type LoopArgs,
 } from "./telegram-format";
 import { retrieveChunks } from "@/lib/knowledge/retrieve";
+import { approvalModeLabel, providerLabel } from "@/lib/labels";
 import { promises as fs } from "fs";
 import path from "path";
 
@@ -348,31 +350,58 @@ function bindChat(chatId: number, sessionId: string): void {
 
 // --- Session helpers ----------------------------------------------------------
 
-async function createSession(config: TelegramConfig): Promise<{ id: string; cwd: string }> {
+/**
+ * Agent, gate and sandbox for a new Telegram session. The configured approval
+ * mode only applies to agents that can enforce it: the runner refuses to start
+ * a session that asks for a gate its agent lacks, so storing it anyway made
+ * every Gemini/OpenCode/Codex/Aider turn fail. `notice` (sent to the chat when
+ * the session is created) says that this session runs without the gate.
+ * Telegram has no sandbox setting, so the sandbox is always off — which every
+ * agent supports (were one added, it would apply only where supportsSandbox).
+ */
+export function telegramSessionSafety(config: Pick<TelegramConfig, "provider" | "approvalMode">): {
+  provider: string;
+  approvalMode: string;
+  sandbox: boolean;
+  notice: string | null;
+} {
+  const provider = config.provider || "claude";
+  const wanted = config.approvalMode || "edits";
+  if (supportsApprovalGate(provider)) return { provider, approvalMode: wanted, sandbox: false, notice: null };
+  const notice =
+    wanted === "off"
+      ? null
+      : `ℹ️ Freigabe „${approvalModeLabel(wanted)}“ gilt nicht für ${providerLabel(provider)} – nur Claude Code und pi legen Änderungen und Befehle zur Freigabe vor. Diese Session läuft ohne Freigabe-Gate.`;
+  return { provider, approvalMode: "off", sandbox: false, notice };
+}
+
+async function createSession(config: TelegramConfig): Promise<{ id: string; cwd: string; notice: string | null }> {
   const cwd = await resolveWorkdir(config.cwd);
+  const { provider, approvalMode, sandbox, notice } = telegramSessionSafety(config);
   const session = await prisma.assistantSession.create({
     data: {
-      provider: config.provider || "claude",
+      provider,
       model: config.model || "",
       title: "", // set from the first prompt
       cwd,
       permissionMode: config.permissionMode || "default",
       allowedTools: "Read,Grep,Glob,Edit,Write,Bash",
-      approvalMode: config.approvalMode || "edits",
-      sandbox: false,
+      approvalMode,
+      sandbox,
     },
   });
-  return { id: session.id, cwd };
+  return { id: session.id, cwd, notice };
 }
 
-async function getActiveSession(chatId: number, config: TelegramConfig): Promise<string> {
+async function getActiveSession(token: string, chatId: number, config: TelegramConfig): Promise<string> {
   const existing = await boundSession(chatId);
   if (existing) {
     const row = await prisma.assistantSession.findUnique({ where: { id: existing }, select: { id: true } });
     if (row) return existing;
   }
-  const { id } = await createSession(config);
+  const { id, notice } = await createSession(config);
   bindChat(chatId, id);
+  if (notice) await sendMessage(token, chatId, notice);
   return id;
 }
 
@@ -455,19 +484,13 @@ async function startTelegramLoop(token: string, chatId: number, sessionId: strin
     await reportStartError(token, chatId, err);
     return;
   }
-  const pause = args.intervalSec ? `, ${formatDuration(args.intervalSec)} Pause dazwischen` : "";
+  const gap = args.intervalSec ? `, ${formatDuration(args.intervalSec)} Pause dazwischen` : "";
   await sendMessage(
     token,
     chatId,
-    `🔁 Loop gestartet: bis zu ${args.maxIterations} Iteration(en)${pause}. Endet, sobald <promise>${LOOP_PROMISE}</promise> ausgegeben wird. /stop bricht ab.`
+    `🔁 Loop gestartet: bis zu ${args.maxIterations} Iteration(en)${gap}. Endet, sobald <promise>${LOOP_PROMISE}</promise> ausgegeben wird. /stop bricht ab.`
   );
   followRun(token, chatId, handle);
-}
-
-function formatDuration(sec: number): string {
-  if (sec % 3600 === 0) return `${sec / 3600} h`;
-  if (sec % 60 === 0) return `${sec / 60} min`;
-  return `${sec} s`;
 }
 
 function formatClock(ms: number): string {
@@ -874,7 +897,7 @@ async function handleMessage(token: string, config: TelegramConfig, msg: TgMessa
     const note = `Der Nutzer hat ein Bild über Telegram gesendet. Es wurde lokal gespeichert unter:\n${saved}\nVerarbeite es bei Bedarf mit deinen Tools (z. B. Read).`;
     const prompt = caption ? `${caption}\n\n[${note}]` : note;
     await sendMessage(token, chatId, `🖼️ Bild empfangen (${path.basename(saved)}). Verarbeite…`);
-    const sessionId = await getActiveSession(chatId, config);
+    const sessionId = await getActiveSession(token, chatId, config);
     await startTelegramTurn(token, chatId, sessionId, prompt, config.useKnowledge);
     return;
   }
@@ -885,9 +908,9 @@ async function handleMessage(token: string, config: TelegramConfig, msg: TgMessa
       await sendMessage(token, chatId, HELP);
       return;
     case "new": {
-      const { id, cwd } = await createSession(config);
+      const { id, cwd, notice } = await createSession(config);
       bindChat(chatId, id);
-      await sendMessage(token, chatId, `🆕 Neue Session: ${id.slice(0, 8)} in ${cwd}`);
+      await sendMessage(token, chatId, `🆕 Neue Session: ${id.slice(0, 8)} in ${cwd}${notice ? `\n${notice}` : ""}`);
       return;
     }
     case "sessions": {
@@ -945,7 +968,7 @@ async function handleMessage(token: string, config: TelegramConfig, msg: TgMessa
         );
         return;
       }
-      const sessionId = await getActiveSession(chatId, config);
+      const sessionId = await getActiveSession(token, chatId, config);
       await startTelegramLoop(token, chatId, sessionId, parsed, config.useKnowledge);
       return;
     }
@@ -985,7 +1008,7 @@ async function handleMessage(token: string, config: TelegramConfig, msg: TgMessa
     await answerCardWithText(token, chatId, card, prompt);
     return;
   }
-  const sessionId = await getActiveSession(chatId, config);
+  const sessionId = await getActiveSession(token, chatId, config);
   await startTelegramTurn(token, chatId, sessionId, prompt, config.useKnowledge);
 }
 
@@ -1053,18 +1076,6 @@ async function handleCallback(token: string, config: TelegramConfig, cq: TgCallb
 
 // --- Long-poll loop -----------------------------------------------------------
 
-function sleep(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    const done = () => {
-      clearTimeout(t);
-      signal.removeEventListener("abort", done);
-      resolve();
-    };
-    const t = setTimeout(done, ms);
-    signal.addEventListener("abort", done, { once: true });
-  });
-}
-
 /**
  * Polls getUpdates for one bridge generation. Handlers never block the poll:
  * callbacks run immediately, messages run in a per-chat queue (so /new followed
@@ -1101,7 +1112,7 @@ async function pollLoop(token: string, gen: number, signal: AbortSignal): Promis
       // Network hiccup, conflict with another poller, … — back off, then
       // re-read the config (token may have changed / bridge disabled).
       s.error = res.description;
-      await sleep(backoff, signal);
+      await pause(backoff, signal);
       backoff = Math.min(backoff * 2, 30_000);
       if (s.generation !== gen) break;
       const cfg = await getTelegramConfig();

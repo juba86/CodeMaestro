@@ -28,10 +28,12 @@ export interface ActivityPending {
   command?: string;
   isWrite?: boolean;
   overwrites?: boolean;
+  /** Deadline on the server's clock (epoch ms); compare with serverNow(), not Date.now(). */
   expiresAt?: number;
 }
 
 export interface ActivityResponse {
+  /** Server clock (epoch ms) when the snapshot was built; clients derive their clock offset from it (src/lib/server-clock.ts). */
   serverTime: number;
   runs: ActivityRun[];
   pending: ActivityPending[];

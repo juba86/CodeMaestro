@@ -5,7 +5,7 @@ import { orchestrateRun } from "@/lib/assistant/orchestrator";
 import { resolveOrchestra } from "@/lib/assistant/orchestra";
 import { resolveWorkdir } from "@/lib/assistant/security";
 import { SessionBusyError, isSessionBusy } from "@/lib/assistant/run-hub";
-import { launchRun, persistUserMessage, toSessionRow } from "@/lib/assistant/session-run";
+import { launchRun, toSessionRow } from "@/lib/assistant/session-run";
 
 export const runtime = "nodejs";
 
@@ -51,13 +51,14 @@ export async function POST(
     // Roles frame the subtasks and drive the review loops; unsaved chart edits
     // from the request win over the saved orchestra.
     const orchestra = await resolveOrchestra(parsed.data.orchestra);
-    await persistUserMessage(id, prompt);
     const row = toSessionRow(session);
     const run = await launchRun({
       sessionId: id,
       kind: "orchestrate",
       origin: "pwa",
       title: `[orchestrate] ${prompt}`,
+      // Persisted once the session is claimed: a 409 leaves no orphaned row.
+      userMessage: { content: prompt },
       work: (ctx) => orchestrateRun(ctx, row, prompt, { subtasks, clientProviders, plannerWorkerId, orchestra }),
     });
     return NextResponse.json({ runId: run.info.runId, startedAt: run.info.startedAt }, { status: 202 });

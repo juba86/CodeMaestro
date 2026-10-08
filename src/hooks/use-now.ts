@@ -1,4 +1,5 @@
 import { useCallback, useSyncExternalStore } from "react";
+import { serverClockOffset, subscribeServerClock } from "@/lib/server-clock";
 
 /**
  * Shared ticking clocks: every component asking for the same interval reads
@@ -50,12 +51,32 @@ function snapshot(intervalMs: number): number {
 }
 
 /**
- * Current time in epoch ms, re-rendering every `intervalMs`. Returns 0 on the
- * server and during hydration; callers treat 0 as "not known yet".
+ * Which clock a time is on: "local" (the device's Date.now()) or "server"
+ * (the device clock corrected by the learned offset, see
+ * src/lib/server-clock.ts) — use "server" whenever the result is compared with
+ * server-stamped times such as an approval's `expiresAt`.
  */
-export function useNow(intervalMs = 1000): number {
+export type ClockSource = "local" | "server";
+
+const zero = () => 0;
+const noSubscription = () => () => {};
+
+/**
+ * Current time in epoch ms, re-rendering every `intervalMs` (and, on the
+ * server clock, when the offset changes). Returns 0 on the server and during
+ * hydration; callers treat 0 as "not known yet".
+ */
+export function useNow(intervalMs = 1000, clock: ClockSource = "local"): number {
   const ms = Math.max(16, Math.floor(intervalMs));
   const sub = useCallback((onChange: () => void) => subscribe(ms, onChange), [ms]);
   const get = useCallback(() => snapshot(ms), [ms]);
-  return useSyncExternalStore(sub, get, () => 0);
+  const now = useSyncExternalStore(sub, get, zero);
+  // Hooks cannot be conditional: a local clock subscribes to nothing instead.
+  const server = clock === "server";
+  const offset = useSyncExternalStore(
+    server ? subscribeServerClock : noSubscription,
+    server ? serverClockOffset : zero,
+    zero
+  );
+  return now > 0 ? now + offset : 0;
 }

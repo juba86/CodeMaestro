@@ -16,6 +16,7 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrig
 import { Sheet, SheetBody, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { SwitchRow } from "@/components/ui/switch";
 import { ToggleChip } from "@/components/ui/toggle-chip";
+import { SELECTABLE_TOOLS } from "@/lib/assistant/tool-rules";
 import { approvalModeLabel, permissionModeLabel, toolLabel } from "@/lib/labels";
 import { FolderBrowser, useBrowse } from "./folder-browser";
 import {
@@ -27,7 +28,10 @@ import {
   SANDBOX_CAPABLE,
   agentLabel,
   applyPreset,
+  capabilityFields,
   capabilityNote,
+  chipPressed,
+  commandRulesHint,
   defaultPreset,
   draftSummary,
   matchPreset,
@@ -35,7 +39,8 @@ import {
   parseStoredDraft,
   presetDisabledReason,
   switchAgent,
-  toolChipLabel,
+  toggleChip,
+  toolChips,
   ungatedWarning,
   type ApprovalMode,
   type PermissionPreset,
@@ -45,7 +50,7 @@ import { PiInstallHint, SMALL_CONTEXT, formatContext, sortPiModels, usePiStatus 
 import { folderName, recentFolders, shortPath } from "./session-list";
 import type { SessionSummary } from "./types";
 
-const FALLBACK_TOOLS = ["Read", "Grep", "Glob", "Bash", "Bash(git *)", "Bash(gh *)", "Edit", "Write", "WebSearch", "WebFetch"];
+const FALLBACK_TOOLS = [...SELECTABLE_TOOLS];
 const FALLBACK_MODES = ["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"];
 
 function initialDraft(): SessionDraft {
@@ -125,6 +130,7 @@ export function NewSessionSheet({ open, onOpenChange, sessions, initialCwd, titl
   const preset = matchPreset(draft);
   const consentNeeded = needsAutonomyConsent(draft);
   const warning = ungatedWarning(draft);
+  const rulesHint = commandRulesHint(draft);
   const gateOk = APPROVAL_CAPABLE.has(draft.provider);
   const sandboxOk = SANDBOX_CAPABLE.has(draft.provider);
 
@@ -148,9 +154,8 @@ export function NewSessionSheet({ open, onOpenChange, sessions, initialCwd, titl
         cwd,
         permissionMode: draft.permissionMode,
         allowedTools: draft.allowedTools.join(","),
-        // Never store a gate or sandbox the agent cannot honour.
-        approvalMode: gateOk ? draft.approvalMode : "off",
-        sandbox: sandboxOk && draft.sandbox,
+        // Never send a gate or sandbox the agent cannot honour (the server rejects it).
+        ...capabilityFields(draft),
         ...(title ? { title: title.slice(0, 200) } : {}),
       };
       const res = await fetch("/api/assistant/sessions", {
@@ -176,11 +181,7 @@ export function NewSessionSheet({ open, onOpenChange, sessions, initialCwd, titl
     }
   }
 
-  const toggleTool = (t: string, on: boolean) =>
-    setDraft((prev) => ({
-      ...prev,
-      allowedTools: on ? [...prev.allowedTools.filter((x) => x !== t), t] : prev.allowedTools.filter((x) => x !== t),
-    }));
+  const chips = React.useMemo(() => toolChips(tools, toolLabel), [tools]);
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -352,13 +353,19 @@ export function NewSessionSheet({ open, onOpenChange, sessions, initialCwd, titl
                     Werkzeuge
                   </span>
                   <div className="flex flex-wrap gap-1.5" role="group" aria-labelledby="ns-tools">
-                    {tools.map((t) => (
-                      <ToggleChip key={t} pressed={draft.allowedTools.includes(t)} onPressedChange={(on) => toggleTool(t, on)} title={t}>
-                        {toolChipLabel(t, toolLabel)}
+                    {chips.map((c) => (
+                      <ToggleChip
+                        key={c.key}
+                        pressed={chipPressed(c, draft.allowedTools)}
+                        onPressedChange={(on) => setDraft((prev) => ({ ...prev, allowedTools: toggleChip(prev.allowedTools, c, on) }))}
+                        title={c.rules.join(", ")}
+                      >
+                        {c.label}
                       </ToggleChip>
                     ))}
                   </div>
                   <p className="text-xs text-muted-foreground">Nur erlaubte Werkzeuge werden ausgeführt.</p>
+                  {rulesHint ? <p className="text-xs text-muted-foreground">{rulesHint}</p> : null}
                   {isPi ? (
                     <p className="text-xs text-muted-foreground">
                       pi: Git, GitHub CLI, Websuche und Web abrufen haben keine Wirkung (für git/gh „Befehl“ aktivieren). Vom Berechtigungsmodus

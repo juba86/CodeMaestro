@@ -252,7 +252,9 @@ const GEMINI_TOOL_NAMES: Record<string, string[]> = {
 export function mapToolsForGemini(csv: string): string {
   const out = new Set<string>();
   for (const t of csv.split(",").map((x) => x.trim()).filter(Boolean)) {
-    for (const g of GEMINI_TOOL_NAMES[t] ?? [t]) out.add(g);
+    // Own keys only: allowedTools is free text, and "constructor"/"toString"
+    // would otherwise resolve to Object.prototype functions (not iterable).
+    for (const g of Object.hasOwn(GEMINI_TOOL_NAMES, t) ? GEMINI_TOOL_NAMES[t] : [t]) out.add(g);
   }
   return [...out].join(",");
 }
@@ -287,7 +289,7 @@ export const PLAIN_AGENTS: Record<string, PlainAgentDef> = {
 };
 
 export function isPlainAgent(provider: string): boolean {
-  return provider in PLAIN_AGENTS;
+  return Object.hasOwn(PLAIN_AGENTS, provider); // not `in`: "constructor" is no agent
 }
 
 // Build argv for a plain agent's one-shot, non-interactive run.

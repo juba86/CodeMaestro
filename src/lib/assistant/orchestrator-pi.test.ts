@@ -315,6 +315,23 @@ describe("pi execution", () => {
     expect(await rowFor({ ...base, permissionMode: "plan", approvalMode: "all" })).toMatchObject({ permissionMode: "plan" });
   });
 
+  it("a subtask that changes no files runs pi read-only, even where pi could edit", async () => {
+    const o = await loadOrchestrator([]);
+    await o.executePlan(session, "task", [
+      { id: "s1", title: "Lesen", description: "look", workerId: PI_GEMMA, dependsOn: [], editsFiles: false },
+      { id: "s2", title: "Umsetzen", description: "build", workerId: PI_GEMMA, dependsOn: [], editsFiles: true },
+    ], collector().io);
+    const turn = (p: string) => state.turns.find((t) => t.prompt.startsWith(p))!;
+    // Plan mode: the runner drops bash/edit/write; the gate stays loaded.
+    expect(turn("look").row).toMatchObject({
+      provider: "pi", permissionMode: "plan", allowedTools: "Read,Grep,Glob", approvalMode: "edits", sandbox: false, interactive: false,
+    });
+    expect(turn("look").prompt).toContain("with read-only access");
+    expect(turn("build").row).toMatchObject({ provider: "pi", permissionMode: "acceptEdits", approvalMode: "edits" });
+    expect(turn("build").row.allowedTools.split(",")).toEqual(expect.arrayContaining(["Edit", "Write"]));
+    expect(turn("build").prompt).not.toContain("read-only");
+  });
+
   it("read-only Gemini under the approval gate runs without the gate it cannot enforce (read tools only)", async () => {
     const o = await loadOrchestrator(["claude", "gemini"]);
     process.env.GEMINI_API_KEY = "k"; // gemini-cli counts as logged in

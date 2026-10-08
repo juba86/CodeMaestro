@@ -161,6 +161,20 @@ the absolute `npm` path.)
 
 - **Network:** only tailnet devices allowed by your
   [ACLs/grants](https://tailscale.com/kb/1018/acls) can reach the serve port.
+- **Host allowlist / DNS rebinding** (`src/proxy.ts` +
+  `src/lib/host-allowlist.ts`, every `/api` request, reads included): a web page
+  whose own domain re-resolves to `127.0.0.1` or to this machine's IP looks
+  *same-origin* to the browser and would pass the CSRF check below. So the
+  `Host` header — and every `X-Forwarded-Host` value, which a same-origin page
+  could forge — must be a name this server is known by: `localhost`, loopback,
+  private and CGNAT/tailnet IPs (`127/8`, `10/8`, `172.16/12`, `192.168/16`,
+  `100.64/10`, `::1`, `fc00::/7`, `fe80::/10`), single-label names (MagicDNS
+  short names), `*.ts.net`, `*.local`, the machine's `hostname`, the hosts of
+  `CODEMAESTRO_ALLOWED_ORIGINS` / `CODEMAESTRO_INTERNAL_URL`, and
+  `CODEMAESTRO_ALLOWED_HOSTS` (comma-separated, `*.example.com` = any
+  subdomain). Anything else gets `403 {code: "FORBIDDEN_HOST"}`. The approval
+  hook (`127.0.0.1`) and the browser behind `tailscale serve`
+  (`<machine>.<tailnet>.ts.net`) always pass.
 - **CSRF protection** (`src/proxy.ts`, all `/api` routes): state-changing
   requests from browsers must come from the app's own origin. Cross-site
   requests are rejected with `403 {code: "FORBIDDEN_ORIGIN"}`. Requests without
@@ -209,6 +223,7 @@ the absolute `npm` path.)
 | Variable | Default | Purpose |
 |---|---|---|
 | `CODEMAESTRO_TAILSCALE_USERS` | — (off) | Comma-separated Tailscale logins allowed to use `/api`; `*` = any tailnet user. Requires the app bound to `127.0.0.1`. |
+| `CODEMAESTRO_ALLOWED_HOSTS` | — | Extra host names the API answers to (DNS-rebinding guard), comma-separated; `*.example.com` = any subdomain. Tailnet/LAN names and IPs, `*.ts.net`, `*.local` and the machine's hostname are always allowed. |
 | `CODEMAESTRO_ALLOWED_ORIGINS` | — | Extra origins (e.g. `https://codemaestro.example.com`) allowed to send state-changing requests. |
 | `CODEMAESTRO_PUSH_SUBJECT` | project homepage | VAPID contact, `mailto:` or `https:` (not localhost). |
 | `CODEMAESTRO_DEV_TAILSCALE_SERVE` | off | `1` exposes assistant dev servers via `tailscale serve` on HTTPS. |
@@ -244,6 +259,9 @@ the absolute `npm` path.)
 - **No notifications arrive:** use *Test* first. Notifications are skipped while
   a window shows the session live. For iOS check `CODEMAESTRO_PUSH_SUBJECT`
   (server log shows `HTTP 403` from `web.push.apple.com` for bad subjects).
+- **`403 FORBIDDEN_HOST`:** you reach the app by a name that is not on the host
+  allowlist (e.g. your own domain behind another reverse proxy) — add it to
+  `CODEMAESTRO_ALLOWED_HOSTS` and restart.
 - **`403 FORBIDDEN_ORIGIN`:** you reach the app via a name the server does not
   see as its own (e.g. another reverse proxy) — add that origin to
   `CODEMAESTRO_ALLOWED_ORIGINS`.

@@ -6,8 +6,8 @@
 import type { z } from "zod";
 import { prisma } from "@/lib/db/client";
 import { assistantLoopSchema } from "@/lib/validation/schemas";
-import { SessionBusyError, isSessionBusy, type RunHandle, type RunOrigin } from "./run-hub";
-import { executeTurn, launchRun, persistUserMessage, type RunContext, type RunOutcome, type TurnOutcome } from "./session-run";
+import type { RunHandle, RunOrigin } from "./run-hub";
+import { executeTurn, launchRun, type RunContext, type RunOutcome, type TurnOutcome } from "./session-run";
 
 export type LoopConfig = z.infer<typeof assistantLoopSchema>;
 /** What callers pass in (defaults are filled in by assistantLoopSchema). */
@@ -99,8 +99,8 @@ export function hasCompletionPromise(text: string, promise: string): boolean {
   return false;
 }
 
-/** Waits `ms`, resolving early when `signal` aborts. */
-function pause(ms: number, signal: AbortSignal): Promise<void> {
+/** Waits `ms`, resolving early when `signal` aborts (at once if it already has). Shared with telegram.ts. */
+export function pause(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     if (signal.aborted) return resolve();
     const done = () => {
@@ -113,7 +113,8 @@ function pause(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-function formatDuration(sec: number): string {
+/** A loop interval in SECONDS as "2 h" / "5 min" / "90 s" (not format.ts's elapsed-time "0:42"). */
+export function formatDuration(sec: number): string {
   if (sec % 3600 === 0) return `${sec / 3600} h`;
   if (sec % 60 === 0) return `${sec / 60} min`;
   return `${sec} s`;
@@ -193,19 +194,19 @@ export async function startLoopRun(sessionId: string, cfg: LoopInput, origin: Ru
   const loop = assistantLoopSchema.parse(cfg);
   const session = await prisma.assistantSession.findUnique({ where: { id: sessionId }, select: { provider: true } });
   if (!session) throw new Error("Session nicht gefunden.");
-  // Check right before persisting so a busy session gets no orphaned message.
-  if (isSessionBusy(sessionId)) throw new SessionBusyError();
 
   // Explicit allowlist: never persist the API key (or future secret fields);
   // the prompt is already the message content.
   const { maxIterations, completionPromise, intervalSec, freshContext, stopOnError, useKnowledge } = loop;
   const settings = { maxIterations, completionPromise, intervalSec, freshContext, stopOnError, useKnowledge };
-  await persistUserMessage(sessionId, `🔁 Loop: ${loop.prompt}`, JSON.stringify({ loop: settings }));
   return launchRun({
     sessionId,
     kind: "loop",
     origin,
     title: `[loop] ${loop.prompt}`,
+    // Persisted only once the session is claimed (SessionBusyError otherwise),
+    // so a concurrent start leaves no orphaned message.
+    userMessage: { content: `🔁 Loop: ${loop.prompt}`, meta: JSON.stringify({ loop: settings }) },
     work: (ctx) => runLoop(ctx, loop, RESUMING_PROVIDERS.has(session.provider)),
   });
 }

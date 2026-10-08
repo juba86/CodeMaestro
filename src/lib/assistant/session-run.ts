@@ -36,10 +36,29 @@ export interface RunOutcome {
   isError: boolean;
 }
 
-/** Persists a user-authored row with a timestamp strictly before the run starts. */
-export async function persistUserMessage(sessionId: string, content: string, meta = "{}"): Promise<void> {
+export interface UserMessage {
+  content: string;
+  /** JSON string stored with the row. */
+  meta?: string;
+}
+
+/**
+ * Persists a user-authored row. `at` must lie before the run's `startedAt`:
+ * GET /sessions/[id] cuts the transcript at the run start and the client
+ * replays the run from there, so a later timestamp would hide the row.
+ *
+ * Prefer `launchRun({ userMessage })`, which persists only after the session
+ * was claimed — calling this first leaves an orphaned row when the start then
+ * fails with SessionBusyError.
+ */
+export async function persistUserMessage(
+  sessionId: string,
+  content: string,
+  meta = "{}",
+  at = monotonicNow()
+): Promise<void> {
   await prisma.assistantMessage.create({
-    data: { sessionId, role: "user", content, meta, createdAt: new Date(monotonicNow()) },
+    data: { sessionId, role: "user", content, meta, createdAt: new Date(at) },
   });
 }
 
@@ -48,22 +67,33 @@ export async function persistUserMessage(sessionId: string, content: string, met
  * detached from any HTTP request: clients attach via SSE (/events) and may come
  * and go. Throws SessionBusyError if the session already has an active run.
  *
- * Lifecycle: status → "running" in the DB, `work` executes, transcript rows are
- * flushed, status → idle/error, `run_end` is published (status "stopped" when
- * the run was aborted).
+ * Lifecycle: the session is claimed (one run per session), `userMessage` is
+ * persisted, status → "running" in the DB, `work` executes, transcript rows
+ * are flushed, open approvals/questions are denied, status → idle/error,
+ * `run_end` is published (status "stopped" when the run was aborted).
  */
 export async function launchRun(opts: {
   sessionId: string;
   kind: RunKind;
   origin: RunOrigin;
   title?: string;
+  /** The user's prompt row; written only once the session is claimed. */
+  userMessage?: UserMessage;
   work: (ctx: RunContext) => Promise<RunOutcome>;
 }): Promise<RunHandle> {
-  const handle = beginRun(opts.sessionId, opts.kind, opts.origin);
   const { sessionId } = opts;
+  // Claim first, persist second: a concurrent start then fails here with
+  // SessionBusyError before writing anything, instead of leaving a user row
+  // that never ran. The row keeps a timestamp taken *before* the claim, so it
+  // still sorts strictly before run.startedAt (GET cut-off and SSE replay).
+  const userAt = monotonicNow();
+  const handle = beginRun(sessionId, opts.kind, opts.origin);
   const runId = handle.info.runId;
 
   try {
+    if (opts.userMessage) {
+      await persistUserMessage(sessionId, opts.userMessage.content, opts.userMessage.meta, userAt);
+    }
     const current = await prisma.assistantSession.findUnique({ where: { id: sessionId }, select: { title: true } });
     await prisma.assistantSession.update({
       where: { id: sessionId },
@@ -98,6 +128,12 @@ export async function launchRun(opts: {
     } catch (err) {
       console.error("[launchRun] status update failed", err);
     }
+    // The CLIs of this run are gone (even when one crashed without a Stop), so
+    // nobody will consume a decision: deny what is still open. Otherwise the
+    // cards leak into the next run's snapshot (listPending) and the activity
+    // API. Synchronously right before endRun: the resolutions land in this
+    // run's buffer and no approval can be created in between.
+    denyAllPending(sessionId, "Lauf beendet.");
     void notifySession(sessionId, "run_end", { status, title: opts.title }); // before endRun: run_end detaches live SSE listeners
     endRun(sessionId, runId, status);
   })();

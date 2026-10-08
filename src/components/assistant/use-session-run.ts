@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { toast } from "sonner";
+import { noteServerEvent } from "@/lib/server-clock";
 import { EMPTY_LIVE, liveReducer } from "./run-events";
 import type { ApprovalEvent, Msg, RunEvent, SessionInfo, SessionPayload } from "./types";
 
@@ -260,6 +261,9 @@ export function useSessionRun(onSessionsChanged: () => void) {
       } catch {
         return;
       }
+      // `at` = server publish time: refines the server-clock offset that
+      // approval countdowns use (replayed old events cannot lower it).
+      noteServerEvent(ev.at);
       const seq = Number(msg.lastEventId);
       if (Number.isFinite(seq) && seq > lastSeqRef.current) lastSeqRef.current = seq;
       if (ev.type === "run_end" || ev.type === "idle") {

@@ -36,7 +36,8 @@ export const TOOL_LABEL: Record<string, string> = {
   Glob: "Dateien finden",
   LS: "Ordner ansehen",
   Bash: "Befehl",
-  "Bash(git *)": "Git-Befehle",
+  // Legacy broad rules older sessions may store; same names as the chips below.
+  "Bash(git *)": "Git",
   "Bash(gh *)": "GitHub CLI",
   Edit: "Bearbeiten",
   MultiEdit: "Bearbeiten",
@@ -48,6 +49,12 @@ export const TOOL_LABEL: Record<string, string> = {
   Task: "Unteragent",
   AskUserQuestion: "Frage",
   ExitPlanMode: "Plan",
+};
+
+/** Tool-allowlist chips that stand for a group of command rules (src/lib/assistant/tool-rules.ts TOOL_GROUPS). */
+export const TOOL_GROUP_LABEL: Record<string, string> = {
+  git: "Git",
+  gh: "GitHub CLI",
 };
 
 // pi reports its built-in tools in lower case (see PI_DISPLAY_NAMES in

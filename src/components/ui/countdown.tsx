@@ -1,6 +1,6 @@
 "use client";
 
-import { useNow } from "@/hooks/use-now";
+import { useNow, type ClockSource } from "@/hooks/use-now";
 import { cn } from "./cn";
 
 /** "4:32", "1:02:03" */
@@ -32,14 +32,21 @@ export function countdownAnnouncement(remainingMs: number): string {
 const DEFAULT_TOTAL_MS = 30 * 60_000; // server default approval timeout
 
 export type CountdownProps = {
-  /** Deadline (epoch ms). */
+  /** Deadline (epoch ms), on the clock named by `clock`. */
   expiresAt: number;
+  /**
+   * Clock `expiresAt` is on. "server" (default): a server-stamped deadline such
+   * as an approval's, compared with the estimated server time so a device whose
+   * clock is off still counts down correctly. "local": a deadline the client
+   * computed itself from Date.now().
+   */
+  clock?: ClockSource;
   variant?: "ring" | "text";
   /** Prefix before the time; default „läuft ab in". */
   label?: string;
   /** Full duration for the ring (default 30 min, the server's approval timeout). */
   totalMs?: number;
-  /** Override the shared clock (tests, synchronized lists). */
+  /** Override the shared clock (tests, synchronized lists); same clock as `expiresAt`. */
   now?: number;
   className?: string;
 };
@@ -50,13 +57,15 @@ export type CountdownProps = {
  */
 export function Countdown({
   expiresAt,
+  clock: clockSource = "server",
   variant = "text",
   label = "läuft ab in",
   totalMs = DEFAULT_TOTAL_MS,
   now: nowProp,
   className,
 }: CountdownProps) {
-  const clock = useNow(1000);
+  // Server-stamped deadlines must not be compared with the raw device clock.
+  const clock = useNow(1000, clockSource);
   const now = nowProp ?? clock;
   const known = now > 0;
   const remaining = expiresAt - now;

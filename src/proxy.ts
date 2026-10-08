@@ -1,5 +1,11 @@
 // Request guard for every /api route (Next.js 16 "proxy", formerly middleware).
 //
+// 0. Host allowlist (src/lib/host-allowlist.ts), for EVERY method: rejects
+//    requests whose Host / X-Forwarded-Host is not a name this server is known
+//    by. This stops DNS rebinding — a page whose own domain re-resolves to
+//    127.0.0.1 is "same-origin" to the browser, passes the CSRF check below and
+//    could read and drive the API (e.g. create a bypassPermissions session).
+//
 // 1. CSRF: state-changing requests (anything but GET/HEAD/OPTIONS) from a
 //    browser must come from this app's own origin. Without this, any web page
 //    the user visits could drive the server with no-cors POSTs — e.g. enable
@@ -20,11 +26,12 @@
 // identity check is meaningless (see docs/TAILSCALE_HTTPS.md).
 
 import { NextResponse, type NextRequest } from "next/server";
+import { requestHostAllowed } from "@/lib/host-allowlist";
 
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 const LOCAL_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 
-function deny(status: number, code: "FORBIDDEN_ORIGIN" | "FORBIDDEN_IDENTITY", error: string) {
+function deny(status: number, code: "FORBIDDEN_HOST" | "FORBIDDEN_ORIGIN" | "FORBIDDEN_IDENTITY", error: string) {
   return NextResponse.json({ error, code }, { status });
 }
 
@@ -86,6 +93,16 @@ function isDirectLocal(req: NextRequest): boolean {
 }
 
 export function proxy(req: NextRequest) {
+  // --- Host allowlist (DNS rebinding) ------------------------------------------
+  // Applies to reads too: a rebinding page can read whatever it fetches.
+  if (!requestHostAllowed(req.headers.get("host"), req.headers.get("x-forwarded-host"))) {
+    return deny(
+      403,
+      "FORBIDDEN_HOST",
+      "Unbekannter Hostname – Zugriff abgelehnt. Eigene Namen in CODEMAESTRO_ALLOWED_HOSTS eintragen."
+    );
+  }
+
   // --- CSRF -------------------------------------------------------------------
   if (!SAFE_METHODS.has(req.method.toUpperCase())) {
     const site = req.headers.get("sec-fetch-site");

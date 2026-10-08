@@ -494,6 +494,20 @@ function roleFraming(role: OrchestraRole | undefined): string {
   return `You are the ${role.name} on this team.${instructions ? ` ${instructions}` : ""}\n\n`;
 }
 
+/**
+ * The closing line of a work prompt (subtask or fix round). A read-only CLI
+ * run (see cliAccess: work that changes no files, or a worker this session
+ * restricts) is told so, and that the reply itself is the result — Claude
+ * Code's plan mode otherwise tends to end in a plan approval request, which a
+ * headless run cannot answer. `edits`: the run has the session's write access.
+ */
+function workingIn(cwd: string, worker: Worker, edits: boolean): string {
+  const readOnly = worker.kind !== "ollama" && worker.kind !== "api" && !edits;
+  return readOnly
+    ? `(You are working in ${cwd} with read-only access: read the project as needed, leave the files as they are, and give your result in your reply.)`
+    : `(You are working in ${cwd}.)`;
+}
+
 /** Keeps the start and the end of a long text (reports end with the summary). */
 function clip(text: string, max: number): string {
   if (text.length <= max) return text;
@@ -550,16 +564,26 @@ function piWorkTools(session: AssistantSessionRow): string {
 
 const CLI_PROVIDER: Partial<Record<Worker["kind"], string>> = { "claude-cli": "claude", "gemini-cli": "gemini", pi: "pi" };
 
+/**
+ * How a CLI worker runs:
+ * - "work": a subtask that changes files — the session's mode, tools, gate
+ *   and sandbox (read-only when the worker cannot enforce them);
+ * - "read": a subtask that changes no files (editsFiles false, e.g. Architekt
+ *   or Recherche) — reads the project with the session's read tools only;
+ * - "text": planning, review, synthesis — plan mode without session tools.
+ */
+type CliMode = "work" | "read" | "text";
+
 /** The runner row's mode/tools/gate/sandbox for a CLI worker run. */
 function cliAccess(
   session: AssistantSessionRow,
   worker: Worker,
-  mode: "work" | "text"
+  mode: CliMode
 ): Pick<AssistantSessionRow, "permissionMode" | "allowedTools" | "approvalMode" | "sandbox" | "interactive"> {
   const pi = worker.kind === "pi";
   // Read-only, no gate: plan mode (pi keeps only its read tools there).
   if (mode === "text") return { permissionMode: "plan", allowedTools: pi ? joinTools(PI_READ_TOOLS) : "" };
-  if (canEditFiles(worker, session)) {
+  if (mode === "work" && canEditFiles(worker, session)) {
     return {
       permissionMode: session.permissionMode,
       allowedTools: pi ? piWorkTools(session) : session.allowedTools,
@@ -568,7 +592,16 @@ function cliAccess(
       interactive: false,
     };
   }
+  // Read-only from here on: a "read" subtask, or a worker that cannot enforce
+  // what the session asks for.
   const readTools = csv(session.allowedTools).filter((t) => READ_ONLY_TOOLS.has(t));
+  if (worker.kind === "claude-cli") {
+    // Plan mode reads the project but changes nothing and runs no commands
+    // headless, so there is nothing for the gate to ask about — and a gate
+    // "allow" could even let an edit through. The sandbox stays (it only
+    // restricts). Only reached in "read" mode: Claude Code can always edit.
+    return { permissionMode: "plan", allowedTools: readTools.join(","), approvalMode: "off", sandbox: session.sandbox, interactive: false };
+  }
   if (pi) {
     // pi cannot be sandboxed (the runner refuses pi with `sandbox` set), so in
     // a sandboxed session it runs read-only instead: plan mode drops bash,
@@ -585,17 +618,29 @@ function cliAccess(
 }
 
 /**
- * Runs a CLI worker (Claude Code, Gemini CLI, pi). "work" = a real subtask
- * with the session's permission mode, tools, approval gate and sandbox
- * (approval cards reach the UI through the run hub); a worker that cannot
- * enforce the gate/sandbox runs read-only. "text" = planning/review/synthesis:
- * read-only plan mode, no gate.
+ * What to put between a finished text block (`before`) and the next one
+ * (`next`): enough newlines for a blank line, counting the ones both sides
+ * already bring. Nothing before the first block.
+ */
+function paragraphBreak(before: string, next: string): string {
+  if (!before) return "";
+  const have = before.length - before.replace(/\n+$/, "").length + (next.length - next.replace(/^\n+/, "").length);
+  return "\n".repeat(Math.max(0, 2 - have));
+}
+
+/**
+ * Runs a CLI worker (Claude Code, Gemini CLI, pi). "work" = a subtask that
+ * changes files, with the session's permission mode, tools, approval gate and
+ * sandbox (approval cards reach the UI through the run hub); a worker that
+ * cannot enforce the gate/sandbox runs read-only. "read" = a subtask that
+ * changes no files: read-only with the session's read tools. "text" =
+ * planning/review/synthesis: read-only plan mode, no gate. See cliAccess.
  */
 async function runCli(
   session: AssistantSessionRow,
   worker: Worker,
   prompt: string,
-  mode: "work" | "text",
+  mode: CliMode,
   o: StreamOpts
 ): Promise<TextResult> {
   const row: AssistantSessionRow = {
@@ -607,15 +652,26 @@ async function runCli(
     ...cliAccess(session, worker, mode),
   };
   let text = "";
+  // Consecutive text events are pieces of ONE block: the runner streams token
+  // deltas (Claude's --include-partial-messages, pi) coalesced into ~80 ms
+  // chunks that can end mid-word, mid-JSON or mid-<verdict> tag, so they are
+  // joined verbatim. A block ends only at another event (tool call, tool
+  // result, thinking — a new assistant message follows a tool result), and
+  // the next text then starts a new paragraph.
+  let blockEnded = false;
   let reported = false;
   let failedResult = "";
   const res = await runTurn(row, prompt, undefined, (e) => {
-    if (e.type === "text" && e.content) {
-      // Each CLI text event is a whole message block — keep blocks apart.
-      const piece = text && !text.endsWith("\n") ? `\n\n${e.content}` : e.content;
+    if (e.type === "text") {
+      if (!e.content) return;
+      const piece = (blockEnded ? paragraphBreak(text, e.content) : "") + e.content;
+      blockEnded = false;
       text += piece;
       o.onChunk?.(piece);
-    } else if (e.type === "error" && e.content) {
+      return;
+    }
+    if (e.type === "tool_use" || e.type === "tool_result" || e.type === "thinking") blockEnded = true;
+    if (e.type === "error" && e.content) {
       reported = true;
       o.onError?.(e.content);
     } else if (e.type === "result" && e.isError && e.content) {
@@ -781,7 +837,14 @@ async function runText(session: AssistantSessionRow, worker: Worker, prompt: str
 // --- Planner --------------------------------------------------------------------
 
 // Mirrors plannedSubtaskSchema / orchestrateRunSchema in validation/schemas.ts.
-const LIMITS = { subtasks: 20, id: 50, title: 300, description: 20_000, workerId: 120, dependsOn: 20, roleId: ORCHESTRA_LIMITS.roleId };
+// Worker ids share the orchestra's limit: "pi:"/"ollama:" + an Ollama id of
+// up to 200 characters must survive planning uncut, or the subtask would land
+// on another worker.
+const LIMITS = {
+  subtasks: 20, id: 50, title: 300, description: 20_000, dependsOn: 20,
+  workerId: ORCHESTRA_LIMITS.workerId,
+  roleId: ORCHESTRA_LIMITS.roleId,
+};
 
 function extractJson(s: string): string {
   const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/);
@@ -835,7 +898,7 @@ ${profile}
 How to plan:
 - A simple question, status check or single action becomes exactly one subtask for a worker with editsFiles=true; that worker reads the project and answers or acts.
 - Otherwise use 2-5 subtasks.
-- A subtask that creates, changes or deletes files needs a worker with editsFiles=true, because the other workers return text only.
+- A subtask that creates, changes or deletes files or runs commands (tests, builds, git) sets editsFiles to true and needs a worker with editsFiles=true, because the other workers return text only. A subtask with editsFiles false runs read-only: it can read the project but not change it or run commands.
 - Workers with editsFiles=false ("ollama:" local models and "api:" cloud models) can't open the project, so they are optional helpers for self-contained work: analysis, drafting snippets or reviewing other workers' output. Leaving them out is fine.
 - Prefer claude for the hardest reasoning and architecture, gemini for broad, large-context sweeps, "pi:" local agents for free, well-scoped file changes, and local or api text models for cheap isolated work.
 - List in dependsOn the ids of subtasks that must finish first; independent subtasks get [].
@@ -880,7 +943,7 @@ ${team}
 How to plan:
 - A simple question, status check or single action becomes exactly one subtask for the best-fitting role.
 - Otherwise use 2-5 subtasks; fewer is better as long as the job gets done well.
-- Give work that creates, changes or deletes files to a role that changes files; the other roles report back text only.${anyReview ? "\n- Work of a role marked \"reviewed automatically\" gets a review right after its subtask, so plan no separate review subtask for it." : ""}
+- Give work that creates, changes or deletes files or runs commands (tests, builds, git) to a role that changes files; the other roles only read the project and report back text.${anyReview ? "\n- Work of a role marked \"reviewed automatically\" gets a review right after its subtask, so plan no separate review subtask for it." : ""}
 - Write each description as a self-contained instruction: the role sees only its description and the results of the subtasks it depends on.
 - List in dependsOn the ids of subtasks that must finish first; independent subtasks get [].
 
@@ -1138,7 +1201,7 @@ ${clip(findings.trim(), 8000)}
 
 ${how} If you disagree with a finding, explain briefly why instead of changing the code, so the next review can weigh your reasoning. Finish with a short summary of what you changed.
 
-(You are working in ${c.cwd}.)`;
+${workingIn(c.cwd, c.authorWorker, c.authorEdits)}`;
 }
 
 /**
@@ -1201,14 +1264,16 @@ export async function executePlan(
   const conductor = resolvePlanner(workers, conductorId(opts));
   const scope: RoleScope | null = conductor ? { workers, session, conductor: conductor.worker } : null;
 
-  // Real work: CLIs with the session's tools, gate and sandbox; text workers
-  // stream a chat. Failures are reported through `stream.onError`.
-  const runWork = async (worker: Worker, prompt: string, stream: StreamOpts): Promise<void> => {
+  // Real work: a subtask that changes files runs CLIs with the session's
+  // tools, gate and sandbox; one that doesn't (editsFiles false — Architekt,
+  // Recherche, …) runs them read-only, still able to read the project. Text
+  // workers stream a chat. Failures are reported through `stream.onError`.
+  const runWork = async (st: PlannedSubtask, worker: Worker, prompt: string, stream: StreamOpts): Promise<void> => {
     try {
       if (worker.kind === "ollama" || worker.kind === "api") {
         await runChat(worker, prompt, stream);
       } else {
-        const r = await runCli(session, worker, prompt, "work", stream);
+        const r = await runCli(session, worker, prompt, st.editsFiles ? "work" : "read", stream);
         costUsd += r.costUsd;
         if (r.isError && !signal?.aborted) isError = true;
       }
@@ -1299,7 +1364,7 @@ export async function executePlan(
       // Fix round on the author's worker; streams into the subtask.
       let fix = "";
       const fixErrors: string[] = [];
-      await runWork(author, fixPrompt(c, review, latest, round), {
+      await runWork(st, author, fixPrompt(c, review, latest, round), {
         signal,
         onChunk: (chunk) => {
           emit({ type: "subtask_text", subtaskId: st.id, content: fix ? chunk : `\n\n${chunk}`, fixRound: round });
@@ -1351,7 +1416,10 @@ export async function executePlan(
       ? `\n\nContext from previous subtasks:\n${deps.map((c, i) => `[${i + 1}] ${clip(String(c), 1500)}`).join("\n")}`
       : "";
     const body = st.description.trim() || st.title;
-    const prompt = `${role ? `${roleFraming(role)}Your subtask:\n${body}` : body}${context}\n\n(You are working in ${session.cwd}.)`;
+    // Same condition as runWork → cliAccess: write access only for a subtask
+    // that changes files on a worker that may do so in this session.
+    const where = workingIn(session.cwd, worker, st.editsFiles && canEditFiles(worker, session));
+    const prompt = `${role ? `${roleFraming(role)}Your subtask:\n${body}` : body}${context}\n\n${where}`;
 
     const errors: string[] = [];
     const fail = (msg: string) => {
@@ -1362,7 +1430,7 @@ export async function executePlan(
     // Collected from the live chunks, so partial output survives a failed or
     // stopped stream and is persisted exactly as the UI showed it.
     let text = "";
-    await runWork(worker, prompt, {
+    await runWork(st, worker, prompt, {
       signal,
       onChunk: (c) => {
         text += c;

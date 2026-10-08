@@ -3,7 +3,7 @@ import { prisma } from "@/lib/db/client";
 import { assistantMessageSchema, formatZodError } from "@/lib/validation/schemas";
 import { resolveWorkdir } from "@/lib/assistant/security";
 import { SessionBusyError, isSessionBusy } from "@/lib/assistant/run-hub";
-import { executeTurn, launchRun, persistUserMessage } from "@/lib/assistant/session-run";
+import { executeTurn, launchRun } from "@/lib/assistant/session-run";
 
 export const runtime = "nodejs";
 
@@ -53,12 +53,14 @@ export async function POST(
   }
 
   try {
-    await persistUserMessage(id, prompt);
+    // launchRun persists the prompt only once the session is claimed, so a
+    // concurrent start (409) leaves no orphaned user message behind.
     const run = await launchRun({
       sessionId: id,
       kind: "turn",
       origin: "pwa",
       title: prompt,
+      userMessage: { content: prompt },
       work: (ctx) => executeTurn(ctx, prompt, { apiKey, useKnowledge, interactive: true }),
     });
     return NextResponse.json({ runId: run.info.runId, startedAt: run.info.startedAt }, { status: 202 });

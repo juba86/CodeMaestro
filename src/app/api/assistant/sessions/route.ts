@@ -4,6 +4,7 @@ import { createAssistantSessionSchema, formatZodError } from "@/lib/validation/s
 import { resolveWorkdir } from "@/lib/assistant/security";
 import { isSessionBusy } from "@/lib/assistant/run-hub";
 import { supportsApprovalGate, supportsSandbox } from "@/lib/assistant/runner";
+import { approvalModeLabel, providerLabel } from "@/lib/labels";
 
 export const runtime = "nodejs";
 
@@ -42,6 +43,30 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: formatZodError(parsed.error), code: "VALIDATION_ERROR" }, { status: 400 });
     }
 
+    // The approval gate and sandbox are enforced through provider hooks/settings.
+    // Refuse protection the agent cannot honour instead of silently dropping it
+    // (the user asked for a gate and must not get an ungated agent with a 201).
+    // The New-Session sheet never sends these combinations.
+    const { provider, approvalMode, sandbox } = parsed.data;
+    if (approvalMode !== "off" && !supportsApprovalGate(provider)) {
+      return NextResponse.json(
+        {
+          error: `${providerLabel(provider)} unterstützt kein Freigabe-Gate (nur Claude Code und pi). Freigabe auf „${approvalModeLabel("off")}“ stellen oder einen anderen Agenten wählen.`,
+          code: "VALIDATION_ERROR",
+        },
+        { status: 400 }
+      );
+    }
+    if (sandbox && !supportsSandbox(provider)) {
+      return NextResponse.json(
+        {
+          error: `${providerLabel(provider)} unterstützt keine Sandbox (nur Claude Code). Sandbox ausschalten oder Claude Code wählen.`,
+          code: "VALIDATION_ERROR",
+        },
+        { status: 400 }
+      );
+    }
+
     let cwd: string;
     try {
       cwd = await resolveWorkdir(parsed.data.cwd);
@@ -52,16 +77,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // The approval gate and sandbox are enforced through provider hooks/settings;
-    // never store one the provider cannot honor (the runner would refuse to run).
-    const p = parsed.data.provider;
-    const data = {
-      ...parsed.data,
-      cwd,
-      ...(supportsApprovalGate(p) ? {} : { approvalMode: "off" as const }),
-      ...(supportsSandbox(p) ? {} : { sandbox: false }),
-    };
-    const session = await prisma.assistantSession.create({ data });
+    const session = await prisma.assistantSession.create({ data: { ...parsed.data, cwd } });
     return NextResponse.json({ session }, { status: 201 });
   } catch (err) {
     console.error("[POST /api/assistant/sessions]", err);

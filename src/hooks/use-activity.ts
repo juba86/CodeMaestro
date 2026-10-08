@@ -2,6 +2,7 @@
 
 import { useMemo, useSyncExternalStore } from "react";
 import type { ActivityPending, ActivityResponse, ActivityRun } from "@/lib/activity";
+import { noteServerTime } from "@/lib/server-clock";
 
 export type { ActivityPending, ActivityResponse, ActivityRun };
 
@@ -125,8 +126,12 @@ async function poll(): Promise<void> {
   inflight = ctrl;
   const timeout = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
   let data: ActivityResponse;
+  // Round trip of the request: `serverTime` was stamped in between (see server-clock).
+  const sentAt = Date.now();
+  let receivedAt = sentAt;
   try {
     const res = await fetch(ENDPOINT, { cache: "no-store", signal: ctrl.signal });
+    receivedAt = Date.now(); // headers are in; the body was built before them
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const body: unknown = await res.json();
     if (!isActivityResponse(body)) throw new Error("Unexpected activity payload");
@@ -139,6 +144,9 @@ async function poll(): Promise<void> {
     return;
   }
   clearTimeout(timeout);
+  // Valid even when superseded: keeps server-stamped deadlines (approval
+  // countdowns) correct on devices whose clock is off.
+  noteServerTime(data.serverTime, sentAt, receivedAt);
   if (gen !== generation) return;
   inflight = null;
 

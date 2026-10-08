@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createAssistantSessionSchema } from "@/lib/validation/schemas";
 import { PERMISSION_MODES, SELECTABLE_TOOLS } from "@/lib/assistant/security";
+import { TOOL_GROUPS, toolGroupOf } from "@/lib/assistant/tool-rules";
 import {
   APPROVAL_MODE_LABEL,
   NAV_LABEL,
@@ -8,6 +9,7 @@ import {
   PROVIDER_LABEL,
   RUN_KIND_LABEL,
   RUN_ORIGIN_LABEL,
+  TOOL_GROUP_LABEL,
   TOOL_LABEL,
   approvalModeLabel,
   humanize,
@@ -36,8 +38,17 @@ describe("label maps cover every value the app stores", () => {
     for (const p of enumValues(shape.provider)) expect(PROVIDER_LABEL[p], p).toBeTruthy();
   });
 
-  it("selectable tools", () => {
-    for (const t of SELECTABLE_TOOLS) expect(TOOL_LABEL[t], t).toBeTruthy();
+  it("selectable tools (git/gh rules are labelled by their chip group)", () => {
+    for (const t of SELECTABLE_TOOLS) {
+      const group = toolGroupOf(t);
+      expect(group ? TOOL_GROUP_LABEL[group.id] : TOOL_LABEL[t], t).toBeTruthy();
+    }
+    // Legacy rules stored by older sessions read like their chip.
+    for (const g of TOOL_GROUPS) expect(TOOL_LABEL[g.legacy]).toBe(TOOL_GROUP_LABEL[g.id]);
+  });
+
+  it("the full tool selection fits the session schema", () => {
+    expect(shape.allowedTools.safeParse(SELECTABLE_TOOLS.join(",")).success).toBe(true);
   });
 
   it("run kinds, origins and navigation", () => {

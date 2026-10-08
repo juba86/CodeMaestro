@@ -13,6 +13,7 @@ import { SecretInput } from "@/components/ui/secret-input";
 import { SimpleSelect } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { SwitchRow } from "@/components/ui/switch";
+import { APPROVAL_CAPABLE } from "@/components/assistant/new-session";
 import { approvalModeLabel, permissionModeLabel, providerLabel } from "@/lib/labels";
 import { publishTelegramHint } from "./settings-hints";
 import { Code, SectionHeader, SettingsCard } from "./settings-ui";
@@ -339,6 +340,10 @@ export function TelegramSettings() {
                   value={draft.approvalMode}
                   onValueChange={(v) => setDraft((d) => ({ ...d, approvalMode: v }))}
                 />
+                {/* The bridge drops a gate the agent cannot enforce (and says so in the chat). */}
+                {draft.approvalMode !== "off" && !APPROVAL_CAPABLE.has(draft.provider) ? (
+                  <FieldHint>Gilt nur für Claude Code und pi – {providerLabel(draft.provider)} läuft ohne Freigabe-Gate.</FieldHint>
+                ) : null}
               </Field>
             </div>
             {draft.permissionMode === "bypassPermissions" ? (

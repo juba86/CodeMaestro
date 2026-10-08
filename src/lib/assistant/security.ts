@@ -183,12 +183,12 @@ export async function listWorkspaces(): Promise<{ path: string; label: string }[
   return out;
 }
 
-// Tools offered by the allowlist UI (passed as --allowedTools). "Bash(git *)" /
-// "Bash(gh *)" allow just git and the GitHub CLI (push, PRs) without granting
-// arbitrary shell access — pair them with Settings → GitHub.
-export const SELECTABLE_TOOLS = [
-  "Read", "Grep", "Glob", "Bash", "Bash(git *)", "Bash(gh *)", "Edit", "Write", "WebSearch", "WebFetch",
-];
+// Tools offered by the allowlist UI (passed as --allowedTools). git and the
+// GitHub CLI come as groups of narrow subcommand rules (pair them with
+// Settings → GitHub); they are NOT a shell sandbox — repository hooks and git
+// config can still run code. See tool-rules.ts for the details and limits.
+export { SELECTABLE_TOOLS } from "./tool-rules";
+
 // Claude Code permission modes. "auto" lets Claude Code's classifier decide
 // (falls back to default where unavailable); "dontAsk" denies anything that
 // would prompt (only allowlisted tools and approved hook calls run).

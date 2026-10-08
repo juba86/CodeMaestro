@@ -7,6 +7,9 @@ export default defineConfig({
   schema: "prisma/schema.prisma",
   migrations: {
     path: "prisma/migrations",
+    // `prisma db seed` (and `migrate reset`). jiti runs the TypeScript seed;
+    // the seed itself wires up the "@/…" alias for the app modules it loads.
+    seed: "npx jiti prisma/seed.ts",
   },
   datasource: {
     url: process.env["DATABASE_URL"],

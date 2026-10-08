@@ -37,7 +37,8 @@
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "db:seed": "jiti prisma/seed.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.132.0",

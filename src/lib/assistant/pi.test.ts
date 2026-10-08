@@ -39,6 +39,10 @@ const OLLAMA_MODELS: Record<string, Record<string, unknown>> = {
 let ollama: http.Server;
 let ollamaUrl = "";
 let showCalls = 0;
+let tagsCalls = 0;
+// When set, /api/tags answers only once this resolves — with the model list
+// as it was when the request arrived (a sync that listed before a pull).
+let tagsGate: Promise<void> | null = null;
 const agentDir = mkdtempSync(path.join(tmpdir(), "cm-pi-agent-"));
 const savedEnv: Record<string, string | undefined> = {};
 const ENV_KEYS = ["OLLAMA_BASE_URL", "OLLAMA_CONTEXT_LENGTH", "PI_OLLAMA_CONTEXT_LENGTH", "CODEMAESTRO_PI_AGENT_DIR", "PI_BIN", "PATH", "FAKE_PI_MODE", "FAKE_PI_FIXTURE", "FAKE_PI_LOG"];
@@ -51,7 +55,9 @@ beforeAll(async () => {
     req.on("end", () => {
       res.setHeader("content-type", "application/json");
       if (req.url === "/api/tags") {
-        res.end(JSON.stringify({ models: Object.keys(OLLAMA_MODELS).map((name) => ({ name, model: name, digest: `d-${name}` })) }));
+        tagsCalls++;
+        const payload = JSON.stringify({ models: Object.keys(OLLAMA_MODELS).map((name) => ({ name, model: name, digest: `d-${name}` })) });
+        void (tagsGate ?? Promise.resolve()).then(() => res.end(payload));
         return;
       }
       if (req.url === "/api/show") {
@@ -170,6 +176,34 @@ describe("syncOllamaModels → models.json", () => {
     expect(cold.models.map((m) => m.id)).toEqual(good.models.map((m) => m.id));
   });
 
+  it("a forced sync waits for the in-flight one and then lists again (just-pulled model)", async () => {
+    let release!: () => void;
+    tagsGate = new Promise<void>((r) => { release = r; });
+    const before = tagsCalls;
+    try {
+      const stale = syncOllamaModels();
+      await vi.waitFor(() => expect(tagsCalls).toBe(before + 1)); // listed before the pull
+      OLLAMA_MODELS["devstral:24b"] = { capabilities: ["completion", "tools"], model_info: { "general.architecture": "llama", "llama.context_length": 131072 }, details: { family: "llama" } };
+      // Two forced callers (e.g. the pull route and a settings refresh) share one fresh sync.
+      const forcedA = syncOllamaModels({ force: true });
+      const forcedB = syncOllamaModels({ force: true });
+      tagsGate = null;
+      release();
+      const [old, a, b] = await Promise.all([stale, forcedA, forcedB]);
+      expect(old.models.map((m) => m.id)).not.toContain("devstral:24b");
+      expect(a.models.map((m) => m.id)).toContain("devstral:24b");
+      expect(b).toBe(a);
+      expect(tagsCalls).toBe(before + 2);
+      // Unforced callers still get the cached result without another listing.
+      expect(await syncOllamaModels()).toBe(a);
+      expect(tagsCalls).toBe(before + 2);
+    } finally {
+      tagsGate = null;
+      release();
+      delete OLLAMA_MODELS["devstral:24b"];
+    }
+  });
+
   it("builds a models.json without models", () => {
     const cfg = buildModelsJson([], "http://h:1") as { providers: { ollama: { baseUrl: string; models: unknown[] } } };
     expect(cfg.providers.ollama.baseUrl).toBe("http://h:1/v1");
@@ -185,6 +219,14 @@ describe("tool mapping", () => {
     expect(mapToolsForPi("Edit,Write,Bash")).toEqual(["edit", "write", "bash"]);
     expect(mapToolsForPi("Read,Edit,Write,Bash", "plan")).toEqual(["read", "grep", "find", "ls"]);
     expect(mapToolsForPi("")).toEqual([]);
+  });
+
+  it("ignores free-text tool names that collide with Object.prototype", () => {
+    // These used to resolve to inherited functions and throw "is not iterable".
+    expect(mapToolsForPi("constructor,toString,__proto__,hasOwnProperty,Read")).toEqual(["read", "grep", "find", "ls"]);
+    expect(mapToolsForPi("valueOf")).toEqual([]);
+    expect(piToolDisplayName("constructor")).toBe("constructor");
+    expect(piToolDisplayName("toString")).toBe("toString");
   });
 
   it("gates write+edit for edits and bash too for all", () => {
@@ -414,6 +456,12 @@ describe("runTurn (pi --mode json)", () => {
     expect(res).toEqual({ externalId: sid, costUsd: 0, isError: false });
     expect(events.map((e) => e.type)).toEqual(["init", "text", "tool_use", "tool_result", "text", "result", "done"]);
     expect(events.find((e) => e.type === "tool_use")).toMatchObject({ name: "Write", input: { file_path: "hello.txt" } });
+  });
+
+  it("runs a turn whose allowedTools contain prototype names", async () => {
+    const { res } = await turn(piRow("p1b", { allowedTools: "constructor,Read" }));
+    expect(res.isError).toBe(false);
+    expect(argAfter(invocation(), "--tools")).toBe("read,grep,find,ls");
   });
 
   it("resumes the stored pi session", async () => {

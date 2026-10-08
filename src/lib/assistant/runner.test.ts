@@ -5,7 +5,7 @@ import path from "path";
 
 vi.mock("@/lib/github", () => ({ githubEnv: vi.fn(async () => ({})), GITHUB_SANDBOX_DOMAINS: [] }));
 
-import { runTurn, isRunning, stopSession, type AssistantSessionRow, type NormalizedEvent } from "./runner";
+import { runTurn, isRunning, isPlainAgent, mapToolsForGemini, stopSession, type AssistantSessionRow, type NormalizedEvent } from "./runner";
 
 // A stand-in `claude` binary on PATH that replays a scripted stream-json run.
 const binDir = mkdtempSync(path.join(tmpdir(), "cm-fake-claude-"));
@@ -87,5 +87,21 @@ describe("runTurn (claude stream-json)", () => {
     expect(events.some((e) => e.type === "error" && e.content === "Gestoppt.")).toBe(true);
     expect(isRunning("r3")).toBe(false);
     expect(stopSession("r3")).toBe(false);
+  });
+});
+
+describe("tool/provider lookups with free-text keys", () => {
+  it("maps allowedTools for gemini without consulting Object.prototype", () => {
+    expect(mapToolsForGemini("Read,Bash")).toBe("read_file,read_many_files,list_directory,run_shell_command");
+    // Unknown names pass through unchanged — prototype names included; they
+    // used to resolve to inherited functions and throw "is not iterable".
+    expect(mapToolsForGemini("constructor,toString,Glob")).toBe("constructor,toString,glob");
+    expect(mapToolsForGemini("__proto__")).toBe("__proto__");
+  });
+
+  it("does not treat prototype names as plain agents", () => {
+    expect(isPlainAgent("codex")).toBe(true);
+    expect(isPlainAgent("constructor")).toBe(false);
+    expect(isPlainAgent("toString")).toBe(false);
   });
 });

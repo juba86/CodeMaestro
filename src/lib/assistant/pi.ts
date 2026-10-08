@@ -396,6 +396,10 @@ async function doSync(): Promise<PiSyncResult> {
 /**
  * Discovers every Ollama model (GET /api/tags + POST /api/show) and writes pi's
  * models.json. Cached ~60 s; concurrent callers share one sync. Never throws.
+ *
+ * `force` guarantees a sync that starts after the call (e.g. right after a
+ * model was pulled): an in-flight sync may have listed /api/tags before that,
+ * so a forced caller waits for it and then starts — or joins — a fresh one.
  */
 export function syncOllamaModels(opts: { force?: boolean } = {}): Promise<PiSyncResult> {
   const c = caches.sync;
@@ -403,8 +407,18 @@ export function syncOllamaModels(opts: { force?: boolean } = {}): Promise<PiSync
     const ttl = c.result.error ? SYNC_FAIL_TTL_MS : SYNC_TTL_MS;
     if (Date.now() - c.at < ttl) return Promise.resolve(c.result);
   }
-  if (caches.inflight) return caches.inflight;
-  const p = doSync()
+  const running = caches.inflight;
+  if (running && !opts.force) return running;
+  if (running) {
+    // Any sync in flight once `running` settled began after this call, so
+    // several forced callers waiting here share a single fresh sync.
+    return running.then(() => caches.inflight ?? startSync());
+  }
+  return startSync();
+}
+
+function startSync(): Promise<PiSyncResult> {
+  const p: Promise<PiSyncResult> = doSync()
     .catch((err): PiSyncResult => ({
       models: caches.lastGood ?? [],
       error: err instanceof Error ? err.message : String(err),
@@ -416,7 +430,9 @@ export function syncOllamaModels(opts: { force?: boolean } = {}): Promise<PiSync
       caches.sync = { at: Date.now(), result };
       return result;
     })
-    .finally(() => { caches.inflight = null; });
+    .finally(() => {
+      if (caches.inflight === p) caches.inflight = null;
+    });
   caches.inflight = p;
   return p;
 }
@@ -448,7 +464,10 @@ const PI_MUTATING = new Set(["bash", "edit", "write"]);
 export function mapToolsForPi(csv: string, permissionMode = "default"): string[] {
   const out = new Set<string>();
   for (const t of csv.split(",").map((x) => x.trim()).filter(Boolean)) {
-    for (const p of PI_TOOLS_FOR[t] ?? []) {
+    // Own keys only: allowedTools is free text, and "constructor"/"toString"
+    // would otherwise resolve to Object.prototype functions (not iterable).
+    if (!Object.hasOwn(PI_TOOLS_FOR, t)) continue;
+    for (const p of PI_TOOLS_FOR[t]) {
       if (permissionMode === "plan" && PI_MUTATING.has(p)) continue;
       out.add(p);
     }
@@ -468,7 +487,7 @@ const PI_DISPLAY_NAMES: Record<string, string> = {
 };
 
 export function piToolDisplayName(name: string): string {
-  return PI_DISPLAY_NAMES[name] ?? name;
+  return Object.hasOwn(PI_DISPLAY_NAMES, name) ? PI_DISPLAY_NAMES[name] : name;
 }
 
 type PiEdit = { oldText?: unknown; newText?: unknown };
