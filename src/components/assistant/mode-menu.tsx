@@ -78,7 +78,7 @@ export function ModeMenu(props: ModeMenuProps) {
       disabled={props.disabled}
       aria-haspopup="dialog"
       aria-expanded={open}
-      className={cn(toggleChipVariants({ variant: props.mode === "chat" ? "default" : "brand", size: "sm" }), "h-10 max-w-[60vw] md:h-7 md:max-w-xs")}
+      className={cn(toggleChipVariants({ variant: props.mode === "chat" ? "default" : "brand", size: "sm" }), "h-10 min-w-0 shrink max-w-[60vw] md:h-7 md:max-w-xs")}
       onClick={isMobile ? () => setOpen(true) : undefined}
     >
       <Icon aria-hidden />
