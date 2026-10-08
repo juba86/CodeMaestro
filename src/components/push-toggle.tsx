@@ -1,21 +1,53 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { Bell, BellOff, BellRing, Loader2 } from "lucide-react";
+import { useSyncExternalStore } from "react";
+import { Bell, BellOff, BellRing, Send } from "lucide-react";
 import { toast } from "sonner";
+import { Button, IconButton } from "@/components/ui/button";
+import { SwitchRow } from "@/components/ui/switch";
+// Side effect: catches the browser's install prompt app-wide (every page loads
+// this module through the shell) for Settings → App & Updates.
+import "@/components/settings/install-prompt";
 
-type PushState = "checking" | "unsupported" | "denied" | "off" | "on" | "busy";
+/**
+ * Push state of this device:
+ * - `insecure`: no secure context (plain http on a tailnet IP) — needs HTTPS.
+ * - `unsupported`: secure, but the browser has no Web Push (iOS outside the installed app).
+ * - `denied`: blocked in the browser's site settings.
+ */
+export type PushState = "checking" | "insecure" | "unsupported" | "denied" | "off" | "on" | "busy";
 
-const UNSUPPORTED_HINT = "Benötigt HTTPS (z. B. tailscale serve) und eine installierte App auf iOS";
+export interface PushSnapshot {
+  status: PushState;
+  /** This device's subscription endpoint while `on`. */
+  endpoint: string | null;
+}
 
-function pushSupported(): boolean {
-  return (
-    typeof window !== "undefined" &&
-    window.isSecureContext &&
-    "serviceWorker" in navigator &&
-    "PushManager" in window &&
-    "Notification" in window
-  );
+const INSECURE_HINT = "Benötigt HTTPS (z. B. tailscale serve)";
+const UNSUPPORTED_HINT = "Nicht unterstützt – auf dem iPhone erst ‚Zum Home-Bildschirm' hinzufügen";
+const DENIED_HINT = "Im Browser blockiert – in den Website-Einstellungen erlauben";
+
+/** Honest German state text (Settings → Benachrichtigungen, home status list). */
+export const PUSH_STATE_TEXT: Record<PushState, string> = {
+  checking: "Wird geprüft …",
+  insecure: INSECURE_HINT,
+  unsupported: UNSUPPORTED_HINT,
+  denied: DENIED_HINT,
+  off: "Aus",
+  on: "Aktiv",
+  busy: "Wird geändert …",
+};
+
+/** States in which the user cannot switch push on from here. */
+export function pushUnavailable(status: PushState): boolean {
+  return status === "insecure" || status === "unsupported" || status === "denied";
+}
+
+function detectSupport(): "insecure" | "unsupported" | "ok" {
+  if (typeof window === "undefined") return "unsupported";
+  if (!window.isSecureContext) return "insecure";
+  if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) return "unsupported";
+  return "ok";
 }
 
 function urlBase64ToUint8Array(base64: string): Uint8Array<ArrayBuffer> {
@@ -72,7 +104,8 @@ async function saveSubscription(sub: PushSubscription): Promise<void> {
   }
 }
 
-async function sendTest(endpoint?: string): Promise<void> {
+/** Sends a test notification to this device (or every device without an endpoint). */
+export async function sendPushTest(endpoint?: string): Promise<void> {
   try {
     const res = await fetch("/api/push/test", {
       method: "POST",
@@ -87,147 +120,214 @@ async function sendTest(endpoint?: string): Promise<void> {
   }
 }
 
-/**
- * Bell in the header: subscribes this device to Web Push so it is notified
- * when an assistant run needs an approval/answer or finishes while no window
- * is watching. Needs a secure context (HTTPS via `tailscale serve`); on iOS
- * only inside the installed app (Home Screen), iOS ≥ 16.4.
- */
-export function PushToggle() {
-  const [status, setStatus] = useState<PushState>("checking");
-  const [endpoint, setEndpoint] = useState<string | null>(null);
+// ---------------------------------------------------------------------------
+// Module-level store: every toggle on the page (sidebar, Mehr sheet, settings,
+// home) shows the same state, and the quiet re-sync runs once per page load.
+// ---------------------------------------------------------------------------
 
-  // Initial state + quiet re-sync: if this device is subscribed, re-send the
-  // subscription (server DB reset) and resubscribe when the server key changed.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      if (!pushSupported()) {
-        setStatus("unsupported");
-        return;
-      }
-      if (Notification.permission === "denied") {
-        setStatus("denied");
-        return;
-      }
-      try {
-        const reg = await navigator.serviceWorker.getRegistration("/");
-        let sub = reg ? await reg.pushManager.getSubscription() : null;
-        if (sub && reg && Notification.permission === "granted") {
-          const key = await fetchPublicKey();
-          if (!sameKey(sub.options.applicationServerKey, key)) {
-            await sub.unsubscribe().catch(() => {});
-            sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
-          }
-          await saveSubscription(sub);
-        }
-        if (cancelled) return;
-        setEndpoint(sub?.endpoint ?? null);
-        setStatus(sub ? "on" : "off");
-      } catch {
-        if (!cancelled) setStatus("off");
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+const SERVER_SNAPSHOT: PushSnapshot = { status: "checking", endpoint: null };
+let snapshot: PushSnapshot = SERVER_SNAPSHOT;
+let initialized = false;
+const listeners = new Set<() => void>();
 
-  const enable = useCallback(async () => {
-    setStatus("busy");
-    try {
-      const permission = await Notification.requestPermission();
-      if (permission !== "granted") {
-        setStatus(permission === "denied" ? "denied" : "off");
-        toast.error("Benachrichtigungen wurden nicht erlaubt.");
-        return;
-      }
-      const reg = await registration();
+function set(next: PushSnapshot) {
+  if (next.status === snapshot.status && next.endpoint === snapshot.endpoint) return;
+  snapshot = next;
+  for (const l of listeners) l();
+}
+
+// Initial state + quiet re-sync: if this device is subscribed, re-send the
+// subscription (server DB reset) and resubscribe when the server key changed.
+async function init() {
+  const support = detectSupport();
+  if (support !== "ok") {
+    set({ status: support, endpoint: null });
+    return;
+  }
+  if (Notification.permission === "denied") {
+    set({ status: "denied", endpoint: null });
+    return;
+  }
+  try {
+    const reg = await navigator.serviceWorker.getRegistration("/");
+    let sub = reg ? await reg.pushManager.getSubscription() : null;
+    if (sub && reg && Notification.permission === "granted") {
       const key = await fetchPublicKey();
-      let sub = await reg.pushManager.getSubscription();
-      if (sub && !sameKey(sub.options.applicationServerKey, key)) {
+      if (!sameKey(sub.options.applicationServerKey, key)) {
         await sub.unsubscribe().catch(() => {});
-        sub = null;
+        sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
       }
-      sub = sub ?? (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key }));
       await saveSubscription(sub);
-      const ep = sub.endpoint;
-      setEndpoint(ep);
-      setStatus("on");
-      toast.success("Benachrichtigungen aktiviert", {
-        description: "Du wirst informiert, wenn der Assistent dich braucht oder fertig ist.",
-        action: { label: "Test", onClick: () => void sendTest(ep) },
-      });
-    } catch (err) {
-      setStatus("off");
-      toast.error(err instanceof Error ? err.message : "Benachrichtigungen konnten nicht aktiviert werden.");
     }
-  }, []);
+    set({ status: sub ? "on" : "off", endpoint: sub?.endpoint ?? null });
+  } catch {
+    set({ status: "off", endpoint: null });
+  }
+}
 
-  const disable = useCallback(async () => {
-    setStatus("busy");
-    try {
-      const reg = await navigator.serviceWorker.getRegistration("/");
-      const sub = reg ? await reg.pushManager.getSubscription() : null;
-      if (sub) {
-        await fetch("/api/push/subscribe", {
-          method: "DELETE",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ endpoint: sub.endpoint }),
-        }).catch(() => {});
-        await sub.unsubscribe();
-      }
-      setEndpoint(null);
-      setStatus("off");
-      toast("Benachrichtigungen deaktiviert.");
-    } catch (err) {
-      setStatus("on");
-      toast.error(err instanceof Error ? err.message : "Deaktivieren fehlgeschlagen.");
+function subscribe(listener: () => void) {
+  listeners.add(listener);
+  if (!initialized) {
+    initialized = true;
+    void init();
+  }
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+const getSnapshot = () => snapshot;
+const getServerSnapshot = () => SERVER_SNAPSHOT;
+
+/** Subscribes this device to Web Push (asks for permission first). */
+export async function enablePush(): Promise<void> {
+  set({ status: "busy", endpoint: snapshot.endpoint });
+  try {
+    const permission = await Notification.requestPermission();
+    if (permission !== "granted") {
+      set({ status: permission === "denied" ? "denied" : "off", endpoint: null });
+      toast.error("Benachrichtigungen wurden nicht erlaubt.");
+      return;
     }
-  }, []);
+    const reg = await registration();
+    const key = await fetchPublicKey();
+    let sub = await reg.pushManager.getSubscription();
+    if (sub && !sameKey(sub.options.applicationServerKey, key)) {
+      await sub.unsubscribe().catch(() => {});
+      sub = null;
+    }
+    sub = sub ?? (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key }));
+    await saveSubscription(sub);
+    const ep = sub.endpoint;
+    set({ status: "on", endpoint: ep });
+    toast.success("Benachrichtigungen aktiviert", {
+      description: "Du wirst informiert, wenn der Assistent dich braucht oder fertig ist.",
+      action: { label: "Test", onClick: () => void sendPushTest(ep) },
+    });
+  } catch (err) {
+    set({ status: "off", endpoint: null });
+    toast.error(err instanceof Error ? err.message : "Benachrichtigungen konnten nicht aktiviert werden.");
+  }
+}
+
+/** Removes this device's subscription (server and browser). */
+export async function disablePush(): Promise<void> {
+  const prev = snapshot;
+  set({ status: "busy", endpoint: prev.endpoint });
+  try {
+    const reg = await navigator.serviceWorker.getRegistration("/");
+    const sub = reg ? await reg.pushManager.getSubscription() : null;
+    if (sub) {
+      await fetch("/api/push/subscribe", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ endpoint: sub.endpoint }),
+      }).catch(() => {});
+      await sub.unsubscribe();
+    }
+    set({ status: "off", endpoint: null });
+    toast("Benachrichtigungen deaktiviert.");
+  } catch (err) {
+    set({ status: "on", endpoint: prev.endpoint });
+    toast.error(err instanceof Error ? err.message : "Deaktivieren fehlgeschlagen.");
+  }
+}
+
+/** This device's push state, shared by every caller. "checking" on the server. */
+export function usePushState(): PushSnapshot {
+  return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+}
+
+// ---------------------------------------------------------------------------
+// UI
+// ---------------------------------------------------------------------------
+
+export interface PushToggleProps {
+  /** Icon button size (default `icon`: 40px on phones, 32px from md). */
+  size?: "icon-sm" | "icon" | "icon-lg";
+  className?: string;
+}
+
+/**
+ * Bell icon button (sidebar footer, Mehr sheet): subscribes this device to
+ * Web Push so it is notified when an assistant run needs an approval/answer or
+ * finishes while no window is watching. Needs a secure context (HTTPS via
+ * `tailscale serve`); on iOS only inside the installed app (Home Screen),
+ * iOS ≥ 16.4.
+ */
+export function PushToggle({ size = "icon", className }: PushToggleProps = {}) {
+  const { status, endpoint } = usePushState();
 
   const onClick = () => {
     if (status === "off") {
-      void enable();
+      void enablePush();
     } else if (status === "on") {
       // Two-step: a stray tap must not silently turn notifications off.
       toast("Benachrichtigungen sind aktiv", {
         id: "push-toggle",
-        action: { label: "Test", onClick: () => void sendTest(endpoint ?? undefined) },
-        cancel: { label: "Deaktivieren", onClick: () => void disable() },
+        action: { label: "Test", onClick: () => void sendPushTest(endpoint ?? undefined) },
+        cancel: { label: "Deaktivieren", onClick: () => void disablePush() },
       });
     }
   };
 
-  const disabled = status === "unsupported" || status === "denied" || status === "checking" || status === "busy";
-  const title =
-    status === "unsupported"
-      ? UNSUPPORTED_HINT
-      : status === "denied"
-        ? "Benachrichtigungen sind im Browser blockiert — in den Website-Einstellungen erlauben"
-        : status === "on"
-          ? "Push-Benachrichtigungen aktiv"
-          : "Push-Benachrichtigungen aktivieren";
+  const unavailable = pushUnavailable(status);
+  const label =
+    status === "on" ? "Push-Benachrichtigungen aktiv" : unavailable ? "Push-Benachrichtigungen" : "Push-Benachrichtigungen aktivieren";
+  const Icon = status === "on" ? BellRing : unavailable ? BellOff : Bell;
 
   return (
-    <button
-      type="button"
+    <IconButton
+      // Remount when switching between the plain tooltip and the controlled
+      // disabled-reason tooltip (Radix warns on controlled ⇄ uncontrolled).
+      key={unavailable ? "blocked" : "ready"}
+      size={size}
+      className={className}
+      aria-label={label}
+      aria-pressed={unavailable ? undefined : status === "on"}
+      tooltip={unavailable ? undefined : label}
+      disabledReason={unavailable ? PUSH_STATE_TEXT[status] : undefined}
+      disabled={status === "checking"}
+      loading={status === "busy"}
       onClick={onClick}
-      disabled={disabled}
-      title={title}
-      aria-label={title}
-      aria-pressed={status === "on"}
-      className="p-2 rounded-md hover:bg-accent text-muted-foreground disabled:opacity-50 disabled:hover:bg-transparent"
     >
-      {status === "busy" ? (
-        <Loader2 size={16} className="animate-spin" />
-      ) : status === "on" ? (
-        <BellRing size={16} />
-      ) : status === "off" || status === "checking" ? (
-        <Bell size={16} />
-      ) : (
-        <BellOff size={16} />
-      )}
-    </button>
+      <Icon />
+    </IconButton>
+  );
+}
+
+/**
+ * Settings → Benachrichtigungen: the switch with honest state text and
+ * [Test senden]. Same store as the PushToggle bell.
+ */
+export function PushSettingsCard({ className }: { className?: string }) {
+  const { status, endpoint } = usePushState();
+  const unavailable = pushUnavailable(status);
+  const busy = status === "busy" || status === "checking";
+  return (
+    <div className={className}>
+      <SwitchRow
+        icon={status === "on" ? <BellRing /> : unavailable ? <BellOff /> : <Bell />}
+        label="Push auf diesem Gerät"
+        description={
+          <span className={unavailable ? "text-warning" : undefined} aria-live="polite">
+            {PUSH_STATE_TEXT[status]}
+          </span>
+        }
+        checked={status === "on"}
+        disabled={unavailable || busy}
+        onCheckedChange={(on) => void (on ? enablePush() : disablePush())}
+      />
+      <div className="flex flex-wrap items-center gap-2 pl-7 pt-1">
+        <Button
+          variant="outline"
+          onClick={() => void sendPushTest(endpoint ?? undefined)}
+          disabledReason={status === "on" ? undefined : "Erst Push auf diesem Gerät aktivieren"}
+        >
+          <Send />
+          Test senden
+        </Button>
+      </div>
+    </div>
   );
 }

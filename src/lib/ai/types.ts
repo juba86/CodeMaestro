@@ -67,7 +67,17 @@ export type PromptTechnique =
   | "constitutional"
   | "step-back"
   | "analogical"
-  | "decomposition";
+  | "decomposition"
+  | "verification-loop"
+  | "explore-plan-code-commit"
+  | "evaluator-optimizer"
+  | "completion-promise-loop"
+  | "definition-of-done"
+  | "context-engineering"
+  | "long-context-grounding"
+  | "subagent-orchestration"
+  | "interview-then-spec"
+  | "scoped-autonomy";
 
 export interface PromptStructured {
   instructions: string;

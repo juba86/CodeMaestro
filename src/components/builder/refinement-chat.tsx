@@ -2,13 +2,25 @@
 
 import { useBuilderStore } from "@/stores/builder-store";
 import { useSettingsStore } from "@/stores/settings-store";
-import { REFINEMENT_SYSTEM_PROMPT, QUICK_ACTIONS } from "@/lib/prompt-engine/refinement-prompts";
+import { buildRefinementSystemPrompt, QUICK_ACTIONS } from "@/lib/prompt-engine/refinement-prompts";
+import { getModelProfile } from "@/lib/prompt-engine/model-profile";
 import { parseXmlPartial, PROMPT_TAGS, tagPattern } from "@/lib/prompt-engine/xml-parser";
 import { buildXml } from "@/lib/prompt-engine/xml-builder";
 import { getApiKey, getBaseUrl } from "@/lib/ai/client-keys";
-import { useState, useRef, useEffect } from "react";
-import { Send, Wand2 } from "lucide-react";
+import { useState, useRef, useEffect, useMemo } from "react";
+import { ArrowLeft, Send, Trash2, Wand2 } from "lucide-react";
 import { toast } from "sonner";
+import { Button, IconButton } from "@/components/ui/button";
+import { Field, FieldLabel } from "@/components/ui/field";
+import { Textarea } from "@/components/ui/textarea";
+import { Spinner } from "@/components/ui/spinner";
+import { confirm } from "@/components/ui/confirm";
+import { cn } from "@/components/ui/cn";
+import { StepFooter } from "./step-footer";
+import { quickActionLabel } from "./quick-action-labels";
+import { markXmlInSync } from "./draft-sync";
+
+const QUICK_BY_PROMPT = new Map(QUICK_ACTIONS.map((a) => [a.prompt, quickActionLabel(a.label)]));
 
 // The chat API accepts at most 50 messages; keep the newest history turns.
 const MAX_HISTORY = 40;
@@ -64,20 +76,28 @@ function extractPromptXml(reply: string): string | null {
   return best !== null && (bestTags.size >= 2 || bestTags.has("task")) ? best : null;
 }
 
-export function RefinementChat() {
+export function RefinementChat({ onBack }: { onBack: () => void }) {
   const {
-    xmlContent, setXmlContent, chatMessages, addChatMessage,
-    isGenerating, setIsGenerating, updateStructured, setStep,
+    xmlContent, setXmlContent, chatMessages, addChatMessage, clearChat,
+    isGenerating, setIsGenerating, updateStructured,
   } = useBuilderStore();
   const { activeProvider, activeModel } = useSettingsStore();
+  // The prompt is refined for the active model, as the quality panel lints it.
+  const systemPrompt = useMemo(
+    () => buildRefinementSystemPrompt(getModelProfile(activeProvider, activeModel)),
+    [activeProvider, activeModel]
+  );
   const [input, setInput] = useState("");
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [announce, setAnnounce] = useState("");
+  const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const mountedRef = useRef(true);
 
+  // Keep the newest turn in view inside the chat box (not the page).
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [chatMessages]);
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [chatMessages, isGenerating]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -101,6 +121,7 @@ export function RefinementChat() {
     while (history[0]?.role === "assistant") history.shift();
     addChatMessage({ role: "user", content: text });
     setInput("");
+    setAnnounce("");
     setIsGenerating(true);
 
     // Abort previous request if still running
@@ -128,7 +149,7 @@ export function RefinementChat() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           messages: [...history, { role: "user", content: userMsg }],
-          systemPrompt: REFINEMENT_SYSTEM_PROMPT,
+          systemPrompt,
           provider: activeProvider,
           model: activeModel,
           stream: true,
@@ -140,11 +161,11 @@ export function RefinementChat() {
 
       if (!res.ok) {
         const e = await res.json().catch(() => null);
-        throw new Error(typeof e?.error === "string" ? e.error : `Chat request failed (HTTP ${res.status})`);
+        throw new Error(typeof e?.error === "string" ? e.error : `Anfrage fehlgeschlagen (HTTP ${res.status})`);
       }
 
       const reader = res.body?.getReader();
-      if (!reader) throw new Error("No reader");
+      if (!reader) throw new Error("Keine Antwort erhalten");
 
       let fullResponse = "";
       let streamError = "";
@@ -165,7 +186,7 @@ export function RefinementChat() {
         try {
           const parsed = JSON.parse(data);
           if (parsed.type === "error") {
-            streamError = parsed.content || "Stream error";
+            streamError = parsed.content || "Fehler im Antwortstrom";
           } else if (parsed.content) {
             fullResponse += parsed.content;
           }
@@ -190,30 +211,37 @@ export function RefinementChat() {
       }
       if (streamDone) reader.cancel().catch(() => {});
 
-      if (streamError) toast.error(`AI error: ${streamError}`);
+      if (streamError) toast.error(`Fehler der KI: ${streamError}`);
       if (!fullResponse.trim()) {
-        if (!streamError) toast.error("The AI returned an empty reply.");
+        if (!streamError) toast.error("Die KI hat eine leere Antwort geliefert.");
         return;
       }
 
       addChatMessage({ role: "assistant", content: fullResponse });
+      setAnnounce("Antwort fertig");
 
       // Only apply a complete prompt, and merge it: sections the reply leaves
       // out (e.g. the technique, which models rarely echo) keep their values.
       const newXml = extractPromptXml(fullResponse);
       if (newXml) {
         updateStructured(parseXmlPartial(newXml));
-        setXmlContent(buildXml(useBuilderStore.getState().structured));
-        toast.success("Prompt updated from AI suggestion");
+        const next = useBuilderStore.getState().structured;
+        setXmlContent(buildXml(next));
+        markXmlInSync(next);
+        toast.success("Prompt aus dem Vorschlag übernommen.");
       } else if (completeTagsIn(fullResponse).size > 0) {
-        toast.info("The reply only contains a partial XML snippet — not applied automatically.");
+        toast.info("Die Antwort enthält nur einen XML-Ausschnitt – nicht automatisch übernommen.");
       }
     } catch (err) {
       if (!mountedRef.current) return;
       if (err instanceof DOMException && err.name === "AbortError") {
-        toast.error("Request timed out or was cancelled.");
+        toast.error("Zeitüberschreitung oder abgebrochen.");
       } else {
-        toast.error(err instanceof Error ? `Chat failed: ${err.message}` : "Chat failed. Check your API key.");
+        toast.error(
+          err instanceof Error
+            ? `Verfeinern fehlgeschlagen: ${err.message}`
+            : "Verfeinern fehlgeschlagen. Prüfe den API-Schlüssel in den Einstellungen.",
+        );
         console.error(err);
       }
     } finally {
@@ -222,74 +250,138 @@ export function RefinementChat() {
     }
   }
 
+  async function handleClear() {
+    const ok = await confirm({
+      title: "Verlauf löschen?",
+      description: "Der Prompt bleibt, wie er ist; nur das Gespräch wird gelöscht.",
+      confirmLabel: "Löschen",
+      tone: "danger",
+    });
+    if (ok) clearChat();
+  }
+
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-xl font-semibold">Refine with AI</h2>
-        <button
-          onClick={() => setStep("preview")}
-          className="px-3 py-1.5 text-sm rounded-md border border-input hover:bg-accent"
-        >
-          Back to Preview
-        </button>
+    <section aria-labelledby="pb-step-title" className="space-y-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 id="pb-step-title" className="text-lg font-semibold">
+            Verfeinern
+          </h2>
+          <p className="max-w-[70ch] text-ui text-muted-foreground">
+            Die KI überarbeitet den Prompt auf Zuruf. Vollständige Vorschläge werden direkt übernommen; die Vorschau zeigt
+            das Ergebnis.
+          </p>
+        </div>
+        {chatMessages.length > 0 ? (
+          <Button variant="ghost" size="sm" onClick={() => void handleClear()} disabledReason={isGenerating ? "Erst die Antwort abwarten" : undefined}>
+            <Trash2 aria-hidden /> Verlauf löschen
+          </Button>
+        ) : null}
       </div>
 
-      <div className="flex flex-wrap gap-2">
+      <div
+        role="group"
+        aria-label="Schnellaktionen"
+        className="-mx-4 flex gap-1.5 overflow-x-auto px-4 pb-1 scrollbar-none md:mx-0 md:flex-wrap md:overflow-visible md:px-0 md:pb-0 [&>*]:shrink-0"
+      >
         {QUICK_ACTIONS.map((action) => (
-          <button
+          <Button
             key={action.label}
+            variant="outline"
+            size="sm"
             onClick={() => sendMessage(action.prompt)}
-            disabled={isGenerating}
-            className="flex items-center gap-1 px-3 py-1.5 text-xs rounded-md border border-input hover:bg-accent disabled:opacity-50"
+            disabledReason={isGenerating ? "Erst die Antwort abwarten" : undefined}
           >
-            <Wand2 size={12} /> {action.label}
-          </button>
+            <Wand2 aria-hidden className="size-3.5" /> {quickActionLabel(action.label)}
+          </Button>
         ))}
       </div>
 
-      <div className="border border-border rounded-lg h-[400px] flex flex-col">
-        <div className="flex-1 overflow-y-auto p-4 space-y-3">
-          {chatMessages.length === 0 && (
-            <p className="text-sm text-muted-foreground text-center py-8">
-              Use quick actions or type a message to refine your prompt.
+      <div className="flex h-[min(60dvh,520px)] min-h-80 flex-col overflow-hidden rounded-lg border border-border bg-card">
+        <div
+          ref={scrollRef}
+          role="region"
+          aria-label="Verlauf"
+          tabIndex={0}
+          className="flex-1 space-y-3 overflow-y-auto p-3 outline-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring md:p-4"
+        >
+          {chatMessages.length === 0 && !isGenerating ? (
+            <p className="py-8 text-center text-ui text-muted-foreground">
+              Nutze eine Schnellaktion oder schreib, was am Prompt besser werden soll.
             </p>
-          )}
-          {chatMessages.map((msg, idx) => (
-            <div
-              key={idx}
-              className={`text-sm rounded-lg px-3 py-2 max-w-[85%] ${
-                msg.role === "user"
-                  ? "ml-auto bg-primary text-primary-foreground"
-                  : "bg-accent"
-              }`}
-            >
-              <pre className="whitespace-pre-wrap font-sans">{msg.content}</pre>
-            </div>
-          ))}
-          {isGenerating && (
-            <div className="text-sm text-muted-foreground animate-pulse">Thinking...</div>
-          )}
-          <div ref={messagesEndRef} />
+          ) : null}
+          {chatMessages.map((msg, idx) => {
+            const quick = msg.role === "user" ? QUICK_BY_PROMPT.get(msg.content) : undefined;
+            return (
+              <div
+                key={idx}
+                className={cn(
+                  "max-w-[90%] rounded-lg px-3 py-2 text-sm md:max-w-[85%]",
+                  msg.role === "user"
+                    ? "ml-auto border border-primary-border bg-primary-subtle text-foreground"
+                    : "border border-border bg-surface-2 text-foreground",
+                )}
+              >
+                <span className="sr-only">{msg.role === "user" ? "Du: " : "KI: "}</span>
+                {quick ? (
+                  <p className="flex items-center gap-1.5 font-medium">
+                    <Wand2 aria-hidden className="size-3.5 text-primary-text" /> {quick}
+                  </p>
+                ) : (
+                  <pre className="whitespace-pre-wrap break-words font-sans">{msg.content}</pre>
+                )}
+              </div>
+            );
+          })}
+          {isGenerating ? (
+            <p className="flex items-center gap-2 text-ui text-muted-foreground">
+              <Spinner /> Antwort wird erstellt …
+            </p>
+          ) : null}
         </div>
+        <span className="sr-only" aria-live="polite">
+          {announce}
+        </span>
 
-        <div className="border-t border-border p-3 flex gap-2">
-          <input
-            className="flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-            placeholder="Ask for improvements..."
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && sendMessage(input)}
-            disabled={isGenerating}
-          />
-          <button
-            onClick={() => sendMessage(input)}
-            disabled={isGenerating || !input.trim()}
-            className="p-2 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+        <form
+          className="flex items-end gap-2 border-t border-border p-2.5 md:p-3"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void sendMessage(input);
+          }}
+        >
+          <Field className="min-w-0 flex-1">
+            <FieldLabel className="sr-only">Nachricht an die KI</FieldLabel>
+            <Textarea
+              autosize={{ min: 1, max: 6 }}
+              placeholder="Was soll besser werden? z. B. „Kürzer und mit klarer Definition of Done“"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  void sendMessage(input);
+                }
+              }}
+            />
+          </Field>
+          <IconButton
+            type="submit"
+            aria-label="Senden"
+            variant="primary"
+            size="icon-lg"
+            disabledReason={isGenerating ? "Erst die Antwort abwarten" : !input.trim() ? "Erst eine Nachricht eingeben" : undefined}
           >
-            <Send size={16} />
-          </button>
-        </div>
+            <Send />
+          </IconButton>
+        </form>
       </div>
-    </div>
+
+      <StepFooter>
+        <Button variant="outline" size="lg" onClick={onBack}>
+          <ArrowLeft aria-hidden /> Zurück: Vorschau
+        </Button>
+      </StepFooter>
+    </section>
   );
 }

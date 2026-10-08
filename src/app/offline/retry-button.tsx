@@ -1,20 +1,39 @@
 "use client";
 
+import { useEffect } from "react";
+import { RefreshCw } from "lucide-react";
+import { Button } from "@/components/ui/button";
+
+function retry() {
+  // The worker serves the offline page under the URL that failed — a reload
+  // retries exactly that page.
+  if (window.location.pathname === "/offline") window.location.assign("/");
+  else window.location.reload();
+}
+
+/**
+ * "Erneut versuchen". A real link to the current URL (href=""), so it also
+ * retries without JavaScript; with JavaScript it retries automatically as
+ * soon as the device is back online.
+ */
 export function RetryButton() {
-  const retry = () => {
-    // The worker serves the offline page under the URL that failed — a reload
-    // retries exactly that page.
-    if (window.location.pathname === "/offline") window.location.assign("/");
-    else window.location.reload();
-  };
+  useEffect(() => {
+    window.addEventListener("online", retry);
+    return () => window.removeEventListener("online", retry);
+  }, []);
 
   return (
-    <button
-      type="button"
-      onClick={retry}
-      className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-    >
-      Erneut versuchen
-    </button>
+    <Button asChild variant="primary" size="lg">
+      <a
+        href=""
+        onClick={(e) => {
+          e.preventDefault();
+          retry();
+        }}
+      >
+        <RefreshCw aria-hidden="true" />
+        Erneut versuchen
+      </a>
+    </Button>
   );
 }

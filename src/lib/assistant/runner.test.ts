@@ -1,11 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { chmodSync, mkdtempSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 
 vi.mock("@/lib/github", () => ({ githubEnv: vi.fn(async () => ({})), GITHUB_SANDBOX_DOMAINS: [] }));
 
-import { runTurn, isRunning, stopSession, type AssistantSessionRow, type NormalizedEvent } from "./runner";
+import { PERMISSION_PROMPT_TOOL, describeDenials, runTurn, isRunning, isPlainAgent, mapToolsForGemini, stopSession, type AssistantSessionRow, type NormalizedEvent } from "./runner";
 
 // A stand-in `claude` binary on PATH that replays a scripted stream-json run.
 const binDir = mkdtempSync(path.join(tmpdir(), "cm-fake-claude-"));
@@ -13,9 +13,25 @@ const workDir = mkdtempSync(path.join(tmpdir(), "cm-work-"));
 const oldPath = process.env.PATH;
 
 const FAKE = `#!/usr/bin/env node
+const fs = require("fs");
 const mode = process.env.FAKE_MODE || "stream";
+const argv = process.argv.slice(2);
 const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
-if (mode === "hang") {
+if (mode === "argv") {
+  // Record the arguments and the --mcp-config file as seen during the run.
+  const i = argv.indexOf("--mcp-config");
+  const mcp = i >= 0 ? JSON.parse(fs.readFileSync(argv[i + 1], "utf8")) : null;
+  fs.writeFileSync(process.env.FAKE_ARGV, JSON.stringify({ argv, mcp, timeout: process.env.MCP_TOOL_TIMEOUT }));
+  out({ type: "system", subtype: "init", session_id: "s-argv", model: "m" });
+  out({ type: "result", result: "ok", total_cost_usd: 0, is_error: false, session_id: "s-argv" });
+} else if (mode === "missing" && argv.includes("--resume")) {
+  process.stderr.write("No conversation found with session ID: " + argv[argv.indexOf("--resume") + 1] + "\\n");
+  process.exit(1);
+} else if (mode === "denied") {
+  out({ type: "system", subtype: "init", session_id: "s-d", model: "m" });
+  out({ type: "result", result: "Ich warte auf die Freigabe.", total_cost_usd: 0, is_error: false, session_id: "s-d",
+    permission_denials: [{ tool_name: "Bash", tool_use_id: "t", tool_input: { command: "npm install" } }, { tool_name: "Bash", tool_use_id: "u", tool_input: { command: "npm install" } }] });
+} else if (mode === "hang") {
   out({ type: "system", subtype: "init", session_id: "s-hang", model: "m" });
   process.on("SIGINT", () => process.exit(130));
   setInterval(() => {}, 1000);
@@ -45,6 +61,7 @@ beforeAll(() => {
 afterAll(() => {
   process.env.PATH = oldPath;
   delete process.env.FAKE_MODE;
+  delete process.env.FAKE_ARGV;
 });
 
 function row(id: string, extra: Partial<AssistantSessionRow> = {}): AssistantSessionRow {
@@ -87,5 +104,88 @@ describe("runTurn (claude stream-json)", () => {
     expect(events.some((e) => e.type === "error" && e.content === "Gestoppt.")).toBe(true);
     expect(isRunning("r3")).toBe(false);
     expect(stopSession("r3")).toBe(false);
+  });
+});
+
+describe("runTurn (claude conversation handling)", () => {
+  it("forks the session's conversation and registers the permission-prompt tool for interactive runs", async () => {
+    process.env.FAKE_MODE = "argv";
+    const file = path.join(workDir, "argv.json");
+    process.env.FAKE_ARGV = file;
+    const res = await runTurn(
+      row("r4", { externalId: "conv-1", forkSession: true, ephemeral: true, interactive: true }),
+      "x", undefined, () => {}
+    );
+    expect(res).toEqual({ externalId: "s-argv", costUsd: 0, isError: false });
+    const seen = JSON.parse(readFileSync(file, "utf8"));
+    const argv: string[] = seen.argv;
+    expect(argv.slice(argv.indexOf("--resume"), argv.indexOf("--resume") + 3)).toEqual(["--resume", "conv-1", "--fork-session"]);
+    expect(argv).toContain("--no-session-persistence");
+    const mcpAt = argv.indexOf("--mcp-config");
+    // The next option ends --mcp-config's value list.
+    expect(argv[mcpAt + 2]).toBe("--permission-prompt-tool");
+    expect(argv[mcpAt + 3]).toBe(PERMISSION_PROMPT_TOOL);
+    expect(seen.mcp.mcpServers.codemaestro.args[0]).toMatch(/assistant-permission-mcp\.mjs$/);
+    expect(Object.keys(seen.mcp.mcpServers.codemaestro.env).sort()).toEqual(["PB_APPROVAL_TIMEOUT_MS", "PB_BASE_URL", "PB_HOOK_TOKEN", "PB_SESSION_ID"]);
+    expect(Number(seen.timeout)).toBeGreaterThan(30 * 60_000);
+    expect(existsSync(argv[mcpAt + 1])).toBe(false); // removed after the run
+  });
+
+  it("keeps unattended runs without the permission tool and without forking", async () => {
+    process.env.FAKE_MODE = "argv";
+    const file = path.join(workDir, "argv2.json");
+    process.env.FAKE_ARGV = file;
+    await runTurn(row("r5", { externalId: "conv-2" }), "x", undefined, () => {});
+    const { argv } = JSON.parse(readFileSync(file, "utf8"));
+    expect(argv).toContain("--resume");
+    expect(argv).not.toContain("--fork-session");
+    expect(argv).not.toContain("--mcp-config");
+    expect(argv).not.toContain("--no-session-persistence");
+  });
+
+  it("starts a new conversation when the stored one is gone", async () => {
+    process.env.FAKE_MODE = "missing";
+    const events: NormalizedEvent[] = [];
+    const res = await runTurn(row("r6", { externalId: "gone-1234567890" }), "x", undefined, (e) => events.push(e));
+    expect(res).toEqual({ externalId: "s-1", costUsd: 0.02, isError: false });
+    expect(events[0]).toMatchObject({ type: "notice" });
+    expect(events[0].content).toContain("gone-123");
+    expect(events.filter((e) => e.type === "error")).toEqual([]);
+    expect(events.filter((e) => e.type === "done")).toHaveLength(1);
+  });
+
+  it("reports tool calls an unattended run denied", async () => {
+    process.env.FAKE_MODE = "denied";
+    const events: NormalizedEvent[] = [];
+    await runTurn(row("r7"), "x", undefined, (e) => events.push(e));
+    const notice = events.find((e) => e.type === "notice");
+    expect(notice?.content).toContain("Ohne Freigabe blockiert (1): Bash: npm install");
+    // Interactive runs ask instead, so nothing to report there.
+    const quiet: NormalizedEvent[] = [];
+    await runTurn(row("r8", { interactive: true }), "x", undefined, (e) => quiet.push(e));
+    expect(quiet.some((e) => e.type === "notice")).toBe(false);
+  });
+
+  it("describes denials compactly", () => {
+    expect(describeDenials([{ tool_name: "WebFetch", tool_input: { url: "https://x.dev" } }, { tool_name: "Task" }])).toEqual([
+      "WebFetch: https://x.dev",
+      "Task",
+    ]);
+  });
+});
+
+describe("tool/provider lookups with free-text keys", () => {
+  it("maps allowedTools for gemini without consulting Object.prototype", () => {
+    expect(mapToolsForGemini("Read,Bash")).toBe("read_file,read_many_files,list_directory,run_shell_command");
+    // Unknown names pass through unchanged — prototype names included; they
+    // used to resolve to inherited functions and throw "is not iterable".
+    expect(mapToolsForGemini("constructor,toString,Glob")).toBe("constructor,toString,glob");
+    expect(mapToolsForGemini("__proto__")).toBe("__proto__");
+  });
+
+  it("does not treat prototype names as plain agents", () => {
+    expect(isPlainAgent("codex")).toBe(true);
+    expect(isPlainAgent("constructor")).toBe(false);
+    expect(isPlainAgent("toString")).toBe(false);
   });
 });

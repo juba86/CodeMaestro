@@ -2,29 +2,43 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
 import { z } from "zod";
 import * as yaml from "js-yaml";
+import { formatZodError, promptTagsSchema } from "@/lib/validation/schemas";
 
+// Same limits as createPromptSchema; tags go through the shared schema so
+// duplicates/empties are normalised before they can hit PromptTag's unique key.
 const importSchema = z.object({
-  title: z.string().min(1),
-  description: z.string().optional().default(""),
+  title: z.string().min(1).max(200),
+  description: z.string().max(2000).optional().default(""),
   content: z.string().min(1),
   structured: z.record(z.string(), z.unknown()).optional().default({}),
-  tags: z.array(z.string()).optional().default([]),
+  tags: promptTagsSchema.optional().default([]),
 });
 
 export async function POST(req: NextRequest) {
+  let data: unknown;
   try {
     const text = await req.text();
-    let data: unknown;
-
     // Try JSON first, then YAML
     try {
       data = JSON.parse(text);
     } catch {
       data = yaml.load(text);
     }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Invalid import data";
+    return NextResponse.json({ error: msg, code: "INVALID_IMPORT" }, { status: 400 });
+  }
 
-    const parsed = importSchema.parse(data);
+  const result = importSchema.safeParse(data);
+  if (!result.success) {
+    return NextResponse.json(
+      { error: formatZodError(result.error), code: "VALIDATION_ERROR" },
+      { status: 400 }
+    );
+  }
+  const parsed = result.data;
 
+  try {
     const prompt = await prisma.prompt.create({
       data: {
         title: parsed.title,
@@ -48,7 +62,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ prompt }, { status: 201 });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "Invalid import data";
-    return NextResponse.json({ error: msg }, { status: 400 });
+    console.error("Prompt import failed:", err);
+    return NextResponse.json({ error: "Import failed" }, { status: 500 });
   }
 }

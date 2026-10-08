@@ -1,11 +1,20 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import { FileText, Search } from "lucide-react";
+import { toast } from "sonner";
 import { useBuilderStore } from "@/stores/builder-store";
 import { parseXml } from "@/lib/prompt-engine/xml-parser";
 import type { PromptStructured } from "@/lib/ai/types";
-import { toast } from "sonner";
-import { X, Search, Loader2, FileText } from "lucide-react";
+import { formatRelative } from "@/lib/format";
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { InputGroup } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Spinner } from "@/components/ui/spinner";
+import { confirm } from "@/components/ui/confirm";
+import { cn } from "@/components/ui/cn";
+import { markXmlInSync } from "./draft-sync";
 
 interface LoadProjectDialogProps {
   open: boolean;
@@ -26,45 +35,52 @@ export function LoadProjectDialog({ open, onClose }: LoadProjectDialogProps) {
   const [items, setItems] = useState<PromptListItem[]>([]);
   const [q, setQ] = useState("");
   const [loading, setLoading] = useState(false);
+  const [failed, setFailed] = useState(false);
   const [opening, setOpening] = useState<string | null>(null);
 
   const fetchList = useCallback(async (search: string) => {
     setLoading(true);
+    setFailed(false);
     try {
       const res = await fetch(`/api/prompts?limit=50&q=${encodeURIComponent(search)}`);
+      if (!res.ok) throw new Error(String(res.status));
       const d = await res.json();
       setItems(d.prompts || []);
     } catch {
-      toast.error("Projekte konnten nicht geladen werden.");
+      setFailed(true);
     } finally {
       setLoading(false);
     }
   }, []);
 
+  // Initial load on open, debounced while typing.
   useEffect(() => {
     if (!open) return;
-    fetchList("");
-  }, [open, fetchList]);
-
-  // Debounced search.
-  useEffect(() => {
-    if (!open) return;
-    const t = setTimeout(() => fetchList(q), 250);
+    const t = setTimeout(() => fetchList(q), q ? 250 : 0);
     return () => clearTimeout(t);
   }, [q, open, fetchList]);
 
-  if (!open) return null;
-
   async function handleOpen(id: string) {
-    // Guard: don't silently discard an unsaved draft that was never saved.
+    // Guard: don't silently discard a draft that was never saved.
     const isUnsavedDraft = xmlContent.trim() && !currentPromptId;
-    if (isUnsavedDraft && !window.confirm("Du hast einen ungespeicherten Entwurf. Trotzdem ein anderes Projekt laden? Der Entwurf geht verloren.")) {
+    if (
+      isUnsavedDraft &&
+      !(await confirm({
+        title: "Entwurf verwerfen?",
+        description: "Du hast einen ungespeicherten Entwurf. Wenn du ein anderes Projekt lädst, geht er verloren.",
+        confirmLabel: "Verwerfen",
+        tone: "danger",
+      }))
+    ) {
       return;
     }
     setOpening(id);
     try {
       const res = await fetch(`/api/prompts/${id}`);
-      if (!res.ok) { toast.error("Projekt nicht gefunden."); return; }
+      if (!res.ok) {
+        toast.error("Projekt nicht gefunden.");
+        return;
+      }
       const { prompt } = await res.json();
 
       // Prefer the persisted structured JSON; fall back to parsing the XML.
@@ -84,6 +100,7 @@ export function LoadProjectDialog({ open, onClose }: LoadProjectDialogProps) {
         content: prompt.content,
         structured,
       });
+      markXmlInSync();
       toast.success(`Projekt geladen: ${prompt.title}`);
       onClose();
     } catch {
@@ -94,75 +111,75 @@ export function LoadProjectDialog({ open, onClose }: LoadProjectDialogProps) {
   }
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="load-dialog-title"
-        className="bg-background border border-border rounded-lg w-full max-w-lg max-h-[80vh] flex flex-col"
-      >
-        <div className="flex items-center justify-between p-4 border-b border-border">
-          <h2 id="load-dialog-title" className="text-lg font-semibold">Projekt laden</h2>
-          <button onClick={onClose} className="p-1 hover:bg-accent rounded" aria-label="Schließen">
-            <X size={16} />
-          </button>
+    <Dialog
+      open={open}
+      onOpenChange={(o) => {
+        if (!o) onClose();
+      }}
+    >
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Projekt laden</DialogTitle>
+          <DialogDescription>Einen gespeicherten Prompt aus der Bibliothek im Builder weiterbearbeiten.</DialogDescription>
+        </DialogHeader>
+        <div className="px-5 pb-2 pt-1">
+          <InputGroup
+            leading={<Search />}
+            type="search"
+            aria-label="Projekte durchsuchen"
+            placeholder="Projekte durchsuchen …"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+          />
         </div>
-
-        <div className="p-3 border-b border-border">
-          <div className="relative">
-            <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
-            <input
-              autoFocus
-              className="w-full rounded-md border border-input bg-background pl-8 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-              placeholder="Projekte durchsuchen…"
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-            />
+        <DialogBody className="min-h-40 px-3 pb-4">
+          <div aria-live="polite" className="sr-only">
+            {loading ? "Lädt …" : failed ? "" : `${items.length} ${items.length === 1 ? "Projekt" : "Projekte"}`}
           </div>
-        </div>
-
-        <div className="flex-1 overflow-y-auto p-2 min-h-[120px]">
-          {loading ? (
-            <div className="flex items-center justify-center py-8 text-muted-foreground text-sm">
-              <Loader2 size={16} className="animate-spin mr-2" /> Lädt…
+          {loading && items.length === 0 ? (
+            <div className="space-y-2 px-2 py-1">
+              <Skeleton className="h-12 w-full" />
+              <Skeleton className="h-12 w-full" />
+              <Skeleton className="h-12 w-4/5" />
             </div>
+          ) : failed ? (
+            <p className="px-2 py-8 text-center text-ui text-danger">Projekte konnten nicht geladen werden.</p>
           ) : items.length === 0 ? (
-            <p className="text-sm text-muted-foreground text-center py-8">
-              {q ? "Keine Treffer." : "Noch keine gespeicherten Projekte."}
+            <p className="px-2 py-8 text-center text-ui text-muted-foreground">
+              {q ? "Keine Treffer." : "Noch keine Prompts gespeichert."}
             </p>
           ) : (
-            <ul className="space-y-1">
+            <ul className={cn("space-y-0.5", loading && "opacity-60")}>
               {items.map((p) => (
                 <li key={p.id}>
                   <button
-                    onClick={() => handleOpen(p.id)}
+                    type="button"
+                    onClick={() => void handleOpen(p.id)}
                     disabled={!!opening}
-                    className="w-full text-left rounded-md px-3 py-2 hover:bg-accent disabled:opacity-50 flex items-start gap-2"
+                    className="flex w-full items-start gap-2.5 rounded-md px-2 py-2 text-left hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:opacity-50"
                   >
-                    <FileText size={15} className="mt-0.5 shrink-0 text-muted-foreground" />
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium text-sm truncate">{p.title}</span>
-                        {p.id === currentPromptId && (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/15 text-primary shrink-0">aktuell</span>
-                        )}
-                      </div>
-                      {p.description && (
-                        <div className="text-xs text-muted-foreground truncate">{p.description}</div>
-                      )}
-                      <div className="text-[11px] text-muted-foreground mt-0.5">
-                        {new Date(p.updatedAt).toLocaleDateString()}
+                    <FileText aria-hidden className="mt-0.5 size-4 shrink-0 text-subtle-foreground" />
+                    <span className="min-w-0 flex-1">
+                      <span className="flex items-center gap-2">
+                        <span className="truncate text-sm font-medium md:text-ui">{p.title}</span>
+                        {p.id === currentPromptId ? <Badge variant="brand">geöffnet</Badge> : null}
+                      </span>
+                      {p.description ? (
+                        <span className="block truncate text-xs text-muted-foreground">{p.description}</span>
+                      ) : null}
+                      <span className="mt-0.5 block text-xs text-subtle-foreground">
+                        {formatRelative(p.updatedAt)}
                         {p.tags.length > 0 && ` · ${p.tags.map((t) => t.tag).join(", ")}`}
-                      </div>
-                    </div>
-                    {opening === p.id && <Loader2 size={14} className="animate-spin shrink-0 mt-0.5" />}
+                      </span>
+                    </span>
+                    {opening === p.id ? <Spinner aria-label="Wird geladen" className="mt-0.5" /> : null}
                   </button>
                 </li>
               ))}
             </ul>
           )}
-        </div>
-      </div>
-    </div>
+        </DialogBody>
+      </DialogContent>
+    </Dialog>
   );
 }

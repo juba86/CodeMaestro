@@ -2,7 +2,7 @@
 //
 // Run from the project root (loads .env like prisma.config.ts does, then uses
 // the same DATABASE_URL resolution as the app):
-//   npx jiti prisma/seed.ts
+//   npm run db:seed        (or: npx prisma db seed, or: npx jiti prisma/seed.ts)
 //
 // Built-in templates live in code (src/lib/templates/built-in.ts) and are NOT
 // stored in the database: the gallery merges them with the custom templates
@@ -13,10 +13,23 @@
 // Custom templates with real content are never touched. Safe to re-run.
 // Must be the first import: the client resolves DATABASE_URL when it loads.
 import "dotenv/config";
+import { fileURLToPath } from "node:url";
+import { createJiti } from "jiti";
 import { prisma } from "../src/lib/db/client";
-import { builtInTemplates } from "../src/lib/templates/built-in";
+import type { BuiltInTemplate } from "../src/lib/templates/built-in";
+
+// App modules import each other through the "@/…" path alias (tsconfig paths),
+// which a plain `jiti`/node run cannot resolve ("Cannot find module
+// @/lib/prompt-engine/xml-builder"). Load them through a jiti instance that
+// knows the alias — the same mapping vitest.config.ts uses.
+const appLoader = createJiti(import.meta.url, {
+  alias: { "@/": fileURLToPath(new URL("../src/", import.meta.url)) },
+});
 
 async function main() {
+  const { builtInTemplates } = await appLoader.import<{ builtInTemplates: BuiltInTemplate[] }>(
+    "../src/lib/templates/built-in"
+  );
   const slugs = builtInTemplates.map((t) => t.slug);
   const { count } = await prisma.template.deleteMany({
     where: { slug: { in: slugs }, content: "" },

@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { NextRequest } from "next/server";
 
 // --- In-memory Prisma stand-in -------------------------------------------------
-type Row = { sessionId: string; role: string; content: string; meta: string; createdAt: Date };
+type Row = { id?: string; sessionId: string; role: string; content: string; meta: string; createdAt: Date };
 const db = vi.hoisted(() => ({
   sessions: new Map<string, Record<string, unknown>>(),
   messages: [] as Row[],
@@ -26,8 +27,26 @@ vi.mock("@/lib/db/client", () => ({
     },
     assistantMessage: {
       create: vi.fn(async ({ data }: { data: Row }) => {
-        db.messages.push(data);
-        return data;
+        const row = { id: `m${db.messages.length + 1}`, ...data };
+        db.messages.push(row);
+        return row;
+      }),
+      findMany: vi.fn(async ({ where, orderBy, take }: {
+        where: { sessionId: string; role: string; meta: { contains: string } };
+        orderBy: { createdAt: "asc" | "desc" };
+        take: number;
+      }) => {
+        const rows = db.messages
+          .filter((m) => m.sessionId === where.sessionId && m.role === where.role && m.meta.includes(where.meta.contains))
+          .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+        return (orderBy.createdAt === "desc" ? rows.reverse() : rows).slice(0, take);
+      }),
+      findUnique: vi.fn(async ({ where }: { where: { id: string } }) => db.messages.find((m) => m.id === where.id) ?? null),
+      update: vi.fn(async ({ where, data }: { where: { id: string }; data: Partial<Row> }) => {
+        const m = db.messages.find((x) => x.id === where.id);
+        if (!m) throw new Error("not found");
+        Object.assign(m, data);
+        return m;
       }),
     },
   },
@@ -37,6 +56,10 @@ vi.mock("@/lib/knowledge/retrieve", () => ({
   augmentPromptWithKnowledge: vi.fn(async (prompt: string) => ({ injected: false, prompt, sources: [] })),
 }));
 vi.mock("@/lib/push", () => ({ notifySession: vi.fn(async () => {}) }));
+vi.mock("@/lib/assistant/security", async (orig) => ({
+  ...(await orig<typeof import("@/lib/assistant/security")>()),
+  resolveWorkdir: async (p: string) => p,
+}));
 
 const runTurnMock = vi.hoisted(() => vi.fn());
 vi.mock("./runner", async (orig) => ({
@@ -44,8 +67,11 @@ vi.mock("./runner", async (orig) => ({
   runTurn: runTurnMock,
 }));
 
-import { executeTurn, launchRun, persistUserMessage, stopRunNow } from "./session-run";
-import { getActiveRun, subscribe, type BufferedEvent } from "./run-hub";
+import { executeTurn, launchRun, stopRunNow } from "./session-run";
+import { SessionBusyError, getActiveRun, subscribe, type BufferedEvent } from "./run-hub";
+import { createApproval, listPending, waitForDecision } from "./approvals";
+import { POST as postMessage } from "@/app/api/assistant/sessions/[id]/message/route";
+import { POST as postLoop } from "@/app/api/assistant/sessions/[id]/loop/route";
 
 function seedSession(id: string) {
   db.sessions.set(id, {
@@ -67,6 +93,47 @@ beforeEach(() => {
   runTurnMock.mockReset();
 });
 
+describe("orchestration handoff", () => {
+  it("passes a pending orchestration summary to the next turn once", async () => {
+    const id = `sr-${++n}`;
+    seedSession(id);
+    db.messages.push({
+      id: "syn-1", sessionId: id, role: "synthesis", content: "Login gebaut.\n1. Datenbank A oder B?",
+      meta: JSON.stringify({ handoff: "pending", task: "Login bauen" }), createdAt: new Date(Date.now() - 1000),
+    });
+    const prompts: string[] = [];
+    runTurnMock.mockImplementation(async (_row, prompt: string) => {
+      prompts.push(prompt);
+      return { externalId: "conv-9", costUsd: 0, isError: false };
+    });
+
+    const first = await launchRun({ sessionId: id, kind: "turn", origin: "pwa", work: (ctx) => executeTurn(ctx, "B bitte") });
+    await first.finished;
+    expect(prompts[0]).toContain("<task>\nLogin bauen\n</task>");
+    expect(prompts[0]).toContain("1. Datenbank A oder B?");
+    expect(prompts[0].endsWith("B bitte")).toBe(true);
+    expect(JSON.parse(db.messages.find((m) => m.id === "syn-1")!.meta)).toMatchObject({ handoff: "done", task: "Login bauen" });
+    expect(db.messages.some((m) => m.role === "system" && m.content.includes("an den Agenten übergeben"))).toBe(true);
+
+    const second = await launchRun({ sessionId: id, kind: "turn", origin: "pwa", work: (ctx) => executeTurn(ctx, "weiter") });
+    await second.finished;
+    expect(prompts[1]).toBe("weiter");
+  });
+
+  it("keeps the summary pending when the turn failed", async () => {
+    const id = `sr-${++n}`;
+    seedSession(id);
+    db.messages.push({
+      id: "syn-2", sessionId: id, role: "synthesis", content: "Fertig.",
+      meta: JSON.stringify({ handoff: "pending" }), createdAt: new Date(Date.now() - 1000),
+    });
+    runTurnMock.mockImplementation(async () => ({ externalId: null, costUsd: 0, isError: true }));
+    const run = await launchRun({ sessionId: id, kind: "turn", origin: "pwa", work: (ctx) => executeTurn(ctx, "x") });
+    await run.finished;
+    expect(JSON.parse(db.messages.find((m) => m.id === "syn-2")!.meta).handoff).toBe("pending");
+  });
+});
+
 describe("launchRun + executeTurn", () => {
   it("runs detached, persists the transcript in stream order and finalizes the session", async () => {
     const id = `sr-${++n}`;
@@ -82,8 +149,11 @@ describe("launchRun + executeTurn", () => {
       return { externalId: "cli-uuid-1", costUsd: 0.01, isError: false };
     });
 
-    await persistUserMessage(id, "fix it");
-    const run = await launchRun({ sessionId: id, kind: "turn", origin: "pwa", title: "fix it", work: (ctx) => executeTurn(ctx, "fix it") });
+    const run = await launchRun({
+      sessionId: id, kind: "turn", origin: "pwa", title: "fix it",
+      userMessage: { content: "fix it" },
+      work: (ctx) => executeTurn(ctx, "fix it"),
+    });
     expect(db.sessions.get(id)?.status).toBe("running");
     await expect(run.finished).resolves.toBe("idle");
 
@@ -109,7 +179,8 @@ describe("launchRun + executeTurn", () => {
     const id = `sr-${++n}`;
     seedSession(id);
     runTurnMock.mockImplementation(async (_row, _p, _k, emit, opts: { signal: AbortSignal }) => {
-      await new Promise<void>((resolve) => opts.signal.addEventListener("abort", () => resolve()));
+      // Like the runner: an abort before the start ends the turn at once.
+      if (!opts.signal.aborted) await new Promise<void>((resolve) => opts.signal.addEventListener("abort", () => resolve()));
       emit({ type: "error", content: "Gestoppt." });
       return { externalId: null, costUsd: 0, isError: true };
     });
@@ -145,5 +216,119 @@ describe("launchRun + executeTurn", () => {
     await run.finished;
     expect(db.sessions.get(id)?.externalId).toBe("keep-me");
     expect(runTurnMock.mock.calls[0][0].externalId).toBeNull();
+  });
+});
+
+const userRows = (id: string) => db.messages.filter((m) => m.sessionId === id && m.role === "user");
+
+describe("starting a run persists the user message only for the start that wins", () => {
+  it("launchRun: of two concurrent starts exactly one claims the session and writes its row", async () => {
+    const id = `sr-${++n}`;
+    seedSession(id);
+    runTurnMock.mockResolvedValue({ externalId: null, costUsd: 0, isError: false });
+    const start = (prompt: string) =>
+      launchRun({ sessionId: id, kind: "turn", origin: "pwa", userMessage: { content: prompt }, work: (ctx) => executeTurn(ctx, prompt) });
+
+    const [a, b] = await Promise.allSettled([start("first"), start("second")]);
+    expect(a.status).toBe("fulfilled");
+    expect(b.status === "rejected" && b.reason).toBeInstanceOf(SessionBusyError);
+    const run = (a as PromiseFulfilledResult<Awaited<ReturnType<typeof start>>>).value;
+    await run.finished;
+
+    const users = userRows(id);
+    expect(users.map((m) => m.content)).toEqual(["first"]);
+    // Still strictly before the run start: GET cuts the transcript there and the
+    // client replays the run, so a later timestamp would hide the prompt.
+    expect(users[0].createdAt.getTime()).toBeLessThan(run.info.startedAt);
+  });
+
+  it("writes nothing when the session is already busy", async () => {
+    const id = `sr-${++n}`;
+    seedSession(id);
+    let finish!: () => void;
+    const first = await launchRun({
+      sessionId: id, kind: "loop", origin: "telegram", userMessage: { content: "running" },
+      work: () => new Promise((r) => { finish = () => r({ isError: false }); }),
+    });
+    await expect(
+      launchRun({ sessionId: id, kind: "turn", origin: "pwa", userMessage: { content: "late" }, work: async () => ({ isError: false }) })
+    ).rejects.toBeInstanceOf(SessionBusyError);
+    finish();
+    await first.finished;
+    expect(userRows(id).map((m) => m.content)).toEqual(["running"]);
+  });
+
+  const routes = {
+    message: (id: string, prompt: string) => postMessage(
+      new NextRequest(`http://127.0.0.1:3000/api/assistant/sessions/${id}/message`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt, useKnowledge: false }),
+      }),
+      { params: Promise.resolve({ id }) }
+    ),
+    loop: (id: string, prompt: string) => postLoop(
+      new NextRequest(`http://127.0.0.1:3000/api/assistant/sessions/${id}/loop`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt, maxIterations: 1 }),
+      }),
+      { params: Promise.resolve({ id }) }
+    ),
+  };
+
+  for (const [name, post] of Object.entries(routes)) {
+    it(`POST ${name}: two concurrent requests give one 202, one 409 and exactly one user row`, async () => {
+      const id = `sr-${++n}`;
+      seedSession(id);
+      runTurnMock.mockResolvedValue({ externalId: null, costUsd: 0, isError: false });
+      // Both requests pass the early isSessionBusy check before either claims.
+      const [a, b] = await Promise.all([post(id, "eins"), post(id, "zwei")]);
+      expect([a.status, b.status].sort()).toEqual([202, 409]);
+      const busy = a.status === 409 ? a : b;
+      expect(((await busy.json()) as { code: string }).code).toBe("SESSION_BUSY");
+      const ok = (await (a.status === 202 ? a : b).json()) as { runId: string; startedAt: number };
+
+      const users = userRows(id);
+      expect(users).toHaveLength(1);
+      expect(users[0].content).toContain(a.status === 202 ? "eins" : "zwei");
+      expect(users[0].createdAt.getTime()).toBeLessThan(ok.startedAt);
+      await vi.waitFor(() => expect(getActiveRun(id)).toBeNull());
+    });
+  }
+});
+
+describe("open approvals when a run ends", () => {
+  it("denies approvals and questions a run leaves open without Stop (CLI crash)", async () => {
+    const id = `sr-${++n}`;
+    seedSession(id);
+    const ids: string[] = [];
+    const run = await launchRun({
+      sessionId: id, kind: "turn", origin: "pwa",
+      work: async () => {
+        for (const [tool, input] of [
+          ["Bash", { command: "rm -rf build" }],
+          ["AskUserQuestion", { questions: [{ question: "Welche DB?", options: ["sqlite", "pg"] }] }],
+        ] as const) {
+          const r = await createApproval(id, tool, input);
+          if ("approvalId" in r) ids.push(r.approvalId);
+        }
+        expect(listPending(id)).toHaveLength(2);
+        return { isError: true }; // the CLI died while its hooks were still waiting
+      },
+    });
+    await expect(run.finished).resolves.toBe("error");
+
+    expect(ids).toHaveLength(2);
+    expect(listPending(id)).toEqual([]);
+    for (const a of ids) {
+      await expect(waitForDecision(a, 10)).resolves.toEqual({ decision: "deny", reason: "Lauf beendet." });
+    }
+    // The resolutions are part of the finished run, so replaying clients drop the cards.
+    const types = collect(id).map((e) => e.data.type);
+    expect(types.slice(-3)).toEqual(["approval_resolved", "question_resolved", "run_end"]);
+
+    // The next run's snapshot starts clean.
+    const next = await launchRun({
+      sessionId: id, kind: "turn", origin: "pwa",
+      work: async () => ({ isError: listPending(id).length > 0 }),
+    });
+    await expect(next.finished).resolves.toBe("idle");
   });
 });

@@ -3,7 +3,7 @@ import { augmentPromptWithKnowledge } from "@/lib/knowledge/retrieve";
 import { abortRun, beginRun, endRun, monotonicNow, type HubEvent, type RunHandle, type RunKind, type RunOrigin } from "./run-hub";
 import { denyAllPending } from "./approvals";
 import { runTurn, stopSession, type AssistantSessionRow, type NormalizedEvent } from "./runner";
-import { TranscriptWriter } from "./transcript";
+import { HANDOFF_DONE, HANDOFF_PENDING, TranscriptWriter } from "./transcript";
 import { notifySession } from "@/lib/push";
 
 export type DbSession = NonNullable<Awaited<ReturnType<typeof prisma.assistantSession.findUnique>>>;
@@ -36,10 +36,29 @@ export interface RunOutcome {
   isError: boolean;
 }
 
-/** Persists a user-authored row with a timestamp strictly before the run starts. */
-export async function persistUserMessage(sessionId: string, content: string, meta = "{}"): Promise<void> {
+export interface UserMessage {
+  content: string;
+  /** JSON string stored with the row. */
+  meta?: string;
+}
+
+/**
+ * Persists a user-authored row. `at` must lie before the run's `startedAt`:
+ * GET /sessions/[id] cuts the transcript at the run start and the client
+ * replays the run from there, so a later timestamp would hide the row.
+ *
+ * Prefer `launchRun({ userMessage })`, which persists only after the session
+ * was claimed — calling this first leaves an orphaned row when the start then
+ * fails with SessionBusyError.
+ */
+export async function persistUserMessage(
+  sessionId: string,
+  content: string,
+  meta = "{}",
+  at = monotonicNow()
+): Promise<void> {
   await prisma.assistantMessage.create({
-    data: { sessionId, role: "user", content, meta, createdAt: new Date(monotonicNow()) },
+    data: { sessionId, role: "user", content, meta, createdAt: new Date(at) },
   });
 }
 
@@ -48,22 +67,33 @@ export async function persistUserMessage(sessionId: string, content: string, met
  * detached from any HTTP request: clients attach via SSE (/events) and may come
  * and go. Throws SessionBusyError if the session already has an active run.
  *
- * Lifecycle: status → "running" in the DB, `work` executes, transcript rows are
- * flushed, status → idle/error, `run_end` is published (status "stopped" when
- * the run was aborted).
+ * Lifecycle: the session is claimed (one run per session), `userMessage` is
+ * persisted, status → "running" in the DB, `work` executes, transcript rows
+ * are flushed, open approvals/questions are denied, status → idle/error,
+ * `run_end` is published (status "stopped" when the run was aborted).
  */
 export async function launchRun(opts: {
   sessionId: string;
   kind: RunKind;
   origin: RunOrigin;
   title?: string;
+  /** The user's prompt row; written only once the session is claimed. */
+  userMessage?: UserMessage;
   work: (ctx: RunContext) => Promise<RunOutcome>;
 }): Promise<RunHandle> {
-  const handle = beginRun(opts.sessionId, opts.kind, opts.origin);
   const { sessionId } = opts;
+  // Claim first, persist second: a concurrent start then fails here with
+  // SessionBusyError before writing anything, instead of leaving a user row
+  // that never ran. The row keeps a timestamp taken *before* the claim, so it
+  // still sorts strictly before run.startedAt (GET cut-off and SSE replay).
+  const userAt = monotonicNow();
+  const handle = beginRun(sessionId, opts.kind, opts.origin);
   const runId = handle.info.runId;
 
   try {
+    if (opts.userMessage) {
+      await persistUserMessage(sessionId, opts.userMessage.content, opts.userMessage.meta, userAt);
+    }
     const current = await prisma.assistantSession.findUnique({ where: { id: sessionId }, select: { title: true } });
     await prisma.assistantSession.update({
       where: { id: sessionId },
@@ -98,6 +128,12 @@ export async function launchRun(opts: {
     } catch (err) {
       console.error("[launchRun] status update failed", err);
     }
+    // The CLIs of this run are gone (even when one crashed without a Stop), so
+    // nobody will consume a decision: deny what is still open. Otherwise the
+    // cards leak into the next run's snapshot (listPending) and the activity
+    // API. Synchronously right before endRun: the resolutions land in this
+    // run's buffer and no approval can be created in between.
+    denyAllPending(sessionId, "Lauf beendet.");
     void notifySession(sessionId, "run_end", { status, title: opts.title }); // before endRun: run_end detaches live SSE listeners
     endRun(sessionId, runId, status);
   })();
@@ -134,10 +170,79 @@ export interface TurnOutcome extends RunOutcome {
   externalId: string | null;
 }
 
+export interface Handoff {
+  id: string;
+  task: string;
+  summary: string;
+}
+
+/** Orchestration summaries the session's agent conversation has not seen yet (oldest first, at most 3). */
+export async function pendingHandoffs(sessionId: string): Promise<Handoff[]> {
+  const rows = await prisma.assistantMessage.findMany({
+    where: { sessionId, role: "synthesis", meta: { contains: `"handoff":"${HANDOFF_PENDING}"` } },
+    orderBy: { createdAt: "desc" },
+    take: 3,
+    select: { id: true, content: true, meta: true },
+  });
+  return rows.reverse().map((r) => {
+    let task = "";
+    try {
+      const meta = JSON.parse(r.meta || "{}") as { task?: unknown };
+      if (typeof meta.task === "string") task = meta.task;
+    } catch { /* malformed meta: summary only */ }
+    return { id: r.id, task, summary: r.content };
+  });
+}
+
 /**
- * Runs one CLI turn inside a run context: optional RAG augmentation, live
- * events into the hub, progressive transcript persistence, and the session's
- * resume id + cost bookkeeping.
+ * The prompt with what happened since the agent's last reply: orchestrations
+ * ran in forks of its conversation, so without this "mach weiter" or an
+ * answer to a question from the summary would reach an agent that knows
+ * nothing about them.
+ */
+export function withHandoffs(prompt: string, handoffs: Handoff[]): string {
+  return handoffs.length ? `${handoffBlock(handoffs)}\n\n${prompt}` : prompt;
+}
+
+/** The <context> block of withHandoffs ("" without handoffs). */
+export function handoffBlock(handoffs: Handoff[]): string {
+  if (!handoffs.length) return "";
+  const blocks = handoffs
+    .map((h) => `<orchestration>\n${h.task ? `<task>\n${h.task}\n</task>\n` : ""}<summary>\n${h.summary}\n</summary>\n</orchestration>`)
+    .join("\n");
+  return `<context>
+Since your last reply, CodeMaestro ran ${handoffs.length === 1 ? "an orchestration" : "orchestrations"} in this project: other agents worked on the task and may have changed files on disk. Their summary is below; the user's message follows and may answer questions from it.
+${blocks}
+</context>`;
+}
+
+/**
+ * The context block of the session's pending handoffs, for an orchestration:
+ * its planner and workers continue a fork of the conversation that has not
+ * seen earlier orchestrations either (e.g. the user answers a question from
+ * the last summary with the orchestrator still on). They stay pending — the
+ * session's own conversation still has to be told.
+ */
+export async function pendingHandoffContext(sessionId: string): Promise<string> {
+  return handoffBlock(await pendingHandoffs(sessionId).catch(() => [] as Handoff[]));
+}
+
+async function markHandoffsDone(handoffs: Handoff[]): Promise<void> {
+  for (const h of handoffs) {
+    const row = await prisma.assistantMessage.findUnique({ where: { id: h.id }, select: { meta: true } }).catch(() => null);
+    if (!row) continue;
+    let meta: Record<string, unknown> = {};
+    try { meta = JSON.parse(row.meta || "{}"); } catch { /* replaced below */ }
+    await prisma.assistantMessage
+      .update({ where: { id: h.id }, data: { meta: JSON.stringify({ ...meta, handoff: HANDOFF_DONE }) } })
+      .catch((err) => console.error("[executeTurn] handoff bookkeeping failed", err));
+  }
+}
+
+/**
+ * Runs one CLI turn inside a run context: optional RAG augmentation, pending
+ * orchestration summaries, live events into the hub, progressive transcript
+ * persistence, and the session's resume id + cost bookkeeping.
  */
 export async function executeTurn(ctx: RunContext, prompt: string, opts: TurnOptions = {}): Promise<TurnOutcome> {
   const session = await prisma.assistantSession.findUnique({ where: { id: ctx.sessionId } });
@@ -167,9 +272,18 @@ export async function executeTurn(ctx: RunContext, prompt: string, opts: TurnOpt
     } catch { /* RAG is best effort */ }
   }
 
+  // Orchestrations since the last turn ran in forks of this conversation.
+  const handoffs = await pendingHandoffs(ctx.sessionId).catch(() => [] as Handoff[]);
+  if (handoffs.length) {
+    effectivePrompt = withHandoffs(effectivePrompt, handoffs);
+    emit({ type: "notice", content: handoffs.length === 1 ? "Zusammenfassung der Orchestrierung an den Agenten übergeben." : `${handoffs.length} Orchestrierungs-Zusammenfassungen an den Agenten übergeben.` });
+  }
+
   const row = toSessionRow(session, { interactive: !!opts.interactive, ...opts.rowOverrides });
   const result = await runTurn(row, effectivePrompt, opts.apiKey, emit, { signal: ctx.signal });
   ctx.writer.flushText();
+  // A turn that failed may not have reached the agent: hand over again next time.
+  if (handoffs.length && !result.isError) await markHandoffsDone(handoffs);
 
   const keepContext = opts.rowOverrides?.externalId === undefined;
   try {

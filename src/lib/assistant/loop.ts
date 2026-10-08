@@ -6,14 +6,17 @@
 import type { z } from "zod";
 import { prisma } from "@/lib/db/client";
 import { assistantLoopSchema } from "@/lib/validation/schemas";
-import { SessionBusyError, isSessionBusy, type RunHandle, type RunOrigin } from "./run-hub";
-import { executeTurn, launchRun, persistUserMessage, type RunContext, type RunOutcome, type TurnOutcome } from "./session-run";
+import type { RunHandle, RunOrigin } from "./run-hub";
+import { executeTurn, launchRun, type RunContext, type RunOutcome, type TurnOutcome } from "./session-run";
 
 export type LoopConfig = z.infer<typeof assistantLoopSchema>;
 /** What callers pass in (defaults are filled in by assistantLoopSchema). */
 export type LoopInput = z.input<typeof assistantLoopSchema>;
 export type LoopPromptConfig = Pick<LoopConfig, "prompt" | "maxIterations" | "completionPromise" | "freshContext">;
-export type LoopEndReason = "promise" | "max" | "stopped" | "error";
+export type LoopEndReason = "promise" | "blocked" | "max" | "stopped" | "error";
+
+/** Promise text the agent prints when it cannot continue without the user. */
+export const BLOCKED_PROMISE = "BLOCKED";
 
 /** Progress log the agent keeps when every iteration starts with a fresh context. */
 export const LOOP_PROGRESS_FILE = ".codemaestro/loop-progress.md";
@@ -21,11 +24,12 @@ export const LOOP_PROGRESS_FILE = ".codemaestro/loop-progress.md";
 // Providers whose next turn resumes the previous conversation (see runner.ts:
 // claude/gemini --resume, opencode --continue). codex/aider — and anything
 // unknown — start from scratch every turn, so each iteration gets the full task.
-const RESUMING_PROVIDERS = new Set(["claude", "gemini", "opencode"]);
+const RESUMING_PROVIDERS = new Set(["claude", "gemini", "opencode", "pi"]);
 
 // Mirrors the labels the assistant UI shows for live loop events.
 const END_LABEL: Record<LoopEndReason, string> = {
   promise: "✅ Abschluss-Signal erkannt",
+  blocked: "⛔ Blockiert – braucht deine Eingabe",
   max: "Max. Iterationen erreicht",
   stopped: "Gestoppt",
   error: "Abbruch nach Fehler",
@@ -52,7 +56,8 @@ export function buildIterationPrompt(
   const finish = [
     "- When the whole task is complete and verified, end your final message with this line:",
     tag,
-    "- Output that line only when it is true. Never use it to end the loop early, and do not write the tag anywhere else. If you are blocked, explain the blocker and what you need instead.",
+    "- Output that line only when it is true. Never use it to end the loop early, and do not write the tag anywhere else.",
+    `- If you cannot make further progress without the user (missing access, an unclear requirement, a decision only they can make), explain the blocker and what you need, then end your message with <promise>${BLOCKED_PROMISE}</promise> so the loop pauses instead of repeating the same attempt.`,
   ];
 
   if (continued) {
@@ -94,8 +99,8 @@ export function hasCompletionPromise(text: string, promise: string): boolean {
   return false;
 }
 
-/** Waits `ms`, resolving early when `signal` aborts. */
-function pause(ms: number, signal: AbortSignal): Promise<void> {
+/** Waits `ms`, resolving early when `signal` aborts (at once if it already has). Shared with telegram.ts. */
+export function pause(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     if (signal.aborted) return resolve();
     const done = () => {
@@ -108,7 +113,8 @@ function pause(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-function formatDuration(sec: number): string {
+/** A loop interval in SECONDS as "2 h" / "5 min" / "90 s" (not format.ts's elapsed-time "0:42"). */
+export function formatDuration(sec: number): string {
   if (sec % 3600 === 0) return `${sec / 3600} h`;
   if (sec % 60 === 0) return `${sec / 60} min`;
   return `${sec} s`;
@@ -154,8 +160,10 @@ async function runLoop(ctx: RunContext, cfg: LoopConfig, resumable: boolean): Pr
 
     if (ctx.signal.aborted) return end("stopped", i);
     // Plain CLIs may echo the prompt (which names the tag) into their output.
-    if (hasCompletionPromise(turn.resultText.split(prompt).join(""), cfg.completionPromise)) {
-      return end("promise", i);
+    const output = turn.resultText.split(prompt).join("");
+    if (hasCompletionPromise(output, cfg.completionPromise)) return end("promise", i);
+    if (cfg.completionPromise.trim() !== BLOCKED_PROMISE && hasCompletionPromise(output, BLOCKED_PROMISE)) {
+      return end("blocked", i);
     }
     if (turn.isError && cfg.stopOnError) return end("error", i);
     // A failed turn may never have reached the model (spawn error, bad resume
@@ -186,19 +194,19 @@ export async function startLoopRun(sessionId: string, cfg: LoopInput, origin: Ru
   const loop = assistantLoopSchema.parse(cfg);
   const session = await prisma.assistantSession.findUnique({ where: { id: sessionId }, select: { provider: true } });
   if (!session) throw new Error("Session nicht gefunden.");
-  // Check right before persisting so a busy session gets no orphaned message.
-  if (isSessionBusy(sessionId)) throw new SessionBusyError();
 
   // Explicit allowlist: never persist the API key (or future secret fields);
   // the prompt is already the message content.
   const { maxIterations, completionPromise, intervalSec, freshContext, stopOnError, useKnowledge } = loop;
   const settings = { maxIterations, completionPromise, intervalSec, freshContext, stopOnError, useKnowledge };
-  await persistUserMessage(sessionId, `🔁 Loop: ${loop.prompt}`, JSON.stringify({ loop: settings }));
   return launchRun({
     sessionId,
     kind: "loop",
     origin,
     title: `[loop] ${loop.prompt}`,
+    // Persisted only once the session is claimed (SessionBusyError otherwise),
+    // so a concurrent start leaves no orphaned message.
+    userMessage: { content: `🔁 Loop: ${loop.prompt}`, meta: JSON.stringify({ loop: settings }) },
     work: (ctx) => runLoop(ctx, loop, RESUMING_PROVIDERS.has(session.provider)),
   });
 }

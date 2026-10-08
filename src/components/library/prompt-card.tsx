@@ -1,52 +1,60 @@
 "use client";
 
-import { Clock, Tag, GitBranch } from "lucide-react";
+import { formatRelative } from "@/lib/format";
+import { cn } from "@/components/ui/cn";
+
+export interface PromptSummary {
+  id: string;
+  title: string;
+  description: string;
+  updatedAt: string;
+  createdAt?: string;
+  tags: { id: string; tag: string }[];
+  _count: { versions: number; testResults: number };
+}
 
 interface PromptCardProps {
-  prompt: {
-    id: string;
-    title: string;
-    description: string;
-    updatedAt: string;
-    tags: { id: string; tag: string }[];
-    _count: { versions: number; testResults: number };
-  };
+  prompt: PromptSummary;
+  selected?: boolean;
   onClick: () => void;
 }
 
-export function PromptCard({ prompt, onClick }: PromptCardProps) {
+/** One library row: title, two-line description, version, date, tags. */
+export function PromptCard({ prompt, selected = false, onClick }: PromptCardProps) {
   return (
     <button
+      type="button"
+      data-prompt-id={prompt.id}
       onClick={onClick}
-      className="text-left p-4 rounded-lg border border-border hover:border-primary/50 hover:bg-accent/30 transition-colors space-y-2"
+      aria-current={selected ? "true" : undefined}
+      className={cn(
+        "block w-full rounded-lg border p-3 text-left transition-colors duration-150",
+        "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+        selected
+          ? "border-primary-border bg-primary-subtle"
+          : "border-border bg-card hover:border-border-strong hover:bg-accent/60",
+      )}
     >
-      <h3 className="font-semibold text-sm truncate">{prompt.title}</h3>
-      {prompt.description && (
-        <p className="text-xs text-muted-foreground line-clamp-2">{prompt.description}</p>
-      )}
-      <div className="flex items-center gap-3 text-xs text-muted-foreground">
-        <span className="flex items-center gap-1">
-          <GitBranch size={12} /> v{prompt._count.versions}
-        </span>
-        <span className="flex items-center gap-1">
-          <Clock size={12} /> {new Date(prompt.updatedAt).toLocaleDateString()}
-        </span>
-      </div>
-      {prompt.tags.length > 0 && (
-        <div className="flex flex-wrap gap-1">
-          {prompt.tags.slice(0, 3).map((t) => (
-            <span
-              key={t.id}
-              className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded bg-accent"
-            >
-              <Tag size={10} /> {t.tag}
-            </span>
-          ))}
-          {prompt.tags.length > 3 && (
-            <span className="text-[10px] text-muted-foreground">+{prompt.tags.length - 3}</span>
-          )}
-        </div>
-      )}
+      <span className="block truncate text-sm font-medium text-foreground md:text-ui">{prompt.title}</span>
+      {prompt.description ? (
+        <span className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">{prompt.description}</span>
+      ) : null}
+      <span className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-subtle-foreground">
+        <span className="font-mono tabular-nums">v{prompt._count.versions}</span>
+        <span aria-hidden>·</span>
+        <span>{formatRelative(prompt.updatedAt)}</span>
+        {prompt.tags.length > 0 ? (
+          <>
+            <span aria-hidden>·</span>
+            {prompt.tags.slice(0, 3).map((t) => (
+              <span key={t.id} className="rounded-sm border border-border bg-surface-2 px-1.5 leading-5 text-muted-foreground">
+                {t.tag}
+              </span>
+            ))}
+            {prompt.tags.length > 3 ? <span>+{prompt.tags.length - 3}</span> : null}
+          </>
+        ) : null}
+      </span>
     </button>
   );
 }

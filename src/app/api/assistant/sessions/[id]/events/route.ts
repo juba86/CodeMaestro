@@ -23,5 +23,7 @@ export async function GET(
     ? fromHeader
     : Number.isFinite(fromQuery) && fromQuery > 0 ? fromQuery : 0;
   const runId = req.nextUrl.searchParams.get("run") || undefined;
-  return sseResponse(id, since, req.signal, runId);
+  // ?observer=1: a read-only watcher (doesn't suppress push notifications).
+  const observer = req.nextUrl.searchParams.get("observer") === "1";
+  return sseResponse(id, since, req.signal, runId, { observer });
 }

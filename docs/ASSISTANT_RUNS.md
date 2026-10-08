@@ -43,7 +43,7 @@ GET /events?since=N  ◄── SSE: replay buffered events after N, then live, u
 
 `run_start`, `run_end {status: idle|error|stopped}`, `idle`, turn events
 (`init`, `text`, `thinking`, `tool_use`, `tool_result`, `result`, `error`,
-`knowledge`), approvals (`approval_request`, `approval_resolved`,
+`knowledge`, `notice`), approvals (`approval_request`, `approval_resolved`,
 `question_request`, `question_resolved`), orchestrator (`log`, `plan`,
 `subtask_start`, `subtask_text`, `subtask_end`, `synthesis`) and loop
 (`loop_iteration`, `loop_wait`, `loop_end`).
@@ -58,3 +58,48 @@ GET /events?since=N  ◄── SSE: replay buffered events after N, then live, u
   transcript.
 - The event buffer holds the last 5,000 events per run (oversized payloads are
   clipped); finished runs stay attachable for 60 s.
+
+## Questions and permission prompts
+
+`claude -p` has no one to ask: without a permission host it denies every tool
+call that would need a prompt (a Bash command outside the allowed tools, …)
+and does not even offer AskUserQuestion or ExitPlanMode — Claude then asks in
+plain text ("Ich warte auf die Freigabe …", "A, B oder C?") and the run is
+stuck. Interactive runs (PWA and Telegram turns, loops, orchestrator subtasks
+that change files) therefore start Claude Code with
+`--mcp-config <file> --permission-prompt-tool mcp__codemaestro__permission`
+(`scripts/assistant-permission-mcp.mjs`, a stdio MCP server using the same
+create + long-poll bridge as the PreToolUse hook):
+
+- AskUserQuestion becomes a question card with options and „Eigene Antwort“;
+  the answer goes back to Claude, which continues in the same run.
+- ExitPlanMode becomes a plan card (approve / revise with a hint).
+- A tool call that needs permission becomes an approval card instead of a
+  silent deny; a denial with a hint tells Claude what to do instead.
+- The MCP config file (0600) carries the bridge's token, never the command
+  line; `MCP_TOOL_TIMEOUT` is raised above the approval timeout.
+
+Unattended runs (read-only orchestrator workers, planning, reviews, the
+summary) keep the silent deny; denied tool calls are reported as a `notice`
+row ("Ohne Freigabe blockiert …") so a "waiting for approval" has a visible
+cause.
+
+## Continuing the conversation
+
+- Every turn resumes the session's Claude Code conversation (`--resume <id>`).
+  If that conversation is gone for the working directory, the turn says so
+  and starts a new one instead of failing.
+- „Neue Session“ lists the folder's earlier Claude Code conversations
+  (`GET /api/assistant/claude-sessions?cwd=…`, read from
+  `${CLAUDE_CONFIG_DIR:-~/.claude}/projects/`) and preselects the newest; the
+  session is created on it (`resumeSessionId`), so the first turn resumes it.
+  A conversation already linked to a session opens that session instead.
+- Orchestrations continue it too: a Claude Code planner and Claude Code
+  workers of a Claude Code session run on a fork of the conversation
+  (`--resume <id> --fork-session --no-session-persistence`), so „mach weiter“
+  works and the session's own thread stays clean. Reviews and the summary run
+  fresh.
+- The orchestration's summary is handed over: the session's next turn starts
+  with a `<context>` block holding it (once; marked `handoff: done` on the
+  synthesis row), so answering a question from the summary just works. Further
+  orchestrations see pending summaries as well.

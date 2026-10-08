@@ -3,8 +3,18 @@
 import { useState, useEffect, useCallback } from "react";
 import { useSettingsStore } from "@/stores/settings-store";
 import { getApiKey, getBaseUrl } from "@/lib/ai/client-keys";
-import { Plus, Trash2, Play, Check, X, Loader2 } from "lucide-react";
+import { getProvider } from "@/lib/ai/catalog";
+import { CircleCheck, CircleX, FlaskConical, Play, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
+import { Button, IconButton } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Field, FieldError, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { SimpleSelect } from "@/components/ui/select";
+import { EmptyState } from "@/components/ui/empty-state";
+import { Spinner } from "@/components/ui/spinner";
+import { confirm } from "@/components/ui/confirm";
 
 type MatchType = "contains" | "icontains" | "regex" | "equals";
 
@@ -29,6 +39,8 @@ const MATCH_LABELS: Record<MatchType, string> = {
   equals: "exakt gleich",
 };
 
+const MATCH_OPTIONS = (Object.keys(MATCH_LABELS) as MatchType[]).map((k) => ({ value: k, label: MATCH_LABELS[k] }));
+
 // An empty `expected` is deliberate only for "equals" (the UI requires a value
 // otherwise) and then means "the output must be empty"; for the substring and
 // regex matchers it trivially matches, as "" / an empty pattern always do.
@@ -42,46 +54,78 @@ function evaluateMatch(output: string, matchType: MatchType, expected: string): 
   }
 }
 
-export function TestCasePanel({ promptId, xmlContent }: { promptId: string; xmlContent: string }) {
+const EMPTY_DRAFT = { name: "", input: "", matchType: "contains" as MatchType, expected: "" };
+
+export function TestCasePanel({
+  promptId,
+  xmlContent,
+  versionLabel,
+  onCountChange,
+}: {
+  promptId: string;
+  xmlContent: string;
+  /** e.g. "v3": which version the cases run against. */
+  versionLabel?: string;
+  onCountChange?: (n: number) => void;
+}) {
   const { activeProvider, activeModel } = useSettingsStore();
   const [cases, setCases] = useState<TestCase[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [results, setResults] = useState<Record<string, CaseResult>>({});
-  const [running, setRunning] = useState(false);
+  const [running, setRunning] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
-  const [draft, setDraft] = useState({ name: "", input: "", matchType: "contains" as MatchType, expected: "" });
+  const [saving, setSaving] = useState(false);
+  const [draft, setDraft] = useState(EMPTY_DRAFT);
+  const [expectedError, setExpectedError] = useState<string | null>(null);
 
   const load = useCallback(() => {
     fetch(`/api/prompts/${promptId}/test-cases`)
       .then((r) => r.json())
       .then((d) => setCases(d.testCases || []))
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setLoaded(true));
   }, [promptId]);
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => { onCountChange?.(cases.length); }, [cases.length, onCountChange]);
 
   async function addCase() {
     if (!draft.expected.trim() && draft.matchType !== "equals") {
-      toast.error("Erwarteten Wert angeben.");
+      setExpectedError("Erwarteten Wert angeben.");
       return;
     }
-    const res = await fetch(`/api/prompts/${promptId}/test-cases`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(draft),
-    });
-    if (res.ok) {
-      setDraft({ name: "", input: "", matchType: "contains", expected: "" });
-      setAdding(false);
-      load();
-      toast.success("Testfall hinzugefügt.");
-    } else {
-      toast.error("Konnte Testfall nicht speichern.");
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/prompts/${promptId}/test-cases`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(draft),
+      });
+      if (res.ok) {
+        setDraft(EMPTY_DRAFT);
+        setAdding(false);
+        load();
+        toast.success("Testfall hinzugefügt.");
+      } else {
+        toast.error("Testfall konnte nicht gespeichert werden.");
+      }
+    } catch {
+      toast.error("Testfall konnte nicht gespeichert werden.");
+    } finally {
+      setSaving(false);
     }
   }
 
-  async function deleteCase(caseId: string) {
-    await fetch(`/api/prompts/${promptId}/test-cases/${caseId}`, { method: "DELETE" });
-    setResults((prev) => { const n = { ...prev }; delete n[caseId]; return n; });
+  async function deleteCase(tc: TestCase) {
+    const ok = await confirm({
+      title: "Testfall löschen?",
+      description: `„${tc.name || tc.input || "Testfall"}“ wird entfernt.`,
+      confirmLabel: "Löschen",
+      tone: "danger",
+    });
+    if (!ok) return;
+    await fetch(`/api/prompts/${promptId}/test-cases/${tc.id}`, { method: "DELETE" }).catch(() => {});
+    setResults((prev) => { const n = { ...prev }; delete n[tc.id]; return n; });
     load();
   }
 
@@ -116,129 +160,172 @@ export function TestCasePanel({ promptId, xmlContent }: { promptId: string; xmlC
   async function runAll() {
     if (cases.length === 0) return;
     if (!xmlContent.trim()) { toast.error("Kein Prompt-Inhalt zum Testen."); return; }
-    setRunning(true);
     setResults({});
     try {
       // Sequential to avoid hammering a local Ollama with many parallel loads.
       for (const tc of cases) {
+        setRunning(tc.id);
         const r = await runOne(tc);
         setResults((prev) => ({ ...prev, [tc.id]: r }));
       }
     } finally {
-      setRunning(false);
+      setRunning(null);
     }
   }
 
   const passCount = Object.values(results).filter((r) => r.pass).length;
   const ranCount = Object.keys(results).length;
+  const providerName = getProvider(activeProvider)?.label ?? activeProvider;
+  const busy = running !== null;
 
   return (
-    <div className="border border-border rounded-lg p-4 space-y-3">
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold">
-          Test Cases ({cases.length})
-          {ranCount > 0 && (
-            <span className={`ml-2 text-xs ${passCount === ranCount ? "text-green-500" : "text-amber-500"}`}>
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 space-y-0.5">
+          <p className="text-ui text-muted-foreground">
+            Eingaben mit erwarteter Ausgabe – für Regressionstests nach jeder Änderung.
+          </p>
+          <p className="text-xs text-subtle-foreground">
+            Läuft gegen {providerName}
+            {activeModel ? ` · ${activeModel}` : ""}
+            {versionLabel ? ` · testet ${versionLabel}` : ""}
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {ranCount > 0 && !busy ? (
+            <Badge variant={passCount === ranCount ? "success" : "warning"} size="md" className="tabular-nums">
               {passCount}/{ranCount} bestanden
-            </span>
-          )}
-        </h3>
-        <div className="flex gap-2">
-          <button
-            onClick={() => setAdding((v) => !v)}
-            className="flex items-center gap-1 px-2 py-1 text-xs rounded-md border border-input hover:bg-accent"
-          >
-            <Plus size={12} /> Neu
-          </button>
-          <button
+            </Badge>
+          ) : null}
+          <Button variant="outline" size="sm" onClick={() => setAdding((v) => !v)} aria-expanded={adding}>
+            <Plus aria-hidden /> Testfall
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
             onClick={runAll}
-            disabled={running || cases.length === 0}
-            className="flex items-center gap-1 px-2 py-1 text-xs rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+            loading={busy}
+            disabledReason={cases.length === 0 ? "Erst einen Testfall anlegen" : undefined}
           >
-            {running ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
-            Alle ausführen
-          </button>
+            {busy ? null : <Play aria-hidden />} Alle ausführen
+          </Button>
         </div>
       </div>
 
-      <p className="text-xs text-muted-foreground">
-        Läuft gegen aktiven Provider <span className="font-medium capitalize">{activeProvider}</span> ({activeModel || "—"}).
-      </p>
-
-      {adding && (
-        <div className="space-y-2 rounded-md border border-input p-3">
-          <input
-            className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm"
-            placeholder="Name (optional)"
-            value={draft.name}
-            onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-          />
-          <textarea
-            className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm min-h-[50px]"
-            placeholder="Test-Input (wird an den Prompt angehängt)"
-            value={draft.input}
-            onChange={(e) => setDraft({ ...draft, input: e.target.value })}
-          />
-          <div className="flex gap-2">
-            <select
-              aria-label="Match-Typ"
-              className="rounded-md border border-input bg-background px-2 py-1.5 text-sm"
-              value={draft.matchType}
-              onChange={(e) => setDraft({ ...draft, matchType: e.target.value as MatchType })}
-            >
-              {Object.entries(MATCH_LABELS).map(([k, v]) => (
-                <option key={k} value={k}>{v}</option>
-              ))}
-            </select>
-            <input
-              className="flex-1 rounded-md border border-input bg-background px-2 py-1.5 text-sm"
-              placeholder="Erwarteter Wert / Muster"
-              value={draft.expected}
-              onChange={(e) => setDraft({ ...draft, expected: e.target.value })}
+      {adding ? (
+        <form
+          className="space-y-3 rounded-lg border border-border bg-surface-2 p-3 md:p-4"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void addCase();
+          }}
+        >
+          <Field>
+            <FieldLabel optional="optional">Name</FieldLabel>
+            <Input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
+          </Field>
+          <Field>
+            <FieldLabel optional="optional">Test-Eingabe</FieldLabel>
+            <Textarea
+              autosize={{ min: 2, max: 8 }}
+              placeholder="Wird an den Prompt angehängt"
+              value={draft.input}
+              onChange={(e) => setDraft({ ...draft, input: e.target.value })}
             />
+          </Field>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-[12rem_minmax(0,1fr)]">
+            <Field>
+              <FieldLabel>Prüfung</FieldLabel>
+              <SimpleSelect
+                options={MATCH_OPTIONS}
+                value={draft.matchType}
+                onValueChange={(v) => {
+                  setDraft({ ...draft, matchType: v as MatchType });
+                  setExpectedError(null);
+                }}
+              />
+            </Field>
+            <Field required={draft.matchType !== "equals"} invalid={!!expectedError}>
+              <FieldLabel>Erwarteter Wert / Muster</FieldLabel>
+              <Input
+                value={draft.expected}
+                onChange={(e) => {
+                  setDraft({ ...draft, expected: e.target.value });
+                  setExpectedError(null);
+                }}
+              />
+              <FieldError>{expectedError}</FieldError>
+            </Field>
           </div>
-          <div className="flex gap-2">
-            <button onClick={addCase} className="px-3 py-1.5 text-xs rounded-md bg-primary text-primary-foreground hover:bg-primary/90">
-              Speichern
-            </button>
-            <button onClick={() => setAdding(false)} className="px-3 py-1.5 text-xs rounded-md border border-input hover:bg-accent">
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="ghost" onClick={() => setAdding(false)}>
               Abbrechen
-            </button>
+            </Button>
+            <Button type="submit" variant="primary" loading={saving}>
+              Speichern
+            </Button>
           </div>
-        </div>
-      )}
+        </form>
+      ) : null}
 
-      {cases.length === 0 && !adding && (
-        <p className="text-sm text-muted-foreground">
-          Noch keine Testfälle. Definiere Eingaben + erwartete Ausgaben für Regressionstests.
-        </p>
-      )}
+      {loaded && cases.length === 0 && !adding ? (
+        <EmptyState
+          headingLevel={3}
+          icon={<FlaskConical />}
+          title="Noch keine Testfälle"
+          description="Lege Eingaben mit erwarteter Ausgabe an, um Änderungen am Prompt abzusichern."
+          action={
+            <Button variant="outline" onClick={() => setAdding(true)}>
+              <Plus aria-hidden /> Ersten Testfall anlegen
+            </Button>
+          }
+        />
+      ) : null}
 
       <ul className="space-y-2">
         {cases.map((tc) => {
           const r = results[tc.id];
           return (
-            <li key={tc.id} className="rounded-md border border-border p-2.5 space-y-1.5">
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2 min-w-0">
-                  {r && (r.pass
-                    ? <Check size={14} className="text-green-500 shrink-0" />
-                    : <X size={14} className="text-red-500 shrink-0" />)}
-                  <span className="text-sm font-medium truncate">{tc.name || tc.input || "(kein Input)"}</span>
+            <li key={tc.id} className="space-y-2 rounded-lg border border-border bg-card p-3">
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-2">
+                  {running === tc.id ? (
+                    <Spinner aria-label="Läuft" />
+                  ) : r ? (
+                    r.pass ? (
+                      <CircleCheck aria-label="bestanden" role="img" className="size-4 shrink-0 text-success" />
+                    ) : (
+                      <CircleX aria-label="fehlgeschlagen" role="img" className="size-4 shrink-0 text-danger" />
+                    )
+                  ) : null}
+                  <span className="truncate text-ui font-medium">{tc.name || tc.input || "(ohne Eingabe)"}</span>
                 </div>
-                <button onClick={() => deleteCase(tc.id)} aria-label="Testfall löschen" className="text-muted-foreground hover:text-destructive shrink-0">
-                  <Trash2 size={13} />
-                </button>
+                <IconButton
+                  aria-label={`Testfall „${tc.name || tc.input || "ohne Eingabe"}“ löschen`}
+                  variant="danger-ghost"
+                  size="icon-sm"
+                  className="-my-1.5 -mr-1.5 size-10 md:my-0 md:mr-0 md:size-7"
+                  onClick={() => void deleteCase(tc)}
+                  disabledReason={busy ? "Erst den Testlauf abwarten" : undefined}
+                >
+                  <Trash2 />
+                </IconButton>
               </div>
               <p className="text-xs text-muted-foreground">
-                {MATCH_LABELS[tc.matchType]}: <code className="px-1 bg-accent rounded">{tc.expected || "—"}</code>
+                {MATCH_LABELS[tc.matchType]}:{" "}
+                <code className="rounded-sm bg-surface-2 px-1 font-mono text-foreground">{tc.expected || "—"}</code>
               </p>
-              {r?.error && <p className="text-xs text-red-500">Fehler: {r.error}</p>}
-              {r && !r.error && (
-                <pre className="text-xs bg-accent/30 rounded p-2 max-h-32 overflow-y-auto whitespace-pre-wrap">
-                  {r.output.slice(0, 1000)}{r.output.length > 1000 ? "…" : ""}
+              {r?.error ? <p className="text-xs text-danger">Fehler: {r.error}</p> : null}
+              {r && !r.error ? (
+                <pre
+                  tabIndex={0}
+                  aria-label="Ausgabe"
+                  className="max-h-32 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-surface-2 p-2 font-mono text-xs focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                >
+                  {r.output.slice(0, 1000)}
+                  {r.output.length > 1000 ? "…" : ""}
                 </pre>
-              )}
+              ) : null}
             </li>
           );
         })}

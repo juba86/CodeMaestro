@@ -1,6 +1,5 @@
 import type { PromptStructured, PromptExample, SwarmConfig, SwarmAgentRole, PromptTechnique } from "@/lib/ai/types";
-import { techniques } from "./techniques";
-import { XML_INDENT } from "./xml-builder";
+import { techniques, type TechniqueInfo } from "./techniques";
 import { uid } from "@/lib/uid";
 
 /**
@@ -19,6 +18,16 @@ import { uid } from "@/lib/uid";
  * spaces of single-line values, leading/trailing blank lines), which is
  * normalised away. Looser hand-written or AI-generated XML parses too.
  */
+
+// Shared with xml-builder.ts, which re-exports them; they live here so the
+// builder depends on the parser and not the other way round.
+
+// Indentation unit. The parser strips exactly this much per nesting level
+// (see cleanContent), so builder and parser stay in sync.
+export const XML_INDENT = "  ";
+
+/** Tag for an example's derivation (PromptExample.thinking). */
+export const EXAMPLE_METHOD_TAG = "method";
 
 // Indentation depth (in XML_INDENT units) of a value's lines as emitted by
 // buildXml: top-level tags sit at depth 0 so their content is at 1; example
@@ -56,17 +65,57 @@ export const PROMPT_TAGS: readonly string[] = [
   "swarm-config",
 ];
 
+/** Tags the parser reads inside an <example>. */
+const EXAMPLE_TAGS: readonly string[] = ["example", "input", EXAMPLE_METHOD_TAG, "thinking", "answer"];
+
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
+const ENTITY = "#x[0-9a-fA-F]+|#[0-9]+|amp|lt|gt|quot|apos";
+const EXACT_ENTITY_RE = new RegExp(`^(?:${ENTITY})$`);
 
 /**
  * Decodes XML entities in a single pass, so an escaped literal such as
  * "&amp;lt;" correctly becomes "&lt;" (a chained replace would yield "<").
  */
 function unescapeXml(s: string): string {
-  return s.replace(/&(#x[0-9a-fA-F]+|#[0-9]+|amp|lt|gt|quot|apos);/g, (m, ent: string) => {
+  return s.replace(new RegExp(`&(${ENTITY});`, "g"), (m, ent: string) => {
     if (ent[0] !== "#") return ENTITIES[ent];
     const code = ent[1] === "x" ? parseInt(ent.slice(2), 16) : parseInt(ent.slice(1), 10);
     return code <= 0x10ffff ? String.fromCodePoint(code) : m;
+  });
+}
+
+function escapeAll(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// What escapeContent must neutralise: an "&" the parser would decode, and an
+// open/close tag (with its attributes) whose name the parser reads at that
+// nesting level. Everything else, such as <verification> or <promise> from a
+// technique snippet, stays literal so the prompt reads as written.
+const contentRes = new Map<boolean, RegExp>();
+function contentRe(inExample: boolean): RegExp {
+  let re = contentRes.get(inExample);
+  if (!re) {
+    const names = (inExample ? [...PROMPT_TAGS, ...EXAMPLE_TAGS] : PROMPT_TAGS).map(tagPattern).join("|");
+    // Case-insensitive like the parser's tag matching; the entity check in
+    // escapeContent restores case sensitivity for "&".
+    re = new RegExp(`&(?=(${ENTITY});)|<\\/?(?:${names})(?=[\\s/>]|$)[^<>]*>?`, "gi");
+    contentRes.set(inExample, re);
+  }
+  return re;
+}
+
+/**
+ * Escapes a section's text for buildXml with the least markup that keeps the
+ * round trip exact: unescapeXml (via parseXml) restores the original. Pass
+ * `inExample` for the fields of an <example>, where <input>, <answer> etc.
+ * are structure too.
+ */
+export function escapeContent(s: string, inExample = false): string {
+  return s.replace(contentRe(inExample), (m, ent?: string) => {
+    if (m !== "&") return escapeAll(m);
+    // Entity names are case-sensitive for the decoder; "&AMP;" stays as is.
+    return ent !== undefined && EXACT_ENTITY_RE.test(ent) ? "&amp;" : m;
   });
 }
 
@@ -183,8 +232,11 @@ function parseTechnique(text: string): PromptTechnique | undefined {
   // Builder format is "<name> — <description>": match the head exactly first,
   // then fall back to a substring search for free-form (AI) text.
   const head = lower.split(" — ")[0].trim();
+  // Aliases are earlier names, so prompts saved with them keep their technique.
+  const named = (t: TechniqueInfo, name: string) =>
+    t.name.toLowerCase() === name || !!t.aliases?.some((a) => a.toLowerCase() === name);
   const found =
-    techniques.find((t) => t.id === head || t.name.toLowerCase() === head) ??
+    techniques.find((t) => t.id === head || named(t, head)) ??
     techniques.find((t) => lower.includes(t.id) || lower.includes(t.name.toLowerCase()));
   return found?.id;
 }
@@ -220,7 +272,10 @@ export function parseXml(xml: string): PromptStructured {
       examples.push({
         id: uid(),
         input: extractField(ex, "input", EXAMPLE_FIELD_DEPTH, false),
-        thinking: extractField(ex, "thinking", EXAMPLE_FIELD_DEPTH, false),
+        // Current tag first; <thinking> is how older prompts stored it.
+        thinking:
+          extractField(ex, EXAMPLE_METHOD_TAG, EXAMPLE_FIELD_DEPTH, false) ||
+          extractField(ex, "thinking", EXAMPLE_FIELD_DEPTH, false),
         answer: extractField(ex, "answer", EXAMPLE_FIELD_DEPTH, false),
       });
     }

@@ -2,6 +2,14 @@ import { prisma } from "@/lib/db/client";
 import { monotonicNow } from "./run-hub";
 import type { NormalizedEvent } from "./runner";
 
+/**
+ * `meta.handoff` of a synthesis row: "pending" until the session's own agent
+ * conversation was told about the orchestration (its workers run in forks of
+ * that conversation, see orchestrator.sessionThread), then "done".
+ */
+export const HANDOFF_PENDING = "pending";
+export const HANDOFF_DONE = "done";
+
 export interface TranscriptRow {
   role: string;
   content: string;
@@ -69,6 +77,9 @@ export class TranscriptWriter {
     } else if (e.type === "error" && e.content) {
       this.flushText();
       this.add({ role: "error", content: e.content.slice(0, 4000) });
+    } else if (e.type === "notice" && e.content) {
+      this.flushText();
+      this.add({ role: "system", content: e.content.slice(0, 4000), meta: JSON.stringify({ notice: true }) });
     } else if (e.type === "knowledge" && e.sources?.length) {
       this.add({
         role: "knowledge",
