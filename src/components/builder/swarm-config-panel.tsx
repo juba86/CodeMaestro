@@ -3,170 +3,168 @@
 import { useBuilderStore } from "@/stores/builder-store";
 import type { SwarmConfig, SwarmAgentRole } from "@/lib/ai/types";
 import { Plus, Trash2 } from "lucide-react";
+import { Field, FieldLabel } from "@/components/ui/field";
+import { SimpleSelect } from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
+import { Button, IconButton } from "@/components/ui/button";
+import { SwitchRow } from "@/components/ui/switch";
+import { updateDraft } from "./draft-sync";
 
+// The starting roles; names and descriptions end up in the prompt's
+// <swarm-config> and can be renamed in the panel.
 const defaultSwarmConfig: SwarmConfig = {
   topology: "hierarchical",
   agentCount: 4,
   agentRoles: [
-    { type: "architect", name: "Architect", description: "System design and planning" },
-    { type: "coder", name: "Coder", description: "Implementation" },
-    { type: "reviewer", name: "Reviewer", description: "Code review" },
-    { type: "tester", name: "Tester", description: "Test generation and validation" },
+    { type: "architect", name: "Architekt", description: "Systementwurf und Planung" },
+    { type: "coder", name: "Coder", description: "Umsetzung" },
+    { type: "reviewer", name: "Reviewer", description: "Code-Review" },
+    { type: "tester", name: "Tester", description: "Tests schreiben und prüfen" },
   ],
   coordinationStrategy: "majority",
   memoryScope: "project",
 };
 
-const roleTypes: SwarmAgentRole["type"][] = [
-  "researcher", "coder", "analyst", "tester", "architect",
-  "reviewer", "optimizer", "documenter", "custom",
+const TOPOLOGY_OPTIONS: { value: SwarmConfig["topology"]; label: string; description: string }[] = [
+  { value: "hierarchical", label: "Hierarchisch", description: "Ein Koordinator (Queen) verteilt an die übrigen Agenten" },
+  { value: "mesh", label: "Mesh", description: "Alle Agenten sprechen direkt miteinander" },
+  { value: "ring", label: "Ring", description: "Ergebnisse wandern reihum" },
+  { value: "star", label: "Stern", description: "Ein Hub koordiniert alle" },
 ];
 
+const COORDINATION_OPTIONS: { value: SwarmConfig["coordinationStrategy"]; label: string; description: string }[] = [
+  { value: "majority", label: "Mehrheitsentscheid", description: "Jede Stimme zählt gleich" },
+  { value: "weighted", label: "Gewichtet", description: "Der Koordinator zählt dreifach" },
+  { value: "byzantine", label: "Byzantinische Fehlertoleranz", description: "Robust gegen fehlerhafte Agenten" },
+];
+
+const MEMORY_OPTIONS: { value: SwarmConfig["memoryScope"]; label: string }[] = [
+  { value: "project", label: "Projekt" },
+  { value: "local", label: "Lokal" },
+  { value: "user", label: "Benutzer" },
+];
+
+const ROLE_LABEL: Record<SwarmAgentRole["type"], string> = {
+  researcher: "Recherche",
+  coder: "Coder",
+  analyst: "Analyse",
+  tester: "Tester",
+  architect: "Architekt",
+  reviewer: "Reviewer",
+  optimizer: "Optimierer",
+  documenter: "Doku",
+  custom: "Eigene",
+};
+
+const ROLE_OPTIONS = (Object.keys(ROLE_LABEL) as SwarmAgentRole["type"][]).map((t) => ({ value: t, label: ROLE_LABEL[t] }));
+
+/** „Mehrere Agenten (Schwarm)" inside the builder's „Erweitert" section. */
 export function SwarmConfigPanel() {
-  const { structured, setSwarmConfig } = useBuilderStore();
-  const config = structured.swarmConfig;
+  const config = useBuilderStore((s) => s.structured.swarmConfig);
 
-  function enable() {
-    setSwarmConfig({ ...defaultSwarmConfig });
+  // Through updateDraft, against the current draft: on Vorschau and
+  // Verfeinern the change is applied to the XML at once.
+  function setSwarmConfig(next: SwarmConfig | undefined) {
+    updateDraft(() => ({ swarmConfig: next }));
   }
 
-  function disable() {
-    setSwarmConfig(undefined);
-  }
-
-  function update(patch: Partial<SwarmConfig>) {
-    if (config) setSwarmConfig({ ...config, ...patch });
+  function update(fn: (c: SwarmConfig) => Partial<SwarmConfig>) {
+    updateDraft((cur) => (cur.swarmConfig ? { swarmConfig: { ...cur.swarmConfig, ...fn(cur.swarmConfig) } } : null));
   }
 
   function addRole() {
-    if (!config) return;
-    update({
-      agentRoles: [
-        ...config.agentRoles,
-        { type: "custom", name: "New Agent", description: "" },
-      ],
-      agentCount: config.agentCount + 1,
-    });
+    update((c) => ({
+      agentRoles: [...c.agentRoles, { type: "custom", name: `Agent ${c.agentRoles.length + 1}`, description: "" }],
+      agentCount: c.agentCount + 1,
+    }));
   }
 
   function removeRole(idx: number) {
-    if (!config) return;
-    const roles = config.agentRoles.filter((_, i) => i !== idx);
-    update({ agentRoles: roles, agentCount: Math.max(roles.length, 1) });
+    update((c) => {
+      const roles = c.agentRoles.filter((_, i) => i !== idx);
+      return { agentRoles: roles, agentCount: Math.max(roles.length, 1) };
+    });
   }
 
   function updateRole(idx: number, patch: Partial<SwarmAgentRole>) {
-    if (!config) return;
-    const roles = config.agentRoles.map((r, i) =>
-      i === idx ? { ...r, ...patch } : r
-    );
-    update({ agentRoles: roles });
+    update((c) => ({ agentRoles: c.agentRoles.map((r, i) => (i === idx ? { ...r, ...patch } : r)) }));
   }
 
   return (
-    <div className="border border-border rounded-lg p-4 space-y-3">
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold">Swarm / Multi-Agent (ruflo)</h3>
-        <button
-          onClick={config ? disable : enable}
-          className="text-xs px-2 py-1 rounded border border-input hover:bg-accent"
-        >
-          {config ? "Disable" : "Enable"}
-        </button>
-      </div>
+    <div className="space-y-3">
+      <SwitchRow
+        label="Mehrere Agenten (Schwarm)"
+        description="Ergänzt den Prompt um eine Schwarm-Konfiguration nach dem Muster von ruflo: Topologie, Koordination, Gedächtnis und Rollen."
+        checked={!!config}
+        onCheckedChange={(on) => setSwarmConfig(on ? { ...defaultSwarmConfig } : undefined)}
+      />
 
-      {!config && (
-        <p className="text-xs text-muted-foreground">
-          Enable to add multi-agent swarm orchestration settings to your prompt.
-          Supports hierarchical, mesh, ring, and star topologies.
-        </p>
-      )}
-
-      {config && (
-        <div className="space-y-3 text-sm">
-          <div>
-            <label className="text-xs font-medium">Topology</label>
-            <select
-              className="mt-1 w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+      {config ? (
+        <div className="space-y-3">
+          <Field>
+            <FieldLabel>Topologie</FieldLabel>
+            <SimpleSelect
+              options={TOPOLOGY_OPTIONS}
               value={config.topology}
-              onChange={(e) => update({ topology: e.target.value as SwarmConfig["topology"] })}
-            >
-              <option value="hierarchical">Hierarchical (Queen + Workers)</option>
-              <option value="mesh">Mesh (Peer-to-Peer)</option>
-              <option value="ring">Ring (Circular)</option>
-              <option value="star">Star (Hub-based)</option>
-            </select>
-          </div>
-
-          <div>
-            <label className="text-xs font-medium">Coordination</label>
-            <select
-              className="mt-1 w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+              onValueChange={(v) => update(() => ({ topology: v as SwarmConfig["topology"] }))}
+            />
+          </Field>
+          <Field>
+            <FieldLabel>Koordination</FieldLabel>
+            <SimpleSelect
+              options={COORDINATION_OPTIONS}
               value={config.coordinationStrategy}
-              onChange={(e) =>
-                update({ coordinationStrategy: e.target.value as SwarmConfig["coordinationStrategy"] })
-              }
-            >
-              <option value="majority">Majority Voting</option>
-              <option value="weighted">Weighted (Queen 3x)</option>
-              <option value="byzantine">Byzantine Fault Tolerance</option>
-            </select>
-          </div>
-
-          <div>
-            <label className="text-xs font-medium">Memory Scope</label>
-            <select
-              className="mt-1 w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+              onValueChange={(v) => update(() => ({ coordinationStrategy: v as SwarmConfig["coordinationStrategy"] }))}
+            />
+          </Field>
+          <Field>
+            <FieldLabel>Gedächtnis</FieldLabel>
+            <SimpleSelect
+              options={MEMORY_OPTIONS}
               value={config.memoryScope}
-              onChange={(e) => update({ memoryScope: e.target.value as SwarmConfig["memoryScope"] })}
-            >
-              <option value="project">Project-level</option>
-              <option value="local">Local</option>
-              <option value="user">User-scoped</option>
-            </select>
-          </div>
+              onValueChange={(v) => update(() => ({ memoryScope: v as SwarmConfig["memoryScope"] }))}
+            />
+          </Field>
 
-          <div>
-            <div className="flex items-center justify-between mb-1">
-              <label className="text-xs font-medium">
-                Agent Roles ({config.agentRoles.length})
-              </label>
-              <button onClick={addRole} className="text-xs flex items-center gap-1 hover:text-primary">
-                <Plus size={12} /> Add
-              </button>
+          <div role="group" aria-labelledby="pb-swarm-roles" className="space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <span id="pb-swarm-roles" className="text-sm font-medium md:text-ui">
+                Rollen <span className="font-normal tabular-nums text-subtle-foreground">({config.agentRoles.length})</span>
+              </span>
+              <Button variant="ghost" size="sm" onClick={addRole}>
+                <Plus aria-hidden /> Rolle
+              </Button>
             </div>
-            <div className="space-y-2 max-h-48 overflow-y-auto">
+            <ul className="space-y-2">
               {config.agentRoles.map((role, idx) => (
-                <div key={idx} className="flex gap-2 items-start">
-                  <select
-                    className="rounded border border-input bg-background px-1 py-1 text-xs w-24"
+                <li key={idx} className="flex items-center gap-1.5">
+                  <SimpleSelect
+                    aria-label={`Typ von Rolle ${idx + 1}`}
+                    options={ROLE_OPTIONS}
                     value={role.type}
-                    onChange={(e) => updateRole(idx, { type: e.target.value as SwarmAgentRole["type"] })}
-                  >
-                    {roleTypes.map((t) => (
-                      <option key={t} value={t}>
-                        {t}
-                      </option>
-                    ))}
-                  </select>
-                  <input
-                    className="flex-1 rounded border border-input bg-background px-2 py-1 text-xs"
+                    onValueChange={(v) => updateRole(idx, { type: v as SwarmAgentRole["type"] })}
+                    className="w-28 shrink-0"
+                  />
+                  <Input
+                    aria-label={`Name von Rolle ${idx + 1}`}
                     value={role.name}
                     onChange={(e) => updateRole(idx, { name: e.target.value })}
                     placeholder="Name"
                   />
-                  <button
+                  <IconButton
+                    aria-label={`Rolle ${idx + 1} entfernen`}
+                    variant="danger-ghost"
+                    className="shrink-0"
                     onClick={() => removeRole(idx)}
-                    className="p-1 text-muted-foreground hover:text-destructive"
                   >
-                    <Trash2 size={12} />
-                  </button>
-                </div>
+                    <Trash2 />
+                  </IconButton>
+                </li>
               ))}
-            </div>
+            </ul>
           </div>
         </div>
-      )}
+      ) : null}
     </div>
   );
 }

@@ -1,5 +1,7 @@
 "use client";
 
+import { Button } from "@/components/ui/button";
+
 const tags = [
   "instructions",
   "context",
@@ -9,7 +11,7 @@ const tags = [
   "examples",
   "example",
   "input",
-  "thinking",
+  "method",
   "answer",
   "task",
   "swarm-config",
@@ -21,19 +23,28 @@ interface XmlTagPaletteProps {
   onInsert: (tag: string) => void;
 }
 
+/** Wraps the editor's selection in a tag (or inserts an empty pair at the cursor). */
 export function XmlTagPalette({ onInsert }: XmlTagPaletteProps) {
   return (
-    <div className="flex flex-wrap gap-1.5">
-      <span className="text-xs text-muted-foreground self-center mr-1">Tags:</span>
+    <div
+      role="group"
+      aria-labelledby="pb-tag-palette"
+      className="-mx-4 flex items-center gap-1.5 overflow-x-auto px-4 pb-1 scrollbar-none md:mx-0 md:flex-wrap md:overflow-visible md:px-0 md:pb-0"
+    >
+      <span id="pb-tag-palette" className="mr-1 shrink-0 whitespace-nowrap text-xs text-muted-foreground">
+        Tag um Auswahl:
+      </span>
       {tags.map((tag) => (
-        <button
+        <Button
           key={tag}
+          variant="outline"
+          size="sm"
+          className="shrink-0 px-2.5 font-mono md:h-6 md:px-2"
           onClick={() => onInsert(tag)}
-          title={`Insert <${tag}> tag`}
-          className="px-2 py-0.5 text-xs rounded bg-accent hover:bg-accent/80 font-mono"
+          aria-label={`<${tag}> einfügen`}
         >
           &lt;{tag}&gt;
-        </button>
+        </Button>
       ))}
     </div>
   );

@@ -1,9 +1,21 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState } from "react";
 import { useBuilderStore } from "@/stores/builder-store";
 import { toast } from "sonner";
-import { X } from "lucide-react";
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Field, FieldError, FieldHint, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Button } from "@/components/ui/button";
 
 async function errorMessage(res: Response, fallback: string): Promise<string> {
   const e = await res.json().catch(() => null);
@@ -23,33 +35,36 @@ interface SavePromptDialogProps {
 }
 
 export function SavePromptDialog({ open, onClose }: SavePromptDialogProps) {
+  // A fresh form per opening, prefilled from the project loaded at that time;
+  // the dialog itself stays mounted so it can animate out.
+  const [session, setSession] = useState(0);
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (open) setSession((n) => n + 1);
+  }
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <SaveForm key={session} onClose={onClose} />
+    </Dialog>
+  );
+}
+
+function SaveForm({ onClose }: { onClose: () => void }) {
   const { xmlContent, structured, currentPromptId, setCurrentPromptId, projectMeta, setProjectMeta } = useBuilderStore();
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
-  const [tagsInput, setTagsInput] = useState("");
+  // Prefill from the loaded project's metadata so saving a new version doesn't
+  // force the user to retype the title/description/tags.
+  const prefill = currentPromptId && projectMeta ? projectMeta : null;
+  const [title, setTitle] = useState(prefill?.title ?? "");
+  const [description, setDescription] = useState(prefill?.description ?? "");
+  const [tagsInput, setTagsInput] = useState(prefill?.tags.join(", ") ?? "");
   const [saving, setSaving] = useState(false);
-  const titleRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    if (open) {
-      // Prefill from the loaded project's metadata so an "Update" doesn't force
-      // the user to retype the title/description/tags.
-      if (currentPromptId && projectMeta) {
-        setTitle(projectMeta.title);
-        setDescription(projectMeta.description);
-        setTagsInput(projectMeta.tags.join(", "));
-      }
-      // Auto-focus title input when dialog opens
-      setTimeout(() => titleRef.current?.focus(), 0);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
-
-  if (!open) return null;
+  const [titleError, setTitleError] = useState<string | null>(null);
 
   async function handleSave() {
     if (!title.trim()) {
-      toast.error("Title is required.");
+      setTitleError("Titel fehlt.");
+      document.getElementById("pb-save-title")?.focus();
       return;
     }
     setSaving(true);
@@ -67,107 +82,105 @@ export function SavePromptDialog({ open, onClose }: SavePromptDialogProps) {
       };
 
       if (currentPromptId) {
-        // Update existing
+        // Update existing (the server adds a version).
         const res = await fetch(`/api/prompts/${currentPromptId}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...body, changelog: `Updated: ${title}` }),
+          body: JSON.stringify({ ...body, changelog: `Aktualisiert: ${title.trim()}` }),
         });
         if (res.status === 404) {
           // Deleted elsewhere: detach so the next save creates a new prompt.
           setCurrentPromptId(null);
           setProjectMeta(null);
-          throw new Error("This prompt no longer exists in the library. Click Save again to store it as a new prompt.");
+          throw new Error("Dieser Prompt existiert nicht mehr in der Bibliothek. Speichere erneut, um ihn neu anzulegen.");
         }
-        if (!res.ok) throw new Error(await errorMessage(res, "Update failed"));
+        if (!res.ok) throw new Error(await errorMessage(res, "Aktualisieren fehlgeschlagen"));
         const data = await res.json();
         setProjectMeta({ title, description, tags: savedTags(data, tags) });
-        toast.success("Prompt updated!");
+        toast.success("Gespeichert – neue Version angelegt.");
       } else {
-        // Create new
         const res = await fetch("/api/prompts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
         });
-        if (!res.ok) throw new Error(await errorMessage(res, "Save failed"));
+        if (!res.ok) throw new Error(await errorMessage(res, "Speichern fehlgeschlagen"));
         const data = await res.json();
         setCurrentPromptId(data.prompt.id);
         setProjectMeta({ title, description, tags: savedTags(data, tags) });
-        toast.success("Prompt saved!");
+        toast.success("Gespeichert");
       }
       onClose();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Save failed.");
+      toast.error(err instanceof Error ? err.message : "Speichern fehlgeschlagen.");
     } finally {
       setSaving(false);
     }
   }
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center">
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="save-dialog-title"
-        className="bg-background border border-border rounded-lg p-6 w-full max-w-md space-y-4"
+    <DialogContent
+      onOpenAutoFocus={(e) => {
+        e.preventDefault();
+        document.getElementById("pb-save-title")?.focus();
+      }}
+    >
+      <form
+        className="flex min-h-0 flex-1 flex-col"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void handleSave();
+        }}
       >
-        <div className="flex items-center justify-between">
-          <h2 id="save-dialog-title" className="text-lg font-semibold">
-            {currentPromptId ? "Update Prompt" : "Save Prompt"}
-          </h2>
-          <button onClick={onClose} className="p-1 hover:bg-accent rounded" aria-label="Close dialog">
-            <X size={16} />
-          </button>
-        </div>
-
-        <div>
-          <label className="text-sm font-medium">Title *</label>
-          <input
-            ref={titleRef}
-            className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            placeholder="My CoT Prompt"
-          />
-        </div>
-
-        <div>
-          <label className="text-sm font-medium">Description</label>
-          <textarea
-            className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm min-h-[60px] focus:outline-none focus:ring-2 focus:ring-ring"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            placeholder="What does this prompt do?"
-          />
-        </div>
-
-        <div>
-          <label className="text-sm font-medium">Tags (comma-separated)</label>
-          <input
-            className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-            value={tagsInput}
-            onChange={(e) => setTagsInput(e.target.value)}
-            placeholder="code-review, security, python"
-          />
-        </div>
-
-        <div className="flex gap-3 justify-end">
-          <button
-            onClick={onClose}
-            className="px-4 py-2 text-sm rounded-md border border-input hover:bg-accent"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            className="px-4 py-2 text-sm rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-          >
-            {saving ? "Saving..." : "Save"}
-          </button>
-        </div>
-      </div>
-    </div>
+        <DialogHeader>
+          <DialogTitle>{currentPromptId ? "Neue Version speichern" : "In Bibliothek speichern"}</DialogTitle>
+          <DialogDescription>
+            {currentPromptId
+              ? "Aktualisiert den gespeicherten Prompt; die bisherige Fassung bleibt als Version erhalten."
+              : "Legt den Prompt in der Bibliothek ab – mit Versionen und Testfällen."}
+          </DialogDescription>
+        </DialogHeader>
+        <DialogBody className="space-y-4 pb-1">
+          <Field id="pb-save-title" required invalid={!!titleError}>
+            <FieldLabel>Titel</FieldLabel>
+            <Input
+              value={title}
+              onChange={(e) => {
+                setTitle(e.target.value);
+                if (titleError) setTitleError(null);
+              }}
+              placeholder="z. B. Code-Review für Pull Requests"
+            />
+            <FieldError>{titleError}</FieldError>
+          </Field>
+          <Field>
+            <FieldLabel optional="optional">Beschreibung</FieldLabel>
+            <Textarea
+              autosize={{ min: 2, max: 6 }}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="Wofür ist dieser Prompt gedacht?"
+            />
+          </Field>
+          <Field>
+            <FieldLabel optional="optional">Tags</FieldLabel>
+            <Input
+              value={tagsInput}
+              onChange={(e) => setTagsInput(e.target.value)}
+              placeholder="code-review, sicherheit, python"
+            />
+            <FieldHint>Mit Komma trennen.</FieldHint>
+          </Field>
+        </DialogBody>
+        <DialogFooter>
+          <Button type="button" variant="ghost" onClick={onClose}>
+            Abbrechen
+          </Button>
+          <Button type="submit" variant="primary" loading={saving}>
+            Speichern
+          </Button>
+        </DialogFooter>
+      </form>
+    </DialogContent>
   );
 }
