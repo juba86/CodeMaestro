@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { toast } from "sonner";
 import { EMPTY_LIVE, liveReducer } from "./run-events";
-import type { ApprovalEvent, Msg, RunEvent, SessionPayload } from "./types";
+import type { ApprovalEvent, Msg, RunEvent, SessionInfo, SessionPayload } from "./types";
 
 // Work runs server-side in a run hub; this hook only *follows* it. One
 // EventSource per page (always closed before a new one opens) attaches to the
@@ -19,6 +19,12 @@ import type { ApprovalEvent, Msg, RunEvent, SessionPayload } from "./types";
 
 const STORAGE_KEY = "cm-assistant-session";
 const RETRY_DELAYS_MS = [1000, 2000, 5000, 10000];
+/**
+ * Consecutive failed re-syncs (~1 min) before the client gives up and reports
+ * the state as unknown („Erneut prüfen"); online/visibility events and the
+ * button start over.
+ */
+const RETRY_BUDGET = 8;
 const STOP_FALLBACK_MS = 15_000;
 /** Events are folded in batches (one render per batch, not per SSE frame). */
 const FLUSH_MS = 40;
@@ -31,6 +37,19 @@ const WATCHDOG_MS = 10_000;
 const SLEPT_AFTER_MS = 30_000;
 
 export type StartResult = { ok: true } | { ok: false; status: number };
+
+export interface ConnectionInfo {
+  /** This page follows the active run's stream right now. */
+  attached: boolean;
+  /** A re-sync is scheduled after a failure. */
+  reconnecting: boolean;
+  /** Number of the next re-sync attempt („Versuch 2"). */
+  attempt: number;
+  /** Re-syncs gave up: the run state is unknown until „Erneut prüfen". */
+  stale: boolean;
+  /** Local time the stream came back after a failure („Wieder verbunden"). */
+  recoveredAt: number | null;
+}
 
 const sessionUrl = (sid: string) => `/api/assistant/sessions/${encodeURIComponent(sid)}`;
 
@@ -46,10 +65,10 @@ export function storedSessionId(): string | null {
 }
 
 /** Persists the active session in localStorage and in the URL (?session=). */
-function rememberSession(sid: string | null) {
+function rememberSession(sid: string | null, keepStored = false) {
   try {
     if (sid) localStorage.setItem(STORAGE_KEY, sid);
-    else localStorage.removeItem(STORAGE_KEY);
+    else if (!keepStored) localStorage.removeItem(STORAGE_KEY);
   } catch { /* storage unavailable (private mode) */ }
   try {
     const url = new URL(window.location.href);
@@ -78,6 +97,11 @@ export function useSessionRun(onSessionsChanged: () => void) {
   const [running, setRunning] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const [stale, setStale] = useState(false);
+  const [attached, setAttached] = useState(false);
+  const [recoveredAt, setRecoveredAt] = useState<number | null>(null);
+  const [info, setInfo] = useState<SessionInfo | null>(null);
 
   const activeRef = useRef<string | null>(null);
   const esRef = useRef<EventSource | null>(null);
@@ -121,6 +145,7 @@ export function useSessionRun(onSessionsChanged: () => void) {
     const es = esRef.current;
     esRef.current = null;
     es?.close();
+    if (es) setAttached(false);
     flush();
   }, [flush]);
 
@@ -135,12 +160,21 @@ export function useSessionRun(onSessionsChanged: () => void) {
     stopTimer.current = null;
   }, [clearRetry]);
 
-  /** Re-open the active session after a failure, with backoff (1s→2s→5s→10s). */
+  /**
+   * Re-open the active session after a failure, with backoff (1s→2s→5s→10s).
+   * After RETRY_BUDGET failures in a row the state is reported as unknown.
+   */
   const scheduleResync = useCallback(() => {
     if (retryTimer.current) return;
+    if (retryCount.current >= RETRY_BUDGET) {
+      setReconnecting(false);
+      setStale(true);
+      return;
+    }
     setReconnecting(true);
     const delay = RETRY_DELAYS_MS[Math.min(retryCount.current, RETRY_DELAYS_MS.length - 1)];
     retryCount.current += 1;
+    setAttempt(retryCount.current);
     retryTimer.current = setTimeout(() => {
       retryTimer.current = null;
       const sid = activeRef.current;
@@ -149,18 +183,21 @@ export function useSessionRun(onSessionsChanged: () => void) {
     }, delay);
   }, []);
 
-  const forget = useCallback(() => {
+  const forget = useCallback((keepStored = false) => {
     detach();
     activeRef.current = null;
     runIdRef.current = null;
     lastSeqRef.current = 0;
-    rememberSession(null);
+    retryCount.current = 0;
+    rememberSession(null, keepStored);
     setActiveId(null);
     setMessages([]);
+    setInfo(null);
     dispatch({ type: "reset" });
     setRunning(false);
     setStopping(false);
     setReconnecting(false);
+    setStale(false);
   }, [detach]);
 
   /** Run finished (run_end / idle): reload the persisted transcript, clear live state. */
@@ -186,10 +223,13 @@ export function useSessionRun(onSessionsChanged: () => void) {
       return;
     }
     setMessages(d.session?.messages ?? []);
-    dispatch({ type: "reset" });
+    if (d.session) setInfo(d.session as SessionInfo);
+    // Keeps how the run ended (RunEndNote) and the orchestra view.
+    dispatch({ type: "settle" });
     setRunning(false);
     setStopping(false);
     setReconnecting(false);
+    setStale(false);
     changedRef.current();
   }, [forget, scheduleResync]);
 
@@ -198,12 +238,19 @@ export function useSessionRun(onSessionsChanged: () => void) {
     // Hidden: stay detached (push notifications need "nobody watching");
     // the visibility handler re-attaches from lastSeqRef.
     if (!mountedRef.current || pageHidden()) return;
-    const es = new EventSource(`${sessionUrl(sid)}/events?since=${since}`);
+    // `run` pins the resume position to this run: a newer run (e.g. started
+    // via Telegram meanwhile) is replayed from its start instead.
+    const run = runIdRef.current ? `&run=${encodeURIComponent(runIdRef.current)}` : "";
+    const es = new EventSource(`${sessionUrl(sid)}/events?since=${since}${run}`);
     esRef.current = es;
     es.onopen = () => {
       if (esRef.current !== es) return;
+      if (retryCount.current > 0) setRecoveredAt(Date.now());
       retryCount.current = 0;
+      setAttempt(0);
       setReconnecting(false);
+      setStale(false);
+      setAttached(true);
     };
     es.onmessage = (msg: MessageEvent<string>) => {
       if (esRef.current !== es) return;
@@ -216,9 +263,10 @@ export function useSessionRun(onSessionsChanged: () => void) {
       const seq = Number(msg.lastEventId);
       if (Number.isFinite(seq) && seq > lastSeqRef.current) lastSeqRef.current = seq;
       if (ev.type === "run_end" || ev.type === "idle") {
-        // Close ourselves: a server-closed EventSource would auto-reconnect.
+        // Fold run_end with the rest of the batch (how the run ended), then
+        // close ourselves: a server-closed EventSource would auto-reconnect.
+        if (ev.type === "run_end") queue.current.push(ev);
         detach();
-        if (ev.type === "run_end" && ev.error) toast.error(ev.error);
         void settle(sid);
         return;
       }
@@ -244,11 +292,18 @@ export function useSessionRun(onSessionsChanged: () => void) {
   const applySnapshot = useCallback((sid: string, d: SessionPayload) => {
     const run = d.run ?? null;
     setMessages(d.session?.messages ?? []);
+    if (d.session) setInfo(d.session as SessionInfo);
+    setStale(false);
     if (!run) {
+      // A run this page followed (or just started) is over, but its run_end
+      // never reached us (very short run, or it ended while we were away).
+      const followed = runIdRef.current !== null;
       runIdRef.current = null;
       lastSeqRef.current = 0;
       retryCount.current = 0;
-      dispatch({ type: "reset" });
+      setAttempt(0);
+      // Same session (a switch already reset everything): keep how the last run ended.
+      dispatch(followed ? { type: "finished", status: d.session?.status === "error" ? "error" : "idle" } : { type: "settle" });
       setRunning(false);
       setStopping(false);
       setReconnecting(false);
@@ -292,10 +347,13 @@ export function useSessionRun(onSessionsChanged: () => void) {
       retryCount.current = 0;
       setActiveId(sid);
       setMessages([]);
+      setInfo(null);
       dispatch({ type: "reset" });
       setRunning(false);
       setStopping(false);
       setReconnecting(false);
+      setStale(false);
+      setAttempt(0);
     }
     const d = await fetchSession(sid);
     if (seq !== openSeq.current) return;
@@ -324,16 +382,21 @@ export function useSessionRun(onSessionsChanged: () => void) {
     const es = esRef.current;
     if (force || !es || es.readyState === EventSource.CLOSED) {
       retryCount.current = 0;
+      setAttempt(0);
+      setStale(false);
       void openRef.current(sid);
     }
   }, []);
 
-  /** Closes the active session — only if it still is `sid` (when given). */
-  const closeSession = useCallback((sid?: string) => {
+  /**
+   * Closes the active session — only if it still is `sid` (when given).
+   * `keepStored`: remember it as the last session (mobile back to the list).
+   */
+  const closeSession = useCallback((sid?: string, opts: { keepStored?: boolean } = {}) => {
     if (sid !== undefined && activeRef.current !== sid) return;
     openSeq.current++;
     clearTimers();
-    forget();
+    forget(opts.keepStored);
   }, [clearTimers, forget]);
 
   /**
@@ -451,7 +514,8 @@ export function useSessionRun(onSessionsChanged: () => void) {
   const decide = useCallback(async (card: ApprovalEvent, decision: "allow" | "deny", reason?: string) => {
     const sid = activeRef.current;
     const runId = runIdRef.current;
-    dispatch({ type: "dismiss", approvalId: card.approvalId });
+    // The card becomes a receipt right away („✓ Freigegeben · 14:06").
+    dispatch({ type: "decided", approvalId: card.approvalId, decision, reason, at: Date.now() });
     try {
       const res = await fetch(`/api/assistant/approval/${encodeURIComponent(card.approvalId)}/decide`, {
         method: "POST",
@@ -459,14 +523,16 @@ export function useSessionRun(onSessionsChanged: () => void) {
         body: JSON.stringify({ decision, reason }),
       });
       // 410: expired, or already decided elsewhere (another tab, Telegram).
-      if (res.status === 410) toast.warning("Freigabe abgelaufen oder bereits entschieden.");
-      else if (!res.ok) throw new Error(String(res.status));
+      if (res.status === 410) {
+        toast.warning("Freigabe abgelaufen oder bereits entschieden.");
+        dispatch({ type: "gone", approvalId: card.approvalId });
+      } else if (!res.ok) throw new Error(String(res.status));
     } catch {
       toast.error("Entscheidung konnte nicht übermittelt werden.");
       // Put the card back so it can be retried — only while the same run is
       // still shown (never into another session or a finished run).
       if (runId && activeRef.current === sid && runIdRef.current === runId) {
-        dispatch({ type: "event", event: card });
+        dispatch({ type: "restore", card });
       }
     }
   }, []);
@@ -520,13 +586,17 @@ export function useSessionRun(onSessionsChanged: () => void) {
     };
   }, [reattach, detach, clearRetry]);
 
+  const connection: ConnectionInfo = { attached, reconnecting, attempt, stale, recoveredAt };
+
   return {
     activeId,
+    info,
     messages,
     live,
     running,
     stopping,
     reconnecting,
+    connection,
     openSession,
     ensureSession,
     reattach,

@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Check, Copy } from "lucide-react";
-import { toast } from "sonner";
+import { Callout } from "@/components/ui/callout";
+import { CodeBlock } from "@/components/ui/code-block";
 
 // Client side of GET/POST /api/assistant/pi: whether the pi coding agent is
 // installed and which local Ollama models CodeMaestro registered for it. Shared
@@ -135,65 +135,13 @@ export function usePiStatus(enabled: boolean) {
   return { status, error, loading: needed || refreshing, refresh };
 }
 
-// navigator.clipboard only exists in secure contexts (HTTPS / localhost); over
-// plain http on a tailnet IP fall back to a hidden textarea.
-async function copyText(text: string): Promise<boolean> {
-  try {
-    if (navigator.clipboard) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch { /* fall through */ }
-  try {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.style.position = "fixed";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.select();
-    const ok = document.execCommand("copy");
-    ta.remove();
-    return ok;
-  } catch {
-    return false;
-  }
-}
-
 /** "pi is not installed" box with the install command and a copy button. */
 export function PiInstallHint({ hint, compact = false }: { hint: string; compact?: boolean }) {
-  const [copied, setCopied] = useState(false);
   const command = hint || DEFAULT_INSTALL_HINT;
-
-  async function copy() {
-    if (await copyText(command)) {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } else {
-      toast.error("Kopieren nicht möglich — bitte manuell markieren.");
-    }
-  }
-
   return (
-    <div className={`rounded-md border border-amber-500/40 bg-amber-500/5 ${compact ? "p-2 space-y-1" : "p-3 space-y-1.5"}`}>
-      <p className={`${compact ? "text-[11px]" : "text-xs"} text-amber-600 dark:text-amber-400 font-medium`}>
-        pi ist auf dem Server nicht installiert.
-      </p>
-      <p className={`${compact ? "text-[11px]" : "text-xs"} text-muted-foreground`}>
-        Auf dem Server ausführen (benötigt Node ≥ 22.19):
-      </p>
-      <div className="flex items-start gap-1.5">
-        <pre className={`flex-1 min-w-0 overflow-x-auto rounded bg-accent px-2 py-1 font-mono ${compact ? "text-[10px]" : "text-xs"} whitespace-pre-wrap break-all`}>
-          {command}
-        </pre>
-        <button
-          onClick={copy}
-          className="p-1.5 rounded-md border border-input hover:bg-accent shrink-0"
-          title="Befehl kopieren"
-          aria-label="Installationsbefehl kopieren"
-        >
-          {copied ? <Check size={compact ? 12 : 14} className="text-green-500" /> : <Copy size={compact ? 12 : 14} />}
-        </button>
-      </div>
-    </div>
+    <Callout variant="warning" title="pi ist auf dem Server nicht installiert." className={compact ? "p-2.5" : undefined}>
+      <p className="text-ui text-muted-foreground">Auf dem Server ausführen (benötigt Node ≥ 22.19):</p>
+      <CodeBlock code={command} wrap copyLabel="Installationsbefehl kopieren" className="mt-1.5" />
+    </Callout>
   );
 }
