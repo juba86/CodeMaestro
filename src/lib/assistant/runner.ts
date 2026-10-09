@@ -57,7 +57,7 @@ const PERMISSION_MCP_SERVER = "codemaestro";
 export const PERMISSION_PROMPT_TOOL = `mcp__${PERMISSION_MCP_SERVER}__permission`;
 // pi approval gate (a pi extension; pi refuses to start when it fails to load).
 const PI_EXTENSION_PATH = path.join(process.cwd(), "scripts", "pi-approval-extension.ts");
-// Silence from a local model before the thread gets a "waiting for Ollama" notice.
+// Silence of a local agent before the thread gets a "still waiting" notice.
 const STALL_NOTICE_MS = 90_000;
 const STALL_CHECK_MS = 15_000;
 
@@ -769,9 +769,10 @@ async function runTurnOnce(
     else handleClaudeLine(line);
   };
 
-  // A local model that answers nothing for minutes is usually Ollama loading
-  // a model (or evicting one for another client), not a hung agent. Say so
-  // once per turn, so the thread shows a cause instead of a silent wait.
+  // A local agent that prints nothing for a while is either waiting for the
+  // model (Ollama loading one, or busy with another client) or running a long
+  // command (tests, a build). Say so, so the thread shows a cause instead of
+  // a silent wait; repeated after the next output followed by another silence.
   let lastOutputAt = Date.now();
   let stallNoticed = false;
   const stallTimer = pi
@@ -780,7 +781,7 @@ async function runTurnOnce(
         stallNoticed = true;
         emitNow({
           type: "notice",
-          content: `Seit ${Math.round(STALL_NOTICE_MS / 1000)} s keine Antwort vom lokalen Modell. Ollama lädt vermutlich gerade ein Modell oder ist durch einen anderen Client belegt; der Lauf wartet weiter.`,
+          content: `Seit ${Math.round(STALL_NOTICE_MS / 1000)} s keine Ausgabe vom lokalen Agenten: entweder läuft ein längerer Befehl (Tests, Build), oder das Modell wird gerade geladen bzw. ist durch einen anderen Client belegt. Der Lauf wartet weiter.`,
         });
       }, STALL_CHECK_MS)
     : null;

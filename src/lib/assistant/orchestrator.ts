@@ -6,6 +6,8 @@ import { isMarker, runTurn, type AssistantSessionRow } from "./runner";
 import { piInfo, syncOllamaModels, type PiModel } from "./pi";
 import type { HubEvent } from "./run-hub";
 import { pendingHandoffContext, type RunContext, type RunOutcome } from "./session-run";
+import { HANDOFF_INSTRUCTION, buildHandoffContext, clipMiddle as clip, handoffBudget, handoffNote, type HandoffEntry } from "./handoff";
+import { changedFiles, snapshotWorkdir } from "./workdir-changes";
 import { HANDOFF_PENDING, type TranscriptRow } from "./transcript";
 import { fetchOllamaModels } from "@/lib/ai/ollama-provider";
 import { createProvider } from "@/lib/ai/provider-factory";
@@ -545,13 +547,6 @@ function askingLine(worker: Worker, edits: boolean): string {
   return worker.kind === "claude-cli" && edits
     ? "If you need a decision from the user, ask with the AskUserQuestion tool: the user answers in the app and you continue. Don't end your reply with an open question instead."
     : "Nobody can answer questions while you work: where a decision is open, take the most sensible option, say which assumption you made, and list remaining questions for the user at the end of your reply.";
-}
-
-/** Keeps the start and the end of a long text (reports end with the summary). */
-function clip(text: string, max: number): string {
-  if (text.length <= max) return text;
-  const head = Math.floor(max / 4);
-  return `${text.slice(0, head)}\n[…]\n${text.slice(text.length - (max - head))}`;
 }
 
 // --- Model calls ----------------------------------------------------------------
@@ -1480,6 +1475,8 @@ export async function executePlan(
 
   const results = new Map<string, string>();
   const reviews = new Map<string, { reviewer: string; verdict: ReviewVerdict; rounds: number }>();
+  // What each finished subtask passes on to the ones after it (handoff.ts).
+  const handoffs: HandoffEntry[] = [];
   // Earlier orchestrations the forked conversation does not know about.
   const history = opts.history?.trim() ? `\n\n${clip(opts.history.trim(), 4000)}` : "";
 
@@ -1489,17 +1486,20 @@ export async function executePlan(
     const roleInfo = role ? { roleId: role.id, roleName: role.name } : {};
     emit({ type: "subtask_start", subtaskId: st.id, title: st.title, workerId: worker.id, workerLabel: worker.label, ...roleInfo });
 
-    // Provide upstream results as context (file edits are already on disk for CLIs,
-    // but a text summary helps both CLI and local workers stay aligned).
-    const deps = st.dependsOn.map((d) => results.get(d)).filter(Boolean);
-    const context = deps.length
-      ? `\n\nContext from previous subtasks:\n${deps.map((c, i) => `[${i + 1}] ${clip(String(c), 1500)}`).join("\n")}`
-      : "";
+    // Every earlier subtask is handed over (who, measured file changes, the
+    // agent's own handoff section) — the ones this subtask depends on in
+    // detail, the others briefly — sized to the worker's context window.
+    const previous = buildHandoffContext(handoffs, st.dependsOn, handoffBudget(worker.contextWindow));
+    const context = previous ? `\n\n${previous}` : "";
     const body = st.description.trim() || st.title;
     // Same condition as runWork → cliAccess: write access only for a subtask
     // that changes files on a worker that may do so in this session.
-    const where = workingIn(session.cwd, worker, st.editsFiles && canEditFiles(worker, session));
-    const prompt = `${role ? `${roleFraming(role)}Your subtask:\n${body}` : body}${context}${history}\n\n${where}`;
+    const mayEdit = st.editsFiles && canEditFiles(worker, session);
+    const where = workingIn(session.cwd, worker, mayEdit);
+    // The last subtask reports to the conductor's summary, not to an agent.
+    const handoffAsk = st === assigned[assigned.length - 1].st ? "" : `\n\n${HANDOFF_INSTRUCTION}`;
+    const prompt = `${role ? `${roleFraming(role)}Your subtask:\n${body}` : body}${context}${history}${handoffAsk}\n\n${where}`;
+    const before = mayEdit ? await snapshotWorkdir(session.cwd) : null;
 
     const errors: string[] = [];
     const fail = (msg: string) => {
@@ -1545,6 +1545,17 @@ export async function executePlan(
       }
     }
     results.set(st.id, output);
+    const rv = reviews.get(st.id);
+    handoffs.push({
+      id: st.id,
+      title: st.title,
+      by: role ? `${role.name}, ${worker.label}` : worker.label,
+      output,
+      // Measured after the review's fix rounds, so it covers them too.
+      files: before ? await changedFiles(session.cwd, before, await snapshotWorkdir(session.cwd)) : undefined,
+      failed: errors.length > 0,
+      review: rv ? `${rv.verdict} after ${rv.rounds} round(s)` : undefined,
+    });
     emit({ type: "subtask_end", subtaskId: st.id, workerLabel: worker.label, ...roleInfo });
   }
 
@@ -1561,7 +1572,9 @@ export async function executePlan(
       const role = st.roleId ? roles.get(st.roleId) : undefined;
       const rv = reviews.get(st.id);
       const reviewLine = rv ? `\nReview by ${rv.reviewer}: ${rv.verdict} after ${rv.rounds} round(s)` : "";
-      return `### ${st.title} (${role ? `${role.name}, ` : ""}${worker.label})${reviewLine}\n${clip(String(results.get(st.id) || ""), 2000)}`;
+      const files = handoffs.find((h) => h.id === st.id)?.files;
+      const fileLine = files?.length ? `\nFiles changed: ${files.slice(0, 40).join(", ")}` : "";
+      return `### ${st.title} (${role ? `${role.name}, ` : ""}${worker.label})${reviewLine}${fileLine}\n${handoffNote(String(results.get(st.id) || ""), 2500)}`;
     })
     .join("\n\n");
   const caveats = reviews.size ? "any follow-ups or caveats (including review findings that remain open)" : "any follow-ups or caveats";

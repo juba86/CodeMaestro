@@ -498,6 +498,45 @@ describe("orchestrator with roles", () => {
     expect(c.events.find((e) => e.type === "subtask_start")!.roleId).toBeUndefined();
   });
 
+  it("hands every earlier subtask to the next agent — also without dependsOn — and asks for a handoff section", async () => {
+    const o = await loadOrchestrator(["claude"]);
+    state.turnImpl = async (_row, prompt, emit) => {
+      if (prompt.startsWith("first")) emit({ type: "text", content: "explored a lot\n## Handoff\n- API lives in src/api.ts" });
+      else if (prompt.startsWith("second")) emit({ type: "text", content: "second done" });
+      else emit({ type: "text", content: "ok" });
+      return { externalId: null, costUsd: 0, isError: false };
+    };
+    const c = collector();
+    await o.executePlan(session, "task", [
+      { id: "s1", title: "Eins", description: "first", workerId: "claude", dependsOn: [], editsFiles: false },
+      { id: "s2", title: "Zwei", description: "second", workerId: "claude", dependsOn: [], editsFiles: false },
+      { id: "s3", title: "Drei", description: "third", workerId: "claude", dependsOn: ["s2"], editsFiles: false },
+    ], c.io);
+    const promptOf = (start: string) => state.turns.find((t) => t.prompt.startsWith(start))!.prompt;
+
+    // The first agent has nothing to build on, but is asked to leave a handoff.
+    expect(promptOf("first")).not.toContain("<previous_work>");
+    expect(promptOf("first")).toContain('headed exactly "## Handoff"');
+
+    // The second gets the first one's handoff section although it declares no dependency.
+    const second = promptOf("second");
+    expect(second).toContain('<subtask id="s1" title="Eins" by="Claude Code">');
+    expect(second).toContain("- API lives in src/api.ts");
+    expect(second).not.toContain("explored a lot");
+
+    // The third sees both, its dependency marked; as the last one it reports to the summary.
+    const third = promptOf("third");
+    expect(third).toContain('<subtask id="s1"');
+    expect(third).toContain('<subtask id="s2" title="Zwei" by="Claude Code" status="you build on this">');
+    expect(third).toContain("second done");
+    expect(third).not.toContain('headed exactly "## Handoff"');
+
+    // The summary is built from the handoff section too.
+    const synth = state.turns.find((t) => isSynthesis(t.prompt))!.prompt;
+    expect(synth).toContain("- API lives in src/api.ts");
+    expect(synth).not.toContain("explored a lot");
+  });
+
   it("runs the review loop: changes → fix round → pass, with role framing, events, rows and costs", async () => {
     const o = await loadOrchestrator(["claude"]);
     let reviews = 0;
