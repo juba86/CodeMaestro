@@ -59,6 +59,7 @@ vi.mock("@/lib/ai/provider-factory", () => ({
   }),
 }));
 vi.mock("./runner", () => ({
+  isMarker: () => false,
   runTurn: async (row: TurnRow, prompt: string, _key: unknown, emit: TurnEmit, opts: { signal?: AbortSignal }) => {
     state.turns.push({ row, prompt });
     return state.turnImpl!(row, prompt, emit, opts);
@@ -537,6 +538,27 @@ describe("orchestrator with roles", () => {
     expect(synth).not.toContain("explored a lot");
   });
 
+  it("gives every worker the team sync, and the session recap only to workers without the session's conversation", async () => {
+    const o = await loadOrchestrator(["claude"]);
+    const st = [{ id: "s1", title: "A", description: "work", workerId: "claude", dependsOn: [], editsFiles: false }];
+    const opts = { teamSync: "<team_sync>pi changed src/a.ts</team_sync>", sessionRecap: "<session_recap>earlier here</session_recap>" };
+    const promptFor = async (s: Omit<typeof session, "externalId"> & { externalId: string | null }) => {
+      state.turns = [];
+      const res = await o.executePlan(s, "task", st, collector().io, opts);
+      expect(res).toMatchObject({ stopped: false, agents: ["Claude Code"], files: [] });
+      expect(typeof res.summary).toBe("string");
+      return state.turns.find((t) => t.prompt.startsWith("work"))!.prompt;
+    };
+    // No conversation to continue: the worker needs the recap too.
+    const fresh = await promptFor({ ...session, externalId: null });
+    expect(fresh).toContain("<team_sync>pi changed src/a.ts</team_sync>");
+    expect(fresh).toContain("<session_recap>earlier here</session_recap>");
+    // A Claude Code worker forks the Claude Code session's conversation: it already knows.
+    const forked = await promptFor({ ...session, provider: "claude", externalId: "conv-1" });
+    expect(forked).toContain("<team_sync>pi changed src/a.ts</team_sync>");
+    expect(forked).not.toContain("<session_recap>");
+  });
+
   it("runs the review loop: changes → fix round → pass, with role framing, events, rows and costs", async () => {
     const o = await loadOrchestrator(["claude"]);
     let reviews = 0;
@@ -556,7 +578,7 @@ describe("orchestrator with roles", () => {
       [{ id: "s1", title: "Umsetzen", description: "build it", workerId: "claude", dependsOn: [], editsFiles: true, roleId: "coder" }],
       c.io, { orchestra: defaultOrchestraConfig() });
 
-    expect(res).toEqual({ costUsd: expect.closeTo(0.1 + 0.02 + 0.1 + 0.02 + 0.1, 5), isError: false, stopped: false });
+    expect(res).toMatchObject({ costUsd: expect.closeTo(0.1 + 0.02 + 0.1 + 0.02 + 0.1, 5), isError: false, stopped: false });
     const work = state.turns.find((t) => t.prompt.includes("build it") && !isReview(t.prompt) && !isFix(t.prompt))!;
     expect(work.prompt.startsWith("You are the Coder on this team. Implement the subtask")).toBe(true);
     expect(work.prompt).toContain("Your subtask:\nbuild it");

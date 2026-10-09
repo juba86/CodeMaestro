@@ -223,7 +223,7 @@ describe("pi execution", () => {
       [{ id: "s1", title: "Umsetzen", description: "build it", workerId: PI_CODER, dependsOn: [], editsFiles: true }],
       c.io);
 
-    expect(res).toEqual({ costUsd: 0, isError: false, stopped: false });
+    expect(res).toMatchObject({ costUsd: 0, isError: false, stopped: false });
     expect(state.turns).toHaveLength(1);
     expect(state.turns[0].row).toEqual({
       id: "s1", externalId: null, forkSession: false, ephemeral: true, provider: "pi", model: "qwen3-coder:30b", cwd: "/tmp/proj",

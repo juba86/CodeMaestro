@@ -6,6 +6,7 @@ type Row = { id?: string; sessionId: string; role: string; content: string; meta
 const db = vi.hoisted(() => ({
   sessions: new Map<string, Record<string, unknown>>(),
   messages: [] as Row[],
+  work: [] as { cwd: string; sessionId: string; agent: string; task: string; summary: string; files: string; status: string; createdAt: Date }[],
 }));
 
 vi.mock("@/lib/db/client", () => ({
@@ -24,6 +25,21 @@ vi.mock("@/lib/db/client", () => ({
         }
         return s;
       }),
+    },
+    workLogEntry: {
+      create: vi.fn(async ({ data }: { data: Omit<(typeof db.work)[number], "createdAt"> }) => {
+        const row = { ...data, createdAt: new Date() };
+        db.work.push(row);
+        return row;
+      }),
+      findMany: vi.fn(async ({ where, take }: { where: { cwd?: string; sessionId: string | { not: string }; createdAt?: { gt: Date } }; take: number }) =>
+        db.work
+          .filter((e) => where.cwd === undefined || e.cwd === where.cwd)
+          .filter((e) => (typeof where.sessionId === "string" ? e.sessionId === where.sessionId : e.sessionId !== where.sessionId.not))
+          .filter((e) => !where.createdAt || e.createdAt > where.createdAt.gt)
+          .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+          .slice(0, take)
+      ),
     },
     assistantMessage: {
       create: vi.fn(async ({ data }: { data: Row }) => {
@@ -90,7 +106,71 @@ function collect(sessionId: string): BufferedEvent[] {
 let n = 0;
 beforeEach(() => {
   db.messages.length = 0;
+  db.work.length = 0;
   runTurnMock.mockReset();
+});
+
+describe("team sync between sessions", () => {
+  it("tells a pi session what the Claude session did in the same directory — once — and records its own work", async () => {
+    const claude = `sr-${++n}`;
+    const pi = `sr-${++n}`;
+    seedSession(claude);
+    seedSession(pi);
+    Object.assign(db.sessions.get(pi)!, { provider: "pi", model: "kolibri" });
+    const prompts: string[] = [];
+    runTurnMock.mockImplementation(async (row: { provider: string }, prompt: string, _key: unknown, emit: (e: { type: string; content?: string }) => void) => {
+      prompts.push(prompt);
+      emit({ type: "text", content: row.provider === "claude" ? "Login gebaut in src/auth.ts." : "Tests ergänzt." });
+      return { externalId: null, costUsd: 0, isError: false };
+    });
+    const turn = async (sessionId: string, prompt: string) => {
+      const run = await launchRun({ sessionId, kind: "turn", origin: "pwa", work: (ctx) => executeTurn(ctx, prompt) });
+      await run.finished;
+    };
+
+    await turn(claude, "Bau den Login");
+    expect(prompts[0]).toBe("Bau den Login"); // nothing to sync yet
+    expect(db.work).toMatchObject([{ sessionId: claude, agent: "Claude Code", task: "Bau den Login", summary: "Login gebaut in src/auth.ts.", status: "done" }]);
+
+    await turn(pi, "Schreib Tests");
+    expect(prompts[1].startsWith("<team_sync>")).toBe(true);
+    expect(prompts[1]).toContain('<work by="Claude Code"');
+    expect(prompts[1]).toContain("Login gebaut in src/auth.ts.");
+    expect(prompts[1].endsWith("Schreib Tests")).toBe(true);
+    expect(db.messages.some((m) => m.sessionId === pi && m.role === "system" && m.content.startsWith("Team-Sync: Arbeitsstand anderer Agenten übergeben (1 Eintrag)"))).toBe(true);
+    expect(db.sessions.get(pi)!.syncedAt).toBeInstanceOf(Date);
+
+    await turn(pi, "weiter");
+    expect(prompts[2]).toBe("weiter"); // already told
+
+    // And the Claude session learns what pi did (both pi turns reported).
+    await new Promise((r) => setTimeout(r, 5));
+    await turn(claude, "Status?");
+    expect(prompts[3]).toContain('<work by="pi · kolibri"');
+    expect(prompts[3]).toContain("Tests ergänzt.");
+    expect(prompts[3]).not.toContain("Login gebaut");
+  });
+
+  it("delivers the work again when the turn failed", async () => {
+    const a = `sr-${++n}`;
+    const b = `sr-${++n}`;
+    seedSession(a);
+    seedSession(b);
+    db.work.push({ cwd: "/tmp", sessionId: a, agent: "Claude Code", task: "t", summary: "done A", files: "[]", status: "done", createdAt: new Date(Date.now() - 1000) });
+    const prompts: string[] = [];
+    let fail = true;
+    runTurnMock.mockImplementation(async (_row, prompt: string) => {
+      prompts.push(prompt);
+      return { externalId: null, costUsd: 0, isError: fail };
+    });
+    for (const p of ["eins", "zwei"]) {
+      const run = await launchRun({ sessionId: b, kind: "turn", origin: "pwa", work: (ctx) => executeTurn(ctx, p) });
+      await run.finished.catch(() => {});
+      fail = false;
+    }
+    expect(prompts[0]).toContain("done A");
+    expect(prompts[1]).toContain("done A");
+  });
 });
 
 describe("orchestration handoff", () => {

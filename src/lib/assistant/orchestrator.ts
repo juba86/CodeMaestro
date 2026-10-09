@@ -8,6 +8,7 @@ import type { HubEvent } from "./run-hub";
 import { pendingHandoffContext, type RunContext, type RunOutcome } from "./session-run";
 import { HANDOFF_INSTRUCTION, buildHandoffContext, clipMiddle as clip, handoffBudget, handoffNote, type HandoffEntry } from "./handoff";
 import { changedFiles, snapshotWorkdir } from "./workdir-changes";
+import { activeElsewhere, markSynced, ownRecentWork, recapBlock, recordWork, syncBlock, unseenWork } from "./work-journal";
 import { HANDOFF_PENDING, type TranscriptRow } from "./transcript";
 import { fetchOllamaModels } from "@/lib/ai/ollama-provider";
 import { createProvider } from "@/lib/ai/provider-factory";
@@ -122,6 +123,16 @@ export interface OrchestrationOptions {
    * seen yet (session-run.pendingHandoffContext), for the planner and workers.
    */
   history?: string;
+  /**
+   * What other sessions' agents did in this directory and who works here
+   * right now (work-journal.syncBlock), for the planner and every worker.
+   */
+  teamSync?: string;
+  /**
+   * This session's own earlier work (work-journal.recapBlock), for the planner
+   * and workers that do not continue the session's conversation.
+   */
+  sessionRecap?: string;
 }
 
 /** Where an orchestration reports to: live events, ordered transcript rows, Stop. */
@@ -136,6 +147,12 @@ export interface OrchestrationResult {
   costUsd: number;
   isError: boolean;
   stopped: boolean;
+  /** The conductor's closing summary, when one was written. */
+  summary?: string;
+  /** Files the subtasks changed (measured), across the whole orchestration. */
+  files?: string[];
+  /** Labels of the workers that ran subtasks. */
+  agents?: string[];
 }
 
 const NO_WORKER_MSG =
@@ -924,6 +941,16 @@ export interface PlanOptions extends OrchestrationOptions {
 }
 
 // The user's standing guidance for the conductor (planning and summary).
+/**
+ * The team context of a prompt: other sessions' work in this directory for
+ * everyone, and this session's own earlier work for an agent that does not
+ * continue the session's conversation (`sharesThread` false).
+ */
+function teamContext(opts: OrchestrationOptions, sharesThread: boolean, lead: string): string {
+  const parts = [opts.teamSync?.trim(), sharesThread ? "" : opts.sessionRecap?.trim()].filter(Boolean) as string[];
+  return parts.length ? `${lead}${clip(parts.join("\n\n"), 8000)}${lead === "\n" ? "\n" : ""}` : "";
+}
+
 function conductorGuidance(orchestra?: OrchestraConfig | null): string {
   const instructions = orchestra?.conductor.instructions.trim();
   return instructions ? `\nAdditional instructions from the user for you as the conductor:\n${instructions}\n` : "";
@@ -1076,7 +1103,7 @@ async function plan(
   // A Claude Code planner continues the session's conversation (a fork).
   const thread = sessionThread(session, choice.worker);
   const history = opts.history?.trim() ? `\n${clip(opts.history.trim(), 8000)}\n` : "";
-  const planGuidance = `${thread ? HISTORY_LINE : ""}${history}${guidance}`;
+  const planGuidance = `${thread ? HISTORY_LINE : ""}${history}${teamContext(opts, !!thread, "\n")}${guidance}`;
   const plannerPrompt = roles.length && opts.orchestra
     ? rolePlannerPrompt(session, task, roles, opts.orchestra, prefLine, planGuidance)
     : workerPlannerPrompt(session, task, workers, prefLine, planGuidance);
@@ -1299,9 +1326,15 @@ export async function executePlan(
   };
   let costUsd = 0;
   let isError = false;
+  // What each finished subtask passes on to the ones after it (handoff.ts).
+  const handoffs: HandoffEntry[] = [];
+  const outcome = () => ({
+    files: [...new Set(handoffs.flatMap((h) => h.files ?? []))].sort(),
+    agents: [...new Set(handoffs.map((h) => h.by))],
+  });
   const stop = (): OrchestrationResult => {
     log(STOPPED_MSG);
-    return { costUsd, isError, stopped: true };
+    return { costUsd, isError, stopped: true, ...outcome() };
   };
 
   const workers = await discoverWorkers(opts.clientProviders);
@@ -1475,8 +1508,6 @@ export async function executePlan(
 
   const results = new Map<string, string>();
   const reviews = new Map<string, { reviewer: string; verdict: ReviewVerdict; rounds: number }>();
-  // What each finished subtask passes on to the ones after it (handoff.ts).
-  const handoffs: HandoffEntry[] = [];
   // Earlier orchestrations the forked conversation does not know about.
   const history = opts.history?.trim() ? `\n\n${clip(opts.history.trim(), 4000)}` : "";
 
@@ -1498,7 +1529,8 @@ export async function executePlan(
     const where = workingIn(session.cwd, worker, mayEdit);
     // The last subtask reports to the conductor's summary, not to an agent.
     const handoffAsk = st === assigned[assigned.length - 1].st ? "" : `\n\n${HANDOFF_INSTRUCTION}`;
-    const prompt = `${role ? `${roleFraming(role)}Your subtask:\n${body}` : body}${context}${history}${handoffAsk}\n\n${where}`;
+    const team = teamContext(opts, !!sessionThread(session, worker), "\n\n");
+    const prompt = `${role ? `${roleFraming(role)}Your subtask:\n${body}` : body}${context}${history}${team}${handoffAsk}\n\n${where}`;
     const before = mayEdit ? await snapshotWorkdir(session.cwd) : null;
 
     const errors: string[] = [];
@@ -1565,7 +1597,7 @@ export async function executePlan(
   // conductor's model (or Auto) — not hardwired to Claude.
   if (!conductor) {
     log("Keine Zusammenfassung: kein Modell verfügbar.");
-    return { costUsd, isError, stopped: false };
+    return { costUsd, isError, stopped: false, ...outcome() };
   }
   const summaryInput = assigned
     .map(({ st, worker }) => {
@@ -1605,7 +1637,7 @@ export async function executePlan(
     record({ role: "error", content: msg.slice(0, 4000) });
   }
 
-  return { costUsd, isError, stopped: false };
+  return { costUsd, isError, stopped: false, summary: synth.trim(), ...outcome() };
 }
 
 /** Auto mode: plan + execute in one shot. */
@@ -1653,10 +1685,41 @@ export async function orchestrateRun(
     record: (row) => ctx.writer.add(row),
     signal: ctx.signal,
   };
-  const withHistory = { ...opts, history: opts.history ?? (await pendingHandoffContext(ctx.sessionId)) };
+  // Team sync (work-journal.ts): what other sessions did here, who works here
+  // now, and this session's own earlier work for workers without its thread.
+  const [unseen, active, own] = await Promise.all([
+    unseenWork(ctx.sessionId, session.cwd),
+    activeElsewhere(ctx.sessionId, session.cwd),
+    ownRecentWork(ctx.sessionId),
+  ]);
+  const teamSync = syncBlock(unseen.entries, active);
+  if (teamSync) {
+    const content = `Team-Sync: Arbeitsstand anderer Agenten an das Team übergeben (${unseen.entries.length} ${unseen.entries.length === 1 ? "Eintrag" : "Einträge"}${active.length ? `; parallel arbeitet hier: ${active.map((a) => a.agent).join(", ")}` : ""}).`;
+    io.emit({ type: "log", content, notice: true });
+    io.record?.({ role: "system", content });
+  }
+  const withHistory = {
+    ...opts,
+    history: opts.history ?? (await pendingHandoffContext(ctx.sessionId)),
+    teamSync,
+    sessionRecap: recapBlock(own),
+  };
   const res = opts.subtasks?.length
     ? await executePlan(session, task, opts.subtasks, io, withHistory)
     : await orchestrate(session, task, io, withHistory);
+  if (unseen.entries.length && !res.isError && !res.stopped) await markSynced(ctx.sessionId, unseen.readAt);
+  // Leave a journal entry for the other agents and for later runs.
+  if (res.summary || res.files?.length) {
+    await recordWork({
+      cwd: session.cwd,
+      sessionId: ctx.sessionId,
+      agent: `Orchester: ${res.agents?.join("; ") || "—"}`,
+      task,
+      summary: res.summary || (res.stopped ? "(gestoppt, keine Zusammenfassung)" : "(keine Zusammenfassung)"),
+      files: res.files,
+      status: res.stopped ? "stopped" : res.isError ? "error" : "done",
+    });
+  }
   if (res.costUsd > 0) {
     await prisma.assistantSession
       .update({ where: { id: ctx.sessionId }, data: { totalCostUsd: { increment: res.costUsd } } })

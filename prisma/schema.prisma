@@ -151,6 +151,9 @@ model AssistantSession {
   sandbox        Boolean  @default(false)
   status         String   @default("idle") // idle|running|error|done
   totalCostUsd   Float    @default(0)
+  // Up to when this session's agent has been told what other agents did in
+  // the same working directory (see src/lib/assistant/work-journal.ts).
+  syncedAt       DateTime?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -174,4 +177,23 @@ model AssistantMessage {
   @@index([sessionId])
   // Transcripts are read as WHERE sessionId ORDER BY createdAt: no temp sort.
   @@index([sessionId, createdAt])
+}
+
+// Shared work journal of a working directory: one entry per finished turn or
+// orchestration that changed something, whichever agent (Claude Code, pi,
+// Gemini, …) and session did it. Other sessions in the same directory are told
+// about the entries they have not seen yet. No relation to the session on
+// purpose: the journal outlives a deleted session.
+model WorkLogEntry {
+  id        String   @id @default(cuid())
+  cwd       String
+  sessionId String
+  agent     String   // who worked, e.g. "pi · kolibri" or "Orchester: Claude Code, pi · kolibri"
+  task      String   // what was asked (clipped)
+  summary   String   // what was done (the agent's closing report, clipped)
+  files     String   @default("[]") // JSON array of changed paths, measured with git
+  status    String   @default("done") // done | error | stopped
+  createdAt DateTime @default(now())
+
+  @@index([cwd, createdAt])
 }

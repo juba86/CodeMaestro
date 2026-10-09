@@ -103,3 +103,21 @@ cause.
   with a `<context>` block holding it (once; marked `handoff: done` on the
   synthesis row), so answering a question from the summary just works. Further
   orchestrations see pending summaries as well.
+
+## Team sync: agents know what the others did
+
+Agents do not share a conversation: each session keeps its own, and orchestra
+workers start empty. Three mechanisms keep them aligned.
+
+| Scope | Mechanism | File |
+|---|---|---|
+| Subtasks of one orchestration | Each agent ends with a `## Handoff` section; the next one gets it for all earlier subtasks (dependencies in detail), with the files each subtask changed and the review outcome. Sized to the receiving model's context window. | `handoff.ts`, `workdir-changes.ts` |
+| An orchestration → the session's own agent | The conductor's summary is prepended to the session's next turn, once. | `session-run.ts` (`pendingHandoffs`) |
+| Sessions and agents on the same working directory | The **work journal** (`WorkLogEntry`): every turn or orchestration that changed files leaves an entry (agent, task, closing report, changed files, status). A turn starts with the entries of *other* sessions newer than the session's `syncedAt` (at most 5, on first contact the last 14 days) and a warning when another session has a run in the same directory right now. `syncedAt` only advances when the turn succeeded. Orchestra workers additionally get the session's own last entries unless they continue its conversation (a Claude Code worker in a Claude Code session). | `work-journal.ts` |
+
+Limits: sessions are matched by the exact working directory (a session in a
+subdirectory is a different project); file changes are measured with git, so
+outside a repository an entry is written whenever the agent reported
+something; and the sync happens at the start of a turn — an agent that is
+already working is not interrupted when another one finishes.
+

@@ -5,6 +5,8 @@ import { denyAllPending } from "./approvals";
 import { runTurn, stopSession, type AssistantSessionRow, type NormalizedEvent } from "./runner";
 import { HANDOFF_DONE, HANDOFF_PENDING, TranscriptWriter } from "./transcript";
 import { notifySession } from "@/lib/push";
+import { activeElsewhere, agentLabel, markSynced, recordWork, syncBlock, unseenWork } from "./work-journal";
+import { changedFiles, snapshotWorkdir } from "./workdir-changes";
 
 export type DbSession = NonNullable<Awaited<ReturnType<typeof prisma.assistantSession.findUnique>>>;
 
@@ -279,11 +281,43 @@ export async function executeTurn(ctx: RunContext, prompt: string, opts: TurnOpt
     emit({ type: "notice", content: handoffs.length === 1 ? "Zusammenfassung der Orchestrierung an den Agenten übergeben." : `${handoffs.length} Orchestrierungs-Zusammenfassungen an den Agenten übergeben.` });
   }
 
+  // Team sync: what other sessions' agents did in this directory since this
+  // agent last looked, and who works here right now (work-journal.ts).
+  const [unseen, active] = await Promise.all([unseenWork(session.id, session.cwd), activeElsewhere(session.id, session.cwd)]);
+  const sync = syncBlock(unseen.entries, active);
+  if (sync) {
+    effectivePrompt = `${sync}\n\n${effectivePrompt}`;
+    const told = [
+      unseen.entries.length ? `Arbeitsstand anderer Agenten übergeben (${unseen.entries.length} ${unseen.entries.length === 1 ? "Eintrag" : "Einträge"})` : "",
+      active.length ? `parallel arbeitet hier: ${active.map((a) => a.agent).join(", ")}` : "",
+    ].filter(Boolean).join("; ");
+    emit({ type: "notice", content: `Team-Sync: ${told}.` });
+  }
+
   const row = toSessionRow(session, { interactive: !!opts.interactive, ...opts.rowOverrides });
+  const before = await snapshotWorkdir(session.cwd).catch(() => null);
   const result = await runTurn(row, effectivePrompt, opts.apiKey, emit, { signal: ctx.signal });
   ctx.writer.flushText();
   // A turn that failed may not have reached the agent: hand over again next time.
   if (handoffs.length && !result.isError) await markHandoffsDone(handoffs);
+  if (unseen.entries.length && !result.isError) await markSynced(session.id, unseen.readAt);
+
+  // Leave a journal entry for the other agents — when this turn changed files
+  // (measured), or, outside a git repository where that cannot be measured,
+  // when it reported something.
+  const report = finalResult || streamed;
+  const files = before ? await changedFiles(session.cwd, before, await snapshotWorkdir(session.cwd).catch(() => null)).catch(() => []) : [];
+  if (files.length || (!before && report.trim())) {
+    await recordWork({
+      cwd: session.cwd,
+      sessionId: session.id,
+      agent: agentLabel(session.provider, session.model),
+      task: prompt,
+      summary: report,
+      files,
+      status: ctx.signal.aborted ? "stopped" : result.isError ? "error" : "done",
+    });
+  }
 
   const keepContext = opts.rowOverrides?.externalId === undefined;
   try {
