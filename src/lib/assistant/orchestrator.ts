@@ -50,6 +50,8 @@ export interface Worker {
   editsFiles: boolean;
   /** Runs on this machine / the local network (see orchestra-types isLocalWorker). */
   local?: boolean;
+  /** Context window in tokens (pi agents report it from the Modelfile). */
+  contextWindow?: number;
   providerId?: string; // for kind "api" — catalog id
   apiKey?: string; // for kind "api"
   baseUrl?: string; // for kind "api" (custom endpoint)
@@ -192,15 +194,23 @@ const DISCOVERY_TIMEOUT_MS = 8_000;
 interface OrchCaches {
   pool: { at: number; pool: Promise<LocalPool> } | null;
   apiModels: Map<string, { at: number; model: Promise<string> }>;
+  /** Last Ollama/pi lists that arrived in time — used when a discovery runs over. */
+  lastGood: { ollama: ModelInfo[]; pi: PiModel[] };
 }
 const gc = globalThis as unknown as { __cmOrchCaches?: OrchCaches };
-const caches: OrchCaches = (gc.__cmOrchCaches ??= { pool: null, apiModels: new Map() });
+const caches: OrchCaches = (gc.__cmOrchCaches ??= { pool: null, apiModels: new Map(), lastGood: { ollama: [], pi: [] } });
 
-/** `p`, or `fallback` when it fails or takes longer than `ms`. */
-function settleWithin<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+const TIMED_OUT = Symbol("timed out");
+
+/**
+ * `p`, or `fallback` when it fails, or `TIMED_OUT` when it takes longer than
+ * `ms` (the caller decides what a slow answer means — a busy Ollama that is
+ * loading a model still has the same models as a moment ago).
+ */
+function settleWithin<T>(p: Promise<T>, ms: number, fallback: T): Promise<T | typeof TIMED_OUT> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<T>((resolve) => {
-    timer = setTimeout(() => resolve(fallback), ms);
+  const timeout = new Promise<typeof TIMED_OUT>((resolve) => {
+    timer = setTimeout(() => resolve(TIMED_OUT), ms);
     timer.unref?.();
   });
   return Promise.race([p.catch(() => fallback), timeout]).finally(() => clearTimeout(timer));
@@ -226,7 +236,17 @@ function localPool(): Promise<LocalPool> {
     geminiAvailable(),
     settleWithin(fetchOllamaModels(), DISCOVERY_TIMEOUT_MS, [] as ModelInfo[]),
     settleWithin(discoverPiModels(), DISCOVERY_TIMEOUT_MS, [] as PiModel[]),
-  ]).then(([claude, gemini, ollama, pi]) => ({ claude, gemini, ollama, pi }));
+  ]).then(([claude, gemini, ollama, pi]) => {
+    // A discovery that runs over (Ollama busy loading a model for another
+    // client) keeps the last good lists: otherwise every configured local
+    // role would silently fall back to "Auto" on a different model. Real
+    // failures (unreachable, error) still yield none.
+    if (ollama === TIMED_OUT) ollama = caches.lastGood.ollama;
+    else if (ollama.length) caches.lastGood.ollama = ollama;
+    if (pi === TIMED_OUT) pi = caches.lastGood.pi;
+    else if (pi.length) caches.lastGood.pi = pi;
+    return { claude, gemini, ollama, pi };
+  });
   caches.pool = { at: now, pool };
   return pool;
 }
@@ -278,6 +298,7 @@ function piWorker(m: Pick<PiModel, "id" | "contextWindow">): Worker {
     strengths: `Local agent (free, runs offline) on ${m.id} via the pi coding agent: reads and edits project files and runs commands, like the CLI workers. ${specialty} ${scope}`,
     editsFiles: true,
     local: true,
+    contextWindow: m.contextWindow,
   };
 }
 
@@ -735,13 +756,14 @@ const CHUNK_FLUSH_CHARS = 2_000;
 
 /**
  * Consumes a provider stream, forwarding (coalesced) chunks. Returns the text
- * so far when the run is stopped (the providers take no AbortSignal yet, so
- * the pending read is abandoned rather than cancelled). Everything received is
- * forwarded through `onChunk` before this returns or throws.
+ * so far when the run is stopped: the abort signal is handed to the provider
+ * (Ollama cancels the generation and frees the GPU), and the pending read is
+ * abandoned for providers that ignore it. Everything received is forwarded
+ * through `onChunk` before this returns or throws.
  */
 async function streamChat(provider: AIProvider, model: string, prompt: string, o: StreamOpts): Promise<string> {
   if (o.signal?.aborted) return "";
-  const gen = provider.streamMessage({ messages: [{ role: "user", content: prompt }], model });
+  const gen = provider.streamMessage({ messages: [{ role: "user", content: prompt }], model, signal: o.signal });
   let text = "";
   let pending = "";
   let timer: ReturnType<typeof setTimeout> | null = null;

@@ -102,6 +102,7 @@ export class OllamaProvider implements AIProvider {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       cache: "no-store",
+      signal: params.signal,
       body: JSON.stringify({
         model: params.model || "llama3",
         messages: this.buildMessages(params),

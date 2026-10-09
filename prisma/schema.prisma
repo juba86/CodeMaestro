@@ -22,6 +22,7 @@ model Prompt {
   testCases   TestCase[]
 
   @@index([title])
+  @@index([updatedAt])
 }
 
 model PromptVersion {
@@ -156,6 +157,8 @@ model AssistantSession {
   messages       AssistantMessage[]
 
   @@index([createdAt])
+  // The session list and the activity snapshot order by updatedAt.
+  @@index([updatedAt])
 }
 
 model AssistantMessage {
@@ -169,4 +172,6 @@ model AssistantMessage {
   session   AssistantSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@index([sessionId])
+  // Transcripts are read as WHERE sessionId ORDER BY createdAt: no temp sort.
+  @@index([sessionId, createdAt])
 }

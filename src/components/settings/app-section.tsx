@@ -78,8 +78,11 @@ export function AppSection() {
     const sw = navigator.serviceWorker;
     const onChange = () => void refresh();
     sw.addEventListener("controllerchange", onChange);
-    // A worker may finish installing while this section is open.
-    const timer = setInterval(onChange, 5_000);
+    // A worker may finish installing while this section is open (only checked
+    // while the page is visible).
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") onChange();
+    }, 5_000);
     return () => {
       sw.removeEventListener("controllerchange", onChange);
       clearInterval(timer);

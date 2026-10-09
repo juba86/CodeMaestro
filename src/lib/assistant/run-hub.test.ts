@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   SessionBusyError,
   abortRun,
+  activeSessionIds,
   beginRun,
   endRun,
   getActiveRun,
@@ -153,5 +154,20 @@ describe("run-hub resume across runs", () => {
     const b = await new Response(sseResponse(s, 2, new AbortController().signal, old.info.runId).body).text();
     expect(b).toContain('"run_start"');
     expect(b).toContain('"new"');
+  });
+});
+
+describe("activeSessionIds", () => {
+  it("lists sessions with an unfinished run and forgets them after endRun", () => {
+    const a = sid();
+    const b = sid();
+    const ra = beginRun(a, "turn", "pwa");
+    const rb = beginRun(b, "orchestrate", "telegram");
+    expect(activeSessionIds()).toEqual(expect.arrayContaining([a, b]));
+    endRun(a, ra.info.runId, "idle");
+    expect(activeSessionIds()).not.toContain(a);
+    expect(activeSessionIds()).toContain(b);
+    endRun(b, rb.info.runId, "stopped");
+    expect(activeSessionIds()).not.toContain(b);
   });
 });

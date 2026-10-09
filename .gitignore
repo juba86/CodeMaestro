@@ -50,3 +50,7 @@ next-env.d.ts
 
 # server-side secret key for encrypted settings (src/lib/secret-box.ts)
 .codemaestro/
+
+# SQLite write-ahead log side files (see src/lib/db/client.ts)
+*.db-wal
+*.db-shm

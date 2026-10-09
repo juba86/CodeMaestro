@@ -123,7 +123,10 @@ export function AssistantPage() {
     fetch("/api/assistant/sessions", { cache: "no-store" })
       .then((r) => r.json())
       .then((d) => {
-        setSessions(Array.isArray(d.sessions) ? d.sessions : []);
+        const next: SessionSummary[] = Array.isArray(d.sessions) ? d.sessions : [];
+        // Keep the previous array when nothing changed, so a poll that brings
+        // the same list does not re-render the whole page (thread included).
+        setSessions((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
         setSessionsLoaded(true);
       })
       .catch(() => {});
@@ -164,7 +167,16 @@ export function AssistantPage() {
     const t = setInterval(() => {
       if (document.visibilityState === "visible") loadSessions();
     }, anyRunning ? 4000 : 20000);
-    return () => clearInterval(t);
+    // The PWA comes back from standby with a stale list: refresh right away
+    // instead of waiting for the next tick.
+    const onVisible = () => {
+      if (document.visibilityState === "visible") loadSessions();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [anyRunning, loadSessions]);
 
   // --- URL ↔ session ------------------------------------------------------------

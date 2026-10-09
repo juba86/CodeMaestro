@@ -180,6 +180,18 @@ npm run dev                   # http://localhost:3000
 npm run build && npm start
 ```
 
+Updating a running installation (stop the server first — a build while it runs
+overwrites the `.next` output it serves from):
+```bash
+git pull && npm ci
+npx prisma migrate deploy     # applies new migrations (e.g. indexes); data is kept
+npx prisma generate
+npm run build                 # then start the server again
+```
+The database runs in SQLite's write-ahead mode, so `dev.db-wal` and `dev.db-shm`
+sit next to `dev.db`. Back it up with `sqlite3 dev.db ".backup copy.db"` (or copy
+all three files), never `dev.db` alone.
+
 ### HTTPS on your tailnet (installable PWA)
 ```bash
 npm run build

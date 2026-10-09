@@ -12,6 +12,7 @@ import {
   hookToken,
   isValidHookToken,
   listPending,
+  pendingSessionIds,
   resolveApproval,
   waitForDecision,
   type ApprovalEvent,
@@ -116,5 +117,20 @@ describe("approvals", () => {
     expect(isValidHookToken(hookToken())).toBe(true);
     expect(isValidHookToken("nope")).toBe(false);
     expect(isValidHookToken(null)).toBe(false);
+  });
+});
+
+describe("pendingSessionIds", () => {
+  it("lists each session with an undecided request once and drops it when decided", async () => {
+    const s = sid();
+    const run = beginRun(s, "turn", "pwa");
+    const first = await createApproval(s, "Bash", { command: "ls" });
+    const second = await createApproval(s, "Bash", { command: "pwd" });
+    expect(pendingSessionIds().filter((id) => id === s)).toEqual([s]);
+    resolveApproval((first as { approvalId: string }).approvalId, "allow");
+    expect(pendingSessionIds()).toContain(s);
+    resolveApproval((second as { approvalId: string }).approvalId, "deny");
+    expect(pendingSessionIds()).not.toContain(s);
+    endRun(s, run.info.runId, "idle");
   });
 });

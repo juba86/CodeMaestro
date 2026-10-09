@@ -64,7 +64,26 @@ export function useOrchestraLive(sessionId: string | null): { live: OrchestraLiv
     let ended = false;
 
     const hidden = () => document.visibilityState === "hidden";
+    // Streaming output arrives as many small events; batch them so the page
+    // renders once per frame-ish instead of once per token chunk (the
+    // assistant thread does the same in use-session-run.ts).
+    const FLUSH_MS = 40;
+    let queue: { event: { type: string }; at: number }[] = [];
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    const flush = () => {
+      if (flushTimer) clearTimeout(flushTimer);
+      flushTimer = null;
+      if (!queue.length) return;
+      const batch = queue;
+      queue = [];
+      for (const q of batch) dispatch({ type: "event", sid, event: q.event, at: q.at });
+    };
+    const enqueue = (event: { type: string }) => {
+      queue.push({ event, at: Date.now() });
+      flushTimer ??= setTimeout(flush, FLUSH_MS);
+    };
     const detach = () => {
+      flush();
       es?.close();
       es = null;
     };
@@ -107,9 +126,10 @@ export function useOrchestraLive(sessionId: string | null): { live: OrchestraLiv
           dispatch({ type: "connection", sid, connection: "ended" });
           return;
         }
-        dispatch({ type: "event", sid, event: ev as { type: string }, at: Date.now() });
+        enqueue(ev as { type: string });
         if (ev.type === "run_end") {
           // Close ourselves: a server-closed EventSource would reconnect.
+          // detach() flushes the queue first, so run_end is applied in order.
           detach();
           ended = true;
           dispatch({ type: "connection", sid, connection: "ended" });
@@ -185,6 +205,8 @@ export function useOrchestraLive(sessionId: string | null): { live: OrchestraLiv
     return () => {
       closed = true;
       if (timer) clearTimeout(timer);
+      // Unmounting: drop what is still queued instead of dispatching it.
+      queue = [];
       detach();
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("online", onOnline);

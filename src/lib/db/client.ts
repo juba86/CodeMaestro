@@ -49,8 +49,29 @@ function makePrisma(): PrismaClient {
         `always used it). If data seems missing, set DATABASE_URL="file:./dev.db".`
     );
   }
-  const adapter = new PrismaBetterSqlite3({ url: `file:${file}` });
-  return new PrismaClient({ adapter });
+  // better-sqlite3's own busy timeout (5 s) applies; `timeout` is explicit so a
+  // reader never fails with SQLITE_BUSY while a run writes transcript rows.
+  const adapter = new PrismaBetterSqlite3({ url: `file:${file}`, timeout: 5_000 });
+  const client = new PrismaClient({ adapter });
+  void applyPragmas(client);
+  return client;
+}
+
+/**
+ * Write-ahead logging: readers (the polling routes) no longer block the run
+ * that streams transcript rows, and each committed row costs one small WAL
+ * append instead of a rollback-journal rewrite. `journal_mode` is persisted
+ * in the database file, so this is a one-time switch that later connections
+ * (including the Prisma CLI) inherit. Per-connection pragmas such as
+ * `synchronous` cannot be set here: the adapter runs raw statements inside a
+ * transaction, where SQLite refuses to change them.
+ */
+async function applyPragmas(client: PrismaClient): Promise<void> {
+  try {
+    await client.$queryRawUnsafe("PRAGMA journal_mode = WAL");
+  } catch (err) {
+    console.warn("[db] SQLite pragmas could not be applied:", err instanceof Error ? err.message : err);
+  }
 }
 
 export const prisma = globalForPrisma.prisma || makePrisma();

@@ -298,6 +298,13 @@ export function listPending(sessionId: string): ApprovalEvent[] {
   return out;
 }
 
+/** Ids of every session with at least one undecided approval/question. */
+export function pendingSessionIds(): string[] {
+  const ids = new Set<string>();
+  for (const p of state().pending.values()) if (!p.decided) ids.add(p.sessionId);
+  return [...ids];
+}
+
 /** Denies every open request of a session (used when a run is stopped). */
 export function denyAllPending(sessionId: string, reason = "Ausführung gestoppt."): number {
   let n = 0;

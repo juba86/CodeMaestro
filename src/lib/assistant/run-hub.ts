@@ -113,6 +113,13 @@ export function isSessionBusy(sessionId: string): boolean {
   return getActiveRun(sessionId) !== null;
 }
 
+/** Ids of every session with an active (not yet finished) run. */
+export function activeSessionIds(): string[] {
+  const out: string[] = [];
+  for (const [sessionId, r] of hub().runs) if (!r.info.done) out.push(sessionId);
+  return out;
+}
+
 /** Number of live SSE/bridge listeners attached to a session's run (observers excluded). */
 export function listenerCount(sessionId: string): number {
   const run = hub().runs.get(sessionId);

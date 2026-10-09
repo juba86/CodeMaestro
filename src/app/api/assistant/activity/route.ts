@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
-import { getActiveRun } from "@/lib/assistant/run-hub";
-import { listPending } from "@/lib/assistant/approvals";
+import { activeSessionIds, getActiveRun } from "@/lib/assistant/run-hub";
+import { listPending, pendingSessionIds } from "@/lib/assistant/approvals";
 import { buildActivity } from "@/lib/activity";
 
 // Read-only snapshot of the in-memory run hub (DESIGN.md §4.4), polled by
@@ -14,11 +14,17 @@ const NO_STORE = { "Cache-Control": "no-store" };
 
 export async function GET() {
   try {
-    const sessions = await prisma.assistantSession.findMany({
-      select: { id: true, title: true, cwd: true, provider: true, model: true },
-      orderBy: { updatedAt: "desc" },
-      take: 200,
-    });
+    // Runs and open gates live in memory; the database is only asked for the
+    // display fields of exactly those sessions. An idle app (the common case,
+    // polled every 5 s per tab) costs no query at all, and a run in a session
+    // that was not touched recently is still reported.
+    const ids = [...new Set([...activeSessionIds(), ...pendingSessionIds()])];
+    const sessions = ids.length
+      ? await prisma.assistantSession.findMany({
+          where: { id: { in: ids } },
+          select: { id: true, title: true, cwd: true, provider: true, model: true },
+        })
+      : [];
     return NextResponse.json(buildActivity(sessions, getActiveRun, listPending, Date.now()), { headers: NO_STORE });
   } catch (err) {
     console.error("[GET /api/assistant/activity]", err);

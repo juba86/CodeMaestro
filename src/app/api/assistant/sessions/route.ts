@@ -9,10 +9,25 @@ import { approvalModeLabel, providerLabel } from "@/lib/labels";
 
 export const runtime = "nodejs";
 
+// The list is polled every 4 s while anything runs: only the fields it shows,
+// and a bound that comfortably holds every session in normal use.
+const MAX_SESSIONS = 200;
+
 export async function GET() {
   const sessions = await prisma.assistantSession.findMany({
     orderBy: { updatedAt: "desc" },
-    include: { _count: { select: { messages: true } } },
+    take: MAX_SESSIONS,
+    select: {
+      id: true,
+      provider: true,
+      model: true,
+      title: true,
+      cwd: true,
+      status: true,
+      totalCostUsd: true,
+      updatedAt: true,
+      _count: { select: { messages: true } },
+    },
   });
   return NextResponse.json({
     sessions: sessions.map((s) => ({

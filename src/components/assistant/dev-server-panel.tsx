@@ -53,7 +53,10 @@ export function useDevServer(sessionId: string | null) {
   const running = !!status?.running;
   React.useEffect(() => {
     if (!sessionId || !running) return;
-    const t = setInterval(() => void load(sessionId), 3000);
+    // Not while hidden: a backgrounded PWA must not wake the radio every 3 s.
+    const t = setInterval(() => {
+      if (document.visibilityState === "visible") void load(sessionId);
+    }, 3000);
     return () => clearInterval(t);
   }, [sessionId, running, load]);
 

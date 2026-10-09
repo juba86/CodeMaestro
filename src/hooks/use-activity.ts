@@ -21,8 +21,6 @@ export interface ActivitySnapshot {
   reachable: boolean;
   /** True until the first poll finished (successfully or not). */
   loading: boolean;
-  /** Local epoch ms of the last successful poll. */
-  lastUpdated: number | null;
 }
 
 export interface UseActivityResult extends ActivitySnapshot {
@@ -52,7 +50,6 @@ const INITIAL: ActivitySnapshot = Object.freeze({
   counts: Object.freeze({ running: 0, waiting: 0 }),
   reachable: true,
   loading: true,
-  lastUpdated: null,
 });
 
 let state: ActivitySnapshot = INITIAL;
@@ -157,7 +154,9 @@ async function poll(): Promise<void> {
     state.counts.running === runs.length && state.counts.waiting === pending.length
       ? state.counts
       : { running: runs.length, waiting: pending.length };
-  setState({ runs, pending, counts, reachable: true, loading: false, lastUpdated: Date.now() });
+  // No per-poll timestamp in the snapshot: when runs, pending and counts keep
+  // their references, setState() is a no-op and no subscriber re-renders.
+  setState({ runs, pending, counts, reachable: true, loading: false });
   schedule(POLL_MS);
 }
 

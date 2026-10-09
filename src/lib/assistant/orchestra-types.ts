@@ -82,6 +82,8 @@ export interface OrchestraWorkerInfo {
   local?: boolean;
   model?: string;
   strengths?: string;
+  /** Context window in tokens, when known (local models). */
+  contextWindow?: number;
 }
 
 export type ReviewVerdict = "pass" | "changes" | "unknown";
@@ -222,11 +224,38 @@ function priority(id: string): number {
   return i < 0 ? GENERAL_PRIORITY.length : i + 0.5;
 }
 
+/**
+ * Context window in tokens, from the model's reported `contextWindow` or a
+ * "-64k"/"-256k" tag suffix (Ollama variants that only differ in num_ctx);
+ * 0 when unknown.
+ */
+export function contextTokens(m: { id: string; contextWindow?: number }): number {
+  if (typeof m.contextWindow === "number" && m.contextWindow > 0) return m.contextWindow;
+  const k = m.id.match(/[-_:](\d+)k$/i);
+  return k ? Number(k[1]) * 1024 : 0;
+}
+
+/**
+ * Among otherwise equal variants of one model, the SMALLER context wins:
+ * planning and summaries fit comfortably in 64k, while a 256k variant books
+ * a KV cache several times larger — on a shared GPU it is the first to be
+ * evicted, and every reload costs minutes of prompt re-processing.
+ */
+function smallerContextFirst(a: { id: string; contextWindow?: number }, b: { id: string; contextWindow?: number }): number {
+  return contextTokens(a) - contextTokens(b);
+}
+
 /** The strongest general (non-coder, non-embedding) local model, if any. */
-export function strongestGeneral<T extends { id: string; name?: string }>(models: T[]): T | undefined {
+export function strongestGeneral<T extends { id: string; name?: string; contextWindow?: number }>(models: T[]): T | undefined {
   return models
     .filter((m) => isGeneralLocal(m.id))
-    .sort((a, b) => priority(a.id) - priority(b.id) || paramBillions(b) - paramBillions(a) || a.id.localeCompare(b.id))[0];
+    .sort(
+      (a, b) =>
+        priority(a.id) - priority(b.id) ||
+        paramBillions(b) - paramBillions(a) ||
+        smallerContextFirst(a, b) ||
+        a.id.localeCompare(b.id)
+    )[0];
 }
 
 // --- Worker ranking ---------------------------------------------------------------
@@ -261,7 +290,10 @@ export function strongestWorker<W extends OrchestraWorkerInfo>(workers: W[], gen
       workerTier(b) - workerTier(a) ||
       (generalFirst ? Number(!isGeneralLocal(ma)) - Number(!isGeneralLocal(mb)) : 0) ||
       priority(ma) - priority(mb) ||
-      paramBillions({ id: mb }) - paramBillions({ id: ma })
+      paramBillions({ id: mb }) - paramBillions({ id: ma }) ||
+      smallerContextFirst({ id: ma, contextWindow: a.contextWindow }, { id: mb, contextWindow: b.contextWindow }) ||
+      // Deterministic: never depends on the order Ollama lists its tags in.
+      ma.localeCompare(mb)
     );
   })[0];
 }

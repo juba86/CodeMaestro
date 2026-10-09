@@ -29,6 +29,9 @@ export interface SendMessageParams {
   // Reasoning depth for providers that support it (Claude: output_config.effort).
   // Clamped to what the model accepts; ignored elsewhere.
   effort?: "low" | "medium" | "high" | "xhigh" | "max";
+  // Cancels the request (Stop): a local model then frees the GPU at once
+  // instead of finishing a generation nobody reads.
+  signal?: AbortSignal;
 }
 
 export interface AIProvider {

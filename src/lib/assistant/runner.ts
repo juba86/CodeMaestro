@@ -57,6 +57,9 @@ const PERMISSION_MCP_SERVER = "codemaestro";
 export const PERMISSION_PROMPT_TOOL = `mcp__${PERMISSION_MCP_SERVER}__permission`;
 // pi approval gate (a pi extension; pi refuses to start when it fails to load).
 const PI_EXTENSION_PATH = path.join(process.cwd(), "scripts", "pi-approval-extension.ts");
+// Silence from a local model before the thread gets a "waiting for Ollama" notice.
+const STALL_NOTICE_MS = 90_000;
+const STALL_CHECK_MS = 15_000;
 
 // POSIX single-quote a path for the shell that runs hook commands, so paths
 // with spaces or quotes (e.g. "/Users/Jane Doe/…") can't split the command.
@@ -414,6 +417,9 @@ function piTurn(session: AssistantSessionRow, models: Array<{ id: string; toolsO
     "--session-dir", piSessionsDir(),
     "--session-id", piSessionIdFor(session.id, session.externalId),
   ];
+  // One-off rows (orchestra subtasks, loops) are never resumed: no session
+  // file, or every subtask leaves one behind in .codemaestro/pi-agent/sessions.
+  if (session.ephemeral) args.push("--no-session");
   if (tools.length) args.push("--tools", tools.join(","));
   else args.push("--no-tools");
   // Only our own gate: no discovered/built-in extensions, MCP, skills, prompt
@@ -763,8 +769,27 @@ async function runTurnOnce(
     else handleClaudeLine(line);
   };
 
+  // A local model that answers nothing for minutes is usually Ollama loading
+  // a model (or evicting one for another client), not a hung agent. Say so
+  // once per turn, so the thread shows a cause instead of a silent wait.
+  let lastOutputAt = Date.now();
+  let stallNoticed = false;
+  const stallTimer = pi
+    ? setInterval(() => {
+        if (stallNoticed || Date.now() - lastOutputAt < STALL_NOTICE_MS) return;
+        stallNoticed = true;
+        emitNow({
+          type: "notice",
+          content: `Seit ${Math.round(STALL_NOTICE_MS / 1000)} s keine Antwort vom lokalen Modell. Ollama lädt vermutlich gerade ein Modell oder ist durch einen anderen Client belegt; der Lauf wartet weiter.`,
+        });
+      }, STALL_CHECK_MS)
+    : null;
+  stallTimer?.unref?.();
+
   return await new Promise<TurnAttempt>((resolve) => {
     child.stdout.on("data", (chunk: Buffer) => {
+      lastOutputAt = Date.now();
+      stallNoticed = false;
       const text = outDecoder.write(chunk);
       if (!text) return;
       if (kind === "gemini") {
@@ -794,6 +819,7 @@ async function runTurnOnce(
     });
 
     child.on("close", (code, signal) => {
+      if (stallTimer) clearInterval(stallTimer);
       untrackProc(session.id, child);
       opts.signal?.removeEventListener("abort", onAbort);
       removeFile(settingsFile);
