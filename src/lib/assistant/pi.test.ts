@@ -288,7 +288,7 @@ describe("tool mapping", () => {
 // Runs captured `pi --mode json` output through the mapper; consecutive deltas
 // are joined like the runner's coalescer does.
 function mapFixture(name: string, model = "mock-coder") {
-  const mapper = new PiEventMapper(model);
+  const mapper = new PiEventMapper(model, () => 0); // frozen clock: no speed notice
   const events: NormalizedEvent[] = [];
   const push = (m: PiMapped) => {
     if (m.kind === "event") { events.push(m.event); return; }
@@ -340,6 +340,42 @@ describe("PiEventMapper (captured pi 1.0.4 samples)", () => {
     expect(errors[0].content).toContain("Connection error.");
     expect(events[events.length - 1]).toMatchObject({ type: "result", isError: true });
     expect(mapper.isError).toBe(true);
+  });
+
+  it("reports the average generation speed, counting only the time the model was writing", () => {
+    let t = 0;
+    const mapper = new PiEventMapper("m", () => t);
+    const feed = (o: unknown) => mapper.handleLine(JSON.stringify(o));
+    const reply = (waitMs: number, writeMs: number, output: number) => {
+      feed({ type: "message_start", message: { role: "assistant" } });
+      t += waitMs; // reading the prompt: not part of the rate
+      feed({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "a" } });
+      t += writeMs;
+      feed({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "a" }], usage: { output } } });
+    };
+    feed({ type: "session", id: "x" });
+    reply(60_000, 4_000, 80);
+    t += 30_000; // a tool runs
+    reply(5_000, 6_000, 120);
+    const out = feed({ type: "agent_settled" });
+    expect(out.map((m) => m.kind === "event" && m.event.type)).toEqual(["notice", "result"]);
+    expect(out[0]).toMatchObject({ event: { content: "Tempo: Ø 20,0 Token/s · 200 Token Ausgabe in 2 Antworten" } });
+    expect(mapper.finish({ stopped: false })).toEqual([]);
+  });
+
+  it("reports the speed of a stopped turn and stays quiet about a handful of tokens", () => {
+    let t = 0;
+    const run = (output: number) => {
+      const mapper = new PiEventMapper("m", () => t);
+      mapper.handleLine(JSON.stringify({ type: "session", id: "x" }));
+      mapper.handleLine(JSON.stringify({ type: "message_start", message: { role: "assistant" } }));
+      mapper.handleLine(JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "a" } }));
+      t += 2_000;
+      mapper.handleLine(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], usage: { output } } }));
+      return mapper.finish({ stopped: true });
+    };
+    expect(run(50)).toMatchObject([{ event: { type: "notice", content: "Tempo: Ø 25,0 Token/s · 50 Token Ausgabe in 1 Antwort" } }]);
+    expect(run(5)).toEqual([]);
   });
 
   it("ignores garbage lines and reports a run without end records", () => {

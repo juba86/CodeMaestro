@@ -538,7 +538,7 @@ interface PiContentBlock {
 interface PiLine {
   type?: string;
   id?: string;
-  message?: { role?: string; content?: unknown; stopReason?: string; errorMessage?: string };
+  message?: { role?: string; content?: unknown; stopReason?: string; errorMessage?: string; usage?: { output?: number } };
   assistantMessageEvent?: { type?: string; delta?: string };
   toolCallId?: string;
   toolName?: string;
@@ -559,6 +559,16 @@ function textOf(content: unknown): string {
   return blocksOf(content).filter((b) => b.type === "text" && typeof b.text === "string").map((b) => b.text).join("");
 }
 
+/** "Tempo: Ø 19,3 Token/s · 3.412 Token Ausgabe in 14 Antworten" — the turn's average generation speed. */
+export function speedNotice(tokens: number, ms: number, replies: number): string {
+  const rate = (tokens / (ms / 1000)).toLocaleString("de-DE", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  return `Tempo: Ø ${rate} Token/s · ${tokens.toLocaleString("de-DE")} Token Ausgabe in ${replies} ${replies === 1 ? "Antwort" : "Antworten"}`;
+}
+
+// Below this a rate says more about request overhead than about the model.
+const SPEED_MIN_TOKENS = 20;
+const SPEED_MIN_MS = 1_000;
+
 /**
  * Maps pi `--mode json` records onto runner events. pi exits 0 even when the
  * provider failed, so errors are taken from the stream: an assistant message
@@ -577,8 +587,16 @@ export class PiEventMapper {
   private errorEmitted = false;
   private streamedText = false;
   private streamedThinking = false;
+  // Generation speed: output tokens over the time the model was actually
+  // writing (first streamed delta → end of the message), so reading the
+  // prompt, loading the model and running tools do not dilute the average.
+  private genStartedAt: number | null = null;
+  private genTokens = 0;
+  private genMs = 0;
+  private genReplies = 0;
+  private speedEmitted = false;
 
-  constructor(private readonly model: string) {}
+  constructor(private readonly model: string, private readonly now: () => number = Date.now) {}
 
   /** Parses one JSONL line (invalid lines are ignored). */
   handleLine(line: string): PiMapped[] {
@@ -606,10 +624,12 @@ export class PiEventMapper {
         if (obj.message?.role === "assistant") {
           this.streamedText = false;
           this.streamedThinking = false;
+          this.genStartedAt = null;
         }
         return [];
       case "message_update": {
         const e = obj.assistantMessageEvent;
+        this.genStartedAt ??= this.now();
         if (e?.type === "text_delta" && e.delta) {
           this.streamedText = true;
           return [{ kind: "delta", type: "text", content: e.delta }];
@@ -623,6 +643,13 @@ export class PiEventMapper {
       case "message_end": {
         const m = obj.message;
         if (m?.role !== "assistant") return [];
+        const tokens = m.usage?.output;
+        if (this.genStartedAt !== null && typeof tokens === "number" && tokens > 0) {
+          this.genTokens += tokens;
+          this.genMs += this.now() - this.genStartedAt;
+          this.genReplies++;
+        }
+        this.genStartedAt = null;
         const out: PiMapped[] = [];
         // A message that arrived without deltas is emitted whole.
         for (const b of blocksOf(m.content)) {
@@ -671,7 +698,7 @@ export class PiEventMapper {
 
   /** Called when the process exits: reports what the stream left open. */
   finish(opts: { stopped: boolean }): PiMapped[] {
-    if (opts.stopped) return [];
+    if (opts.stopped) return this.speed();
     const out: PiMapped[] = [];
     if (this.pendingError) out.push({ kind: "event", event: this.error(this.pendingError) });
     return [...out, ...this.result()];
@@ -692,7 +719,13 @@ export class PiEventMapper {
   private result(): PiMapped[] {
     if (this.resultEmitted || !this.sawSession) return [];
     this.resultEmitted = true;
-    return [{ kind: "event", event: { type: "result", content: this.finalText, costUsd: 0, isError: this.isError } }];
+    return [...this.speed(), { kind: "event", event: { type: "result", content: this.finalText, costUsd: 0, isError: this.isError } }];
+  }
+
+  private speed(): PiMapped[] {
+    if (this.speedEmitted || this.genTokens < SPEED_MIN_TOKENS || this.genMs < SPEED_MIN_MS) return [];
+    this.speedEmitted = true;
+    return [{ kind: "event", event: { type: "notice", content: speedNotice(this.genTokens, this.genMs, this.genReplies) } }];
   }
 }
 
