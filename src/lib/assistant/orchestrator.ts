@@ -8,6 +8,7 @@ import type { HubEvent } from "./run-hub";
 import { pendingHandoffContext, type RunContext, type RunOutcome } from "./session-run";
 import { HANDOFF_INSTRUCTION, buildHandoffContext, clipMiddle as clip, handoffBudget, handoffNote, type HandoffEntry } from "./handoff";
 import { changedFiles, snapshotWorkdir } from "./workdir-changes";
+import { RUNAWAY_MIN_CHARS, repeatedTail } from "./runaway";
 import { activeElsewhere, markSynced, ownRecentWork, recapBlock, recordWork, syncBlock, unseenWork } from "./work-journal";
 import { HANDOFF_PENDING, type TranscriptRow } from "./transcript";
 import { fetchOllamaModels } from "@/lib/ai/ollama-provider";
@@ -547,8 +548,13 @@ function roleFraming(role: OrchestraRole | undefined): string {
  * headless run cannot answer. `edits`: the run has the session's write access.
  */
 function workingIn(cwd: string, worker: Worker, edits: boolean): string {
-  const readOnly = worker.kind !== "ollama" && worker.kind !== "api" && !edits;
-  const where = readOnly
+  // A plain chat model (Ollama text, cloud API) has no tools at all. Told that
+  // it "works in" a directory, a tool-trained model starts writing tool calls
+  // nobody executes — so it is told what it can and cannot do instead.
+  if (worker.kind === "ollama" || worker.kind === "api") {
+    return `(The project is in ${cwd}, but you have no access to it here: you cannot open files, run commands or call tools, and nothing you write is executed. Work from the information in this message only, write your result as plain text, and state plainly what you could not check instead of guessing.)\n${askingLine(worker, edits)}`;
+  }
+  const where = !edits
     ? `(You are working in ${cwd} with read-only access: read the project as needed, leave the files as they are, and give your result in your reply.)`
     : `(You are working in ${cwd}.)`;
   return `${where}\n${askingLine(worker, edits)}`;
@@ -763,6 +769,8 @@ async function runCli(
 // Token streams are coalesced before they reach the run: every forwarded chunk
 // is one buffered hub event, and per-token events would quickly push a long
 // run past the replay buffer (late-attaching clients would miss the start).
+// How often (in characters of new output) a stream is checked for a repetition loop.
+const RUNAWAY_CHECK_CHARS = 400;
 const CHUNK_FLUSH_MS = 120;
 const CHUNK_FLUSH_CHARS = 2_000;
 
@@ -775,8 +783,13 @@ const CHUNK_FLUSH_CHARS = 2_000;
  */
 async function streamChat(provider: AIProvider, model: string, prompt: string, o: StreamOpts): Promise<string> {
   if (o.signal?.aborted) return "";
-  const gen = provider.streamMessage({ messages: [{ role: "user", content: prompt }], model, signal: o.signal });
+  // Own controller: a detected repetition loop must cancel the generation
+  // (and free the GPU), not only stop reading it.
+  const runaway = new AbortController();
+  const signal = o.signal ? AbortSignal.any([o.signal, runaway.signal]) : runaway.signal;
+  const gen = provider.streamMessage({ messages: [{ role: "user", content: prompt }], model, signal });
   let text = "";
+  let checkedAt = 0;
   let pending = "";
   let timer: ReturnType<typeof setTimeout> | null = null;
   const flush = () => {
@@ -800,6 +813,14 @@ async function streamChat(provider: AIProvider, model: string, prompt: string, o
       if (chunk.type === "error") throw new Error(chunk.content || "Stream-Fehler");
       if (chunk.type === "text" && chunk.content) {
         text += chunk.content;
+        if (text.length - checkedAt >= RUNAWAY_CHECK_CHARS && text.length >= RUNAWAY_MIN_CHARS) {
+          checkedAt = text.length;
+          const unit = repeatedTail(text);
+          if (unit) {
+            runaway.abort();
+            throw new Error(`Das Modell ${model} hängt in einer Wiederholungsschleife („${unit.replace(/\s+/g, " ").trim().slice(0, 80)}“) — Ausgabe abgebrochen.`);
+          }
+        }
         if (!o.onChunk) continue;
         pending += chunk.content;
         if (pending.length >= CHUNK_FLUSH_CHARS) flush();
@@ -1511,8 +1532,14 @@ export async function executePlan(
   // Earlier orchestrations the forked conversation does not know about.
   const history = opts.history?.trim() ? `\n\n${clip(opts.history.trim(), 4000)}` : "";
 
-  for (const { st, worker } of assigned) {
+  for (const { st, worker: assignedWorker } of assigned) {
     if (signal?.aborted) return stop();
+    // A plain Ollama chat cannot open a single file. When pi can drive the
+    // very same model as an agent, the subtask runs there instead (read-only
+    // unless it may edit) — same model, so nothing is reloaded.
+    const agent = assignedWorker.kind === "ollama" ? workers.find((w) => w.kind === "pi" && w.model === assignedWorker.model) : undefined;
+    const worker = agent ?? assignedWorker;
+    if (agent) log(`„${st.title}“: ${assignedWorker.label} hat keinen Projektzugriff — läuft als Agent (${agent.label}), ${st.editsFiles && canEditFiles(agent, session) ? "mit Schreibzugriff" : "nur lesend"}.`);
     const role = st.roleId ? roles.get(st.roleId) : undefined;
     const roleInfo = role ? { roleId: role.id, roleName: role.name } : {};
     emit({ type: "subtask_start", subtaskId: st.id, title: st.title, workerId: worker.id, workerLabel: worker.label, ...roleInfo });

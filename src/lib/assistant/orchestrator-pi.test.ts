@@ -212,6 +212,46 @@ describe("pi worker discovery", () => {
 // --- Execution --------------------------------------------------------------------
 
 describe("pi execution", () => {
+  it("runs a text-only local model's subtask on the pi agent of the same model, read-only", async () => {
+    const o = await loadOrchestrator([]);
+    state.turnImpl = async (_row, _prompt, emit) => {
+      emit({ type: "text", content: "read package.json: Next.js 15" });
+      return { externalId: null, costUsd: 0, isError: false };
+    };
+    const c = collector();
+    await o.executePlan(session, "task",
+      [{ id: "s1", title: "Umgebung ermitteln", description: "inspect the project", workerId: CHAT_GEMMA, dependsOn: [], editsFiles: false }],
+      c.io);
+    const work = state.turns.find((t) => t.prompt.startsWith("inspect the project"))!;
+    expect(work.row).toMatchObject({ provider: "pi", model: "gemma4:31b", permissionMode: "plan" });
+    expect(work.prompt).toContain("with read-only access");
+    expect(state.chats.some((p) => p.startsWith("inspect the project"))).toBe(false);
+    expect(c.events.find((e) => e.type === "subtask_start")).toMatchObject({ workerId: PI_GEMMA });
+    expect(c.events.some((e) => e.type === "log" && e.content === "„Umgebung ermitteln“: Local: gemma4:31b hat keinen Projektzugriff — läuft als Agent (pi · gemma4:31b), nur lesend.")).toBe(true);
+  });
+
+  it("without pi a text-only model is told it has no tools, and a repetition loop is cut off", async () => {
+    state.piInfo = async () => ({ installed: false, version: null, bin: "pi" });
+    const o = await loadOrchestrator([]);
+    const st = [{ id: "s1", title: "Umgebung ermitteln", description: "inspect the project", workerId: CHAT_GEMMA, dependsOn: [], editsFiles: false }];
+
+    const ok = collector();
+    await o.executePlan(session, "task", st, ok.io);
+    const prompt = state.chats.find((p) => p.startsWith("inspect the project"))!;
+    expect(prompt).toContain("you have no access to it here: you cannot open files, run commands or call tools");
+    expect(prompt).not.toContain("You are working in");
+    expect(ok.events.some((e) => e.type === "error")).toBe(false);
+
+    state.chats = [];
+    state.chatImpl = (p) => (p.startsWith("inspect the project") ? `Ich lese zuerst den Plan.${"<tool_call>Bash\ncommands appear below.".repeat(40)}` : "local text");
+    const looped = collector();
+    const res = await o.executePlan(session, "task", st, looped.io);
+    expect(res.isError).toBe(true);
+    const err = looped.events.find((e) => e.type === "error")!;
+    expect(err.content).toContain("hängt in einer Wiederholungsschleife");
+    expect(err.content).toContain("gemma4:31b");
+  });
+
   it("runs a pi subtask as an agent with the session's mode, tools and approval gate", async () => {
     const o = await loadOrchestrator([]);
     state.turnImpl = async (_row, _prompt, emit) => {
