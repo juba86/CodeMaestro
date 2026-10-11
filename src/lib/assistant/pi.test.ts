@@ -288,7 +288,7 @@ describe("tool mapping", () => {
 // Runs captured `pi --mode json` output through the mapper; consecutive deltas
 // are joined like the runner's coalescer does.
 function mapFixture(name: string, model = "mock-coder") {
-  const mapper = new PiEventMapper(model, () => 0); // frozen clock: no speed notice
+  const mapper = new PiEventMapper(model, () => 0); // frozen clock: the closing notice carries no speed
   const events: NormalizedEvent[] = [];
   const push = (m: PiMapped) => {
     if (m.kind === "event") { events.push(m.event); return; }
@@ -304,19 +304,20 @@ function mapFixture(name: string, model = "mock-coder") {
 describe("PiEventMapper (captured pi 1.0.4 samples)", () => {
   it("maps a write turn", () => {
     const { mapper, events } = mapFixture("json-mode-sample");
-    expect(events.map((e) => e.type)).toEqual(["init", "text", "tool_use", "tool_result", "text", "result"]);
+    expect(events.map((e) => e.type)).toEqual(["init", "text", "tool_use", "tool_result", "text", "notice", "result"]);
     expect(events[0]).toEqual({ type: "init", sessionId: "01a117f4-832e-7491-b61b-c1ac9d2b3312", model: "mock-coder" });
     expect(events[1].content).toBe("I'll create the file.");
     expect(events[2]).toEqual({ type: "tool_use", name: "Write", input: { file_path: "hello.txt", content: "Hello from the mock model\n" }, toolUseId: "call_mock_1" });
     expect(events[3]).toEqual({ type: "tool_result", toolUseId: "call_mock_1", content: "Successfully wrote to hello.txt", isError: false });
-    expect(events[5]).toEqual({ type: "result", content: 'Done. Tool said: "Successfully wrote to hello.txt"', costUsd: 0, isError: false });
+    expect(events[5].content).toMatch(/^Kontext: \d+ Token$/); // no window known for this model
+    expect(events[6]).toEqual({ type: "result", content: 'Done. Tool said: "Successfully wrote to hello.txt"', costUsd: 0, isError: false });
     expect(mapper.externalId).toBe("01a117f4-832e-7491-b61b-c1ac9d2b3312");
     expect(mapper.isError).toBe(false);
   });
 
   it("maps thinking deltas", () => {
     const { events } = mapFixture("thinking-sample");
-    expect(events.map((e) => e.type)).toEqual(["init", "thinking", "text", "tool_use", "tool_result", "thinking", "text", "result"]);
+    expect(events.map((e) => e.type)).toEqual(["init", "thinking", "text", "tool_use", "tool_result", "thinking", "text", "notice", "result"]);
     expect(events[1].content).toBe("Let me think about the file.");
   });
 
@@ -344,22 +345,22 @@ describe("PiEventMapper (captured pi 1.0.4 samples)", () => {
 
   it("reports the average generation speed, counting only the time the model was writing", () => {
     let t = 0;
-    const mapper = new PiEventMapper("m", () => t);
+    const mapper = new PiEventMapper("m", () => t, 32_768);
     const feed = (o: unknown) => mapper.handleLine(JSON.stringify(o));
-    const reply = (waitMs: number, writeMs: number, output: number) => {
+    const reply = (waitMs: number, writeMs: number, output: number, totalTokens = 0) => {
       feed({ type: "message_start", message: { role: "assistant" } });
       t += waitMs; // reading the prompt: not part of the rate
       feed({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "a" } });
       t += writeMs;
-      feed({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "a" }], usage: { output } } });
+      feed({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "a" }], usage: { output, totalTokens } } });
     };
     feed({ type: "session", id: "x" });
     reply(60_000, 4_000, 80);
     t += 30_000; // a tool runs
-    reply(5_000, 6_000, 120);
+    reply(5_000, 6_000, 120, 8_192); // the latest reply tells how full the context is
     const out = feed({ type: "agent_settled" });
     expect(out.map((m) => m.kind === "event" && m.event.type)).toEqual(["notice", "result"]);
-    expect(out[0]).toMatchObject({ event: { content: "Tempo: Ø 20,0 Token/s · 200 Token Ausgabe in 2 Antworten" } });
+    expect(out[0]).toMatchObject({ event: { content: "Tempo: Ø 20,0 Token/s · 200 Token Ausgabe in 2 Antworten · Kontext: 8.192 von 32.768 Token (25 %)" } });
     expect(mapper.finish({ stopped: false })).toEqual([]);
   });
 
@@ -490,7 +491,7 @@ describe("runTurn (pi --mode json)", () => {
     expect(existsSync(path.join(agentDir, "models.json"))).toBe(true);
 
     expect(res).toEqual({ externalId: sid, costUsd: 0, isError: false });
-    expect(events.map((e) => e.type)).toEqual(["init", "text", "tool_use", "tool_result", "text", "result", "done"]);
+    expect(events.map((e) => e.type)).toEqual(["init", "text", "tool_use", "tool_result", "text", "notice", "result", "done"]);
     expect(events.find((e) => e.type === "tool_use")).toMatchObject({ name: "Write", input: { file_path: "hello.txt" } });
   });
 

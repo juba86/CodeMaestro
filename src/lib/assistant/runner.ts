@@ -389,7 +389,7 @@ interface PiTurn {
  * Resolves model, tools, session id and approval gate for a pi turn. The
  * prompt goes to stdin (a prompt argument starting with "@" is read as a file).
  */
-function piTurn(session: AssistantSessionRow, models: Array<{ id: string; toolsOk: boolean }>, syncError?: string): PiTurn | { error: string } {
+function piTurn(session: AssistantSessionRow, models: Array<{ id: string; toolsOk: boolean; contextWindow?: number }>, syncError?: string): PiTurn | { error: string } {
   const requested = piRequestedModel(session.model);
   const model = findPiModel(models, requested)?.id || requested || models.find((m) => m.toolsOk)?.id;
   if (!model) {
@@ -433,7 +433,7 @@ function piTurn(session: AssistantSessionRow, models: Array<{ id: string; toolsO
     Object.assign(env, bridgeEnv(session));
     env.CM_PI_GATED = gated.join(",");
   }
-  return { args, env, mapper: new PiEventMapper(model) };
+  return { args, env, mapper: new PiEventMapper(model, Date.now, models.find((m) => m.id === model)?.contextWindow) };
 }
 
 // Token deltas are coalesced (~80 ms) so a long answer doesn't flood the run

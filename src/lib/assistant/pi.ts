@@ -538,7 +538,7 @@ interface PiContentBlock {
 interface PiLine {
   type?: string;
   id?: string;
-  message?: { role?: string; content?: unknown; stopReason?: string; errorMessage?: string; usage?: { output?: number } };
+  message?: { role?: string; content?: unknown; stopReason?: string; errorMessage?: string; usage?: { output?: number; totalTokens?: number } };
   assistantMessageEvent?: { type?: string; delta?: string };
   toolCallId?: string;
   toolName?: string;
@@ -563,6 +563,12 @@ function textOf(content: unknown): string {
 export function speedNotice(tokens: number, ms: number, replies: number): string {
   const rate = (tokens / (ms / 1000)).toLocaleString("de-DE", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
   return `Tempo: Ø ${rate} Token/s · ${tokens.toLocaleString("de-DE")} Token Ausgabe in ${replies} ${replies === 1 ? "Antwort" : "Antworten"}`;
+}
+
+/** "Kontext: 62.610 von 262.144 Token (24 %)" — how full the model's context window is. */
+export function contextNotice(used: number, window?: number): string {
+  const of = window && window > 0 ? ` von ${window.toLocaleString("de-DE")} Token (${Math.round((used / window) * 100)} %)` : " Token";
+  return `Kontext: ${used.toLocaleString("de-DE")}${of}`;
 }
 
 // Below this a rate says more about request overhead than about the model.
@@ -595,8 +601,14 @@ export class PiEventMapper {
   private genMs = 0;
   private genReplies = 0;
   private speedEmitted = false;
+  /** Tokens in the context after the latest reply (prompt + cache + output). */
+  private contextTokens = 0;
 
-  constructor(private readonly model: string, private readonly now: () => number = Date.now) {}
+  constructor(
+    private readonly model: string,
+    private readonly now: () => number = Date.now,
+    private readonly contextWindow?: number
+  ) {}
 
   /** Parses one JSONL line (invalid lines are ignored). */
   handleLine(line: string): PiMapped[] {
@@ -650,6 +662,8 @@ export class PiEventMapper {
           this.genReplies++;
         }
         this.genStartedAt = null;
+        const total = m.usage?.totalTokens;
+        if (typeof total === "number" && total > 0) this.contextTokens = total;
         const out: PiMapped[] = [];
         // A message that arrived without deltas is emitted whole.
         for (const b of blocksOf(m.content)) {
@@ -723,9 +737,14 @@ export class PiEventMapper {
   }
 
   private speed(): PiMapped[] {
-    if (this.speedEmitted || this.genTokens < SPEED_MIN_TOKENS || this.genMs < SPEED_MIN_MS) return [];
+    if (this.speedEmitted) return [];
+    const parts = [
+      this.genTokens >= SPEED_MIN_TOKENS && this.genMs >= SPEED_MIN_MS ? speedNotice(this.genTokens, this.genMs, this.genReplies) : "",
+      this.contextTokens > 0 ? contextNotice(this.contextTokens, this.contextWindow) : "",
+    ].filter(Boolean);
+    if (!parts.length) return [];
     this.speedEmitted = true;
-    return [{ kind: "event", event: { type: "notice", content: speedNotice(this.genTokens, this.genMs, this.genReplies) } }];
+    return [{ kind: "event", event: { type: "notice", content: parts.join(" · ") } }];
   }
 }
 
