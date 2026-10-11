@@ -592,9 +592,29 @@ export function useSessionRun(onSessionsChanged: () => void) {
 
   const connection: ConnectionInfo = { attached, reconnecting, attempt, stale, recoveredAt };
 
+  /** Switches the open session's model (from its next message or loop on). */
+  const changeModel = useCallback(async (model: string) => {
+    const sid = activeRef.current;
+    if (!sid) return;
+    try {
+      const res = await fetch(`/api/assistant/sessions/${encodeURIComponent(sid)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model }),
+      });
+      const d = (await res.json().catch(() => null)) as { session?: SessionInfo; error?: string } | null;
+      if (!res.ok || !d?.session) throw new Error(d?.error || `Fehler ${res.status}`);
+      if (activeRef.current === sid) setInfo((cur) => (cur ? { ...cur, model: d.session!.model } : cur));
+      toast.success(`Modell gewechselt: ${d.session.model}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Modell konnte nicht gewechselt werden.");
+    }
+  }, []);
+
   return {
     activeId,
     info,
+    changeModel,
     messages,
     live,
     running,

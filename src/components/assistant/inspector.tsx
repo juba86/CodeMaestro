@@ -7,6 +7,7 @@ import { OrchestraLiveList, type OrchestraLiveState } from "@/components/orchest
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/components/ui/cn";
 import { ProviderMark } from "@/components/ui/provider-mark";
+import { SimpleSelect } from "@/components/ui/select";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { formatClock, formatCost, formatDuration } from "@/lib/format";
@@ -14,6 +15,7 @@ import { approvalModeLabel, permissionModeLabel, providerLabel, runOriginLabel }
 import { isWaiting, type RunState } from "@/lib/run-state";
 import { LOOP_INTERVALS } from "./composer-logic";
 import { DevServerPanel, type DevServer } from "./dev-server-panel";
+import { formatContext, sortPiModels, usePiStatus } from "./pi-status";
 import type { LoopTimeline } from "./thread-model";
 import type { TouchedFile } from "./tool-calls";
 import type { RunMeta, SessionInfo } from "./types";
@@ -24,6 +26,8 @@ export interface InspectorProps {
   tab: InspectorTab;
   onTab: (t: InspectorTab) => void;
   info: SessionInfo | null;
+  /** Switch the session's model (local pi sessions; not while it runs). */
+  onModel: (model: string) => void;
   state: RunState;
   run: RunMeta | null;
   loop: LoopTimeline | null;
@@ -87,7 +91,25 @@ function IterationTimeline({ loop, state, running }: { loop: LoopTimeline; state
   );
 }
 
-function RunTab({ info, state, run, loop, now }: Pick<InspectorProps, "info" | "state" | "run" | "loop" | "now">) {
+/** Model of a local (pi) session as a picker: the choice applies from the next message or loop. */
+function PiModelSelect({ model, disabled, onModel }: { model: string; disabled: boolean; onModel: (model: string) => void }) {
+  const { status } = usePiStatus(true);
+  const models = status ? sortPiModels(status.models).filter((m) => m.toolsOk || m.id === model) : [];
+  if (!models.length) return <>{model || "Standard"}</>;
+  return (
+    <SimpleSelect
+      size="sm"
+      aria-label="Modell der Session"
+      options={models.map((m) => ({ value: m.id, label: m.id, description: `Kontext ${formatContext(m.contextWindow)}` }))}
+      value={model}
+      onValueChange={(v) => { if (v && v !== model) onModel(v); }}
+      placeholder={model || "Standard"}
+      disabled={disabled}
+    />
+  );
+}
+
+function RunTab({ info, state, run, loop, now, onModel }: Pick<InspectorProps, "info" | "state" | "run" | "loop" | "now" | "onModel">) {
   const cost = formatCost(info?.totalCostUsd);
   const running = !!run;
   const s = loop?.settings;
@@ -113,7 +135,9 @@ function RunTab({ info, state, run, loop, now }: Pick<InspectorProps, "info" | "
             <Row label="Agent">
               <ProviderMark provider={info.provider} label={providerLabel(info.provider)} />
             </Row>
-            <Row label="Modell">{info.model || "Standard"}</Row>
+            <Row label="Modell">
+              {info.provider === "pi" ? <PiModelSelect model={info.model} disabled={running} onModel={onModel} /> : info.model || "Standard"}
+            </Row>
             <Row label="Freigaben">{approvalModeLabel(info.approvalMode)}</Row>
             <Row label="Sandbox">
               {info.sandbox ? (
