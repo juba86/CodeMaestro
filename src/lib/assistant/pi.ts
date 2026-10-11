@@ -111,19 +111,35 @@ export function piInfo(opts: { force?: boolean } = {}): Promise<PiInfo> {
 
 // --- Settings ------------------------------------------------------------------
 
-/** Per-model compaction budget that fits small local context windows. */
-function compactionFor(contextWindow: number): { reserveTokens: number; keepRecentTokens: number } {
+// The user's "compact at N % of the context window" choice lives in pi's
+// settings.json under this key (pi ignores it; ensureSettings keeps it).
+const COMPACT_AT_KEY = "codemaestroCompactAtPercent";
+export const COMPACT_AT_MIN = 30;
+export const COMPACT_AT_MAX = 95;
+
+/** A valid compact-at percentage, or null (= pi's default: just before the window is full). */
+export function parseCompactAt(v: unknown): number | null {
+  return typeof v === "number" && Number.isInteger(v) && v >= COMPACT_AT_MIN && v <= COMPACT_AT_MAX ? v : null;
+}
+
+/**
+ * Per-model compaction budget that fits small local context windows. pi
+ * compacts once the context exceeds window − reserveTokens, so an earlier
+ * `compactAt` (percent of the window) is expressed as a larger reserve.
+ */
+function compactionFor(contextWindow: number, compactAt: number | null = null): { reserveTokens: number; keepRecentTokens: number } {
   const quarter = Math.floor(contextWindow / 4);
+  const reserve = Math.max(1024, Math.min(16_384, quarter));
   return {
-    reserveTokens: Math.max(1024, Math.min(16_384, quarter)),
+    reserveTokens: compactAt ? Math.max(reserve, contextWindow - Math.floor((contextWindow * compactAt) / 100)) : reserve,
     keepRecentTokens: Math.max(1024, Math.min(20_000, quarter)),
   };
 }
 
 /** The settings CodeMaestro enforces in its pi agent dir. */
-export function buildPiSettings(models: PiModel[] = []): Record<string, unknown> {
+export function buildPiSettings(models: PiModel[] = [], compactAt: number | null = null): Record<string, unknown> {
   const modelOverrides: Record<string, unknown> = {};
-  for (const m of models) modelOverrides[`ollama/${m.id}`] = compactionFor(m.contextWindow);
+  for (const m of models) modelOverrides[`ollama/${m.id}`] = compactionFor(m.contextWindow, compactAt);
   return {
     // Slow local prefill can exceed pi's 5 min default.
     httpIdleTimeoutMs: 900_000,
@@ -141,14 +157,33 @@ export function buildPiSettings(models: PiModel[] = []): Record<string, unknown>
  * `models` refreshes the per-model compaction overrides; without it the
  * current overrides stay.
  */
+async function readSettings(): Promise<Record<string, unknown>> {
+  try {
+    const parsed = JSON.parse(await fs.readFile(path.join(piAgentDir(), "settings.json"), "utf8"));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+  } catch { /* missing or invalid → rewrite */ }
+  return {};
+}
+
+/** The saved "compact at N %" choice (null = default). */
+export async function compactAtPercent(): Promise<number | null> {
+  return parseCompactAt((await readSettings())[COMPACT_AT_KEY]);
+}
+
+/** Saves the choice and rewrites the per-model budgets; the next pi turn uses it. */
+export async function setCompactAtPercent(percent: number | null): Promise<void> {
+  const current = await readSettings();
+  if (percent === null) delete current[COMPACT_AT_KEY];
+  else current[COMPACT_AT_KEY] = percent;
+  await ensureDir(piAgentDir());
+  await writeAtomic(path.join(piAgentDir(), "settings.json"), JSON.stringify(current, null, 2) + "\n");
+  await ensureSettings();
+}
+
 export async function ensureSettings(models?: PiModel[]): Promise<void> {
   const file = path.join(piAgentDir(), "settings.json");
-  let current: Record<string, unknown> = {};
-  try {
-    const parsed = JSON.parse(await fs.readFile(file, "utf8"));
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) current = parsed;
-  } catch { /* missing or invalid → rewrite */ }
-  const managed = buildPiSettings(models ?? caches.lastGood ?? []);
+  const current = await readSettings();
+  const managed = buildPiSettings(models ?? caches.lastGood ?? [], parseCompactAt(current[COMPACT_AT_KEY]));
   if (!models && !caches.lastGood) {
     const prev = (current.compaction as { modelOverrides?: unknown } | undefined)?.modelOverrides;
     if (prev && typeof prev === "object") (managed.compaction as Record<string, unknown>).modelOverrides = prev;

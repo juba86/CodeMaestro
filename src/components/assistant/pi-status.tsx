@@ -28,6 +28,8 @@ export interface PiStatus {
   /** Context assumed for models without a Modelfile num_ctx (0 = unknown). */
   contextFallback: number;
   models: PiModel[];
+  /** Compact the conversation at this share of the context window (null = just before it is full). */
+  compactAtPercent: number | null;
   error: string;
   installHint: string;
 }
@@ -48,6 +50,7 @@ function normalize(d: Record<string, unknown>): PiStatus {
     agentDir: str(d.agentDir),
     ollamaBaseUrl: str(d.ollamaBaseUrl),
     contextFallback: typeof d.contextFallback === "number" && d.contextFallback > 0 ? d.contextFallback : 0,
+    compactAtPercent: typeof d.compactAtPercent === "number" ? d.compactAtPercent : null,
     error: str(d.error),
     installHint: str(d.installHint) || DEFAULT_INSTALL_HINT,
     models: models
@@ -80,6 +83,23 @@ export async function fetchPiStatus(force = false): Promise<PiStatus> {
   const d = (await res.json().catch(() => null)) as Record<string, unknown> | null;
   // A failed sync still reports install state + the last known models.
   if (d && typeof d.installed === "boolean") return normalize(d);
+  throw new Error(str(d?.error) || `Fehler ${res.status}`);
+}
+
+/** PUT the "compact at N % of the context window" choice (null = default). */
+export async function savePiCompactAt(percent: number | null): Promise<PiStatus> {
+  let res: Response;
+  try {
+    res = await fetch("/api/assistant/pi", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ compactAtPercent: percent }),
+    });
+  } catch {
+    throw new Error("Server nicht erreichbar.");
+  }
+  const d = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+  if (res.ok && d && typeof d.installed === "boolean") return normalize(d);
   throw new Error(str(d?.error) || `Fehler ${res.status}`);
 }
 
@@ -132,7 +152,7 @@ export function usePiStatus(enabled: boolean) {
     }
   }, []);
 
-  return { status, error, loading: needed || refreshing, refresh };
+  return { status, error, loading: needed || refreshing, refresh, setStatus };
 }
 
 /** "pi is not installed" box with the install command and a copy button. */

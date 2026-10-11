@@ -10,6 +10,8 @@ vi.mock("@/lib/github", () => ({ githubEnv: vi.fn(async () => ({})), GITHUB_SAND
 import {
   PiEventMapper,
   buildModelsJson,
+  buildPiSettings,
+  compactAtPercent,
   deletePiSessionFiles,
   effectiveContext,
   mapToolsForPi,
@@ -18,6 +20,7 @@ import {
   piToolDisplayName,
   piToolInputForDisplay,
   resetPiCaches,
+  setCompactAtPercent,
   syncOllamaModels,
   type PiMapped,
 } from "./pi";
@@ -142,6 +145,27 @@ describe("syncOllamaModels → models.json", () => {
     const res = await syncOllamaModels({ force: true });
     const ctx = Object.fromEntries(res.models.map((m) => [m.id, m.contextWindow]));
     expect(ctx).toMatchObject({ "qwen2.5-coder:14b": 16384, "qwen3:30b": 65536, "llava:7b": 4096 });
+  });
+
+  it("compacts earlier when the user picks a share of the context window", async () => {
+    const model = (contextWindow: number) => ({ id: "m", name: "m", toolsOk: true, reasoning: false, vision: false, contextWindow });
+    const reserve = (window: number, at: number | null) =>
+      (buildPiSettings([model(window)], at).compaction as { modelOverrides: Record<string, { reserveTokens: number }> }).modelOverrides["ollama/m"].reserveTokens;
+    expect(reserve(262_144, null)).toBe(16_384); // default: just before the window is full
+    expect(reserve(262_144, 60)).toBe(262_144 - 157_286); // pi compacts above window − reserve
+    expect(reserve(8_192, 95)).toBe(2_048); // never later than the default
+
+    await syncOllamaModels({ force: true });
+    expect(await compactAtPercent()).toBeNull();
+    await setCompactAtPercent(50);
+    expect(await compactAtPercent()).toBe(50);
+    const settingsFile = path.join(agentDir, "settings.json");
+    const half = JSON.parse(readFileSync(settingsFile, "utf8")).compaction.modelOverrides["ollama/qwen3:30b"].reserveTokens;
+    await syncOllamaModels({ force: true }); // a later sync keeps the choice
+    expect(JSON.parse(readFileSync(settingsFile, "utf8")).compaction.modelOverrides["ollama/qwen3:30b"].reserveTokens).toBe(half);
+    await setCompactAtPercent(null);
+    expect(await compactAtPercent()).toBeNull();
+    expect(JSON.parse(readFileSync(settingsFile, "utf8")).compaction.modelOverrides["ollama/qwen3:30b"].reserveTokens).toBeLessThan(half);
   });
 
   it("writes atomically, skips unchanged files and keeps user settings", async () => {

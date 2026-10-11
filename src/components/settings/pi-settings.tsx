@@ -1,14 +1,16 @@
 "use client";
 
-import { useEffect } from "react";
-import { Brain, Check, Cpu, Eye, MessageSquareText, RefreshCw, Wrench } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Brain, Check, Cpu, Eye, MessageSquareText, Minimize2, RefreshCw, Wrench } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Callout } from "@/components/ui/callout";
+import { Field, FieldHint, FieldLabel } from "@/components/ui/field";
+import { SimpleSelect } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
-  PiInstallHint, SMALL_CONTEXT, formatContext, sortPiModels, usePiStatus, type PiModel,
+  PiInstallHint, SMALL_CONTEXT, formatContext, savePiCompactAt, sortPiModels, usePiStatus, type PiModel,
 } from "@/components/assistant/pi-status";
 import { publishPiHint } from "./settings-hints";
 import { Code, InfoRows, SectionHeader, SettingsCard } from "./settings-ui";
@@ -47,8 +49,27 @@ function ModelBadges({ model }: { model: PiModel }) {
   );
 }
 
+// "" = pi's default: compact only just before the window is full.
+const COMPACT_OPTIONS = [
+  { value: "", label: "Erst kurz vor vollem Fenster (Standard)" },
+  ...[90, 80, 70, 60, 50, 40].map((p) => ({ value: String(p), label: `Ab ${p} % des Kontextfensters` })),
+];
+
 export function PiSettings() {
-  const { status, error, loading, refresh } = usePiStatus(true);
+  const { status, error, loading, refresh, setStatus } = usePiStatus(true);
+  const [savingCompact, setSavingCompact] = useState(false);
+
+  async function changeCompactAt(value: string) {
+    setSavingCompact(true);
+    try {
+      setStatus(await savePiCompactAt(value ? Number(value) : null));
+      toast.success("Gespeichert. Gilt ab dem nächsten Durchgang eines Agenten.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Speichern fehlgeschlagen.");
+    } finally {
+      setSavingCompact(false);
+    }
+  }
   const models = status ? sortPiModels(status.models) : [];
   const editing = models.filter((m) => m.toolsOk).length;
 
@@ -157,6 +178,25 @@ export function PiSettings() {
                 : []),
             ]}
           />
+        </SettingsCard>
+      ) : null}
+
+      {status ? (
+        <SettingsCard title="Kontext komprimieren" icon={<Minimize2 />}>
+          <Field>
+            <FieldLabel>Verlauf zusammenfassen</FieldLabel>
+            <SimpleSelect
+              options={COMPACT_OPTIONS}
+              value={status.compactAtPercent ? String(status.compactAtPercent) : ""}
+              onValueChange={(v) => void changeCompactAt(v)}
+              disabled={savingCompact}
+            />
+            <FieldHint>
+              Ist das Kontextfenster eines lokalen Agenten so weit gefüllt, fasst pi den älteren Verlauf zusammen und arbeitet
+              mit der Zusammenfassung weiter. Früher komprimieren hält große Modelle schnell, kostet aber früher Details
+              aus dem Verlauf. Gilt für alle lokalen Modelle.
+            </FieldHint>
+          </Field>
         </SettingsCard>
       ) : null}
 
