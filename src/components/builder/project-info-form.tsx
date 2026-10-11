@@ -15,6 +15,7 @@ import { Field, FieldHint, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
+import { GithubRepoInsert } from "./github-repo-insert";
 import { fieldDomId } from "./lint-labels";
 import { StepFooter } from "./step-footer";
 import { markXmlInSync } from "./draft-sync";
@@ -74,6 +75,10 @@ export function ProjectInfoForm({ onNext }: { onNext: () => void }) {
   const { activeProvider, activeModel } = useSettingsStore();
 
   const hasGoal = !!(structured.instructions.trim() || structured.task.trim());
+  const appendContext = (text: string) => {
+    const ctx = useBuilderStore.getState().structured.context;
+    updateStructured({ context: ctx ? `${ctx}\n\n${text}` : text });
+  };
   const providerName = getProvider(activeProvider)?.label ?? activeProvider;
 
   async function handleGenerate() {
@@ -136,12 +141,10 @@ export function ProjectInfoForm({ onNext }: { onNext: () => void }) {
         <CountedLabel
           count={structured.context.length}
           extra={
-            <KnowledgeInsert
-              onInsert={(text) => {
-                const ctx = useBuilderStore.getState().structured.context;
-                updateStructured({ context: ctx ? `${ctx}\n\n${text}` : text });
-              }}
-            />
+            <>
+              <GithubRepoInsert onInsert={appendContext} />
+              <KnowledgeInsert onInsert={appendContext} />
+            </>
           }
         >
           Kontext

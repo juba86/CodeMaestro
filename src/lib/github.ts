@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import { prisma } from "@/lib/db/client";
 import { decryptSecret, encryptSecret } from "@/lib/secret-box";
+import type { GithubRepoBrief, GithubRepoInfo } from "./github-repo-context";
 
 // GitHub account connection (server only). Lets assistant CLI runs push and use
 // `gh` without any credentials in the working tree: the token is stored
@@ -609,6 +610,8 @@ async function requireToken(): Promise<{ stored: GithubStored; token: string }> 
   return { stored, token };
 }
 
+export type { GithubRepoBrief, GithubRepoInfo };
+
 export interface GithubRepoCheck {
   fullName: string;
   private: boolean;
@@ -645,6 +648,75 @@ export async function testGithubConnection(): Promise<{ login: string; scopes: s
       url: httpsUrl(r.html_url) ?? `https://github.com/${r.full_name}`,
       pushedAt: r.pushed_at ?? null,
     })),
+  };
+}
+
+// --- Repositories (prompt builder) -----------------------------------------------
+
+interface ApiRepo {
+  full_name?: string;
+  private?: boolean;
+  html_url?: string;
+  description?: string | null;
+  default_branch?: string;
+  language?: string | null;
+  pushed_at?: string | null;
+  permissions?: { push?: boolean };
+}
+
+function toRepoInfo(r: ApiRepo): GithubRepoInfo {
+  return {
+    fullName: String(r.full_name ?? ""),
+    private: !!r.private,
+    push: !!r.permissions?.push,
+    url: httpsUrl(r.html_url) ?? `https://github.com/${r.full_name}`,
+    description: typeof r.description === "string" ? r.description : "",
+    defaultBranch: typeof r.default_branch === "string" ? r.default_branch : "",
+    language: typeof r.language === "string" ? r.language : "",
+    pushedAt: r.pushed_at ?? null,
+  };
+}
+
+/** The connected account's repositories, most recently pushed first (up to 100). */
+export async function listGithubRepos(): Promise<GithubRepoInfo[]> {
+  const { token } = await requireToken();
+  const res = await apiGet("/user/repos?sort=pushed&direction=desc&per_page=100", token);
+  if (!res.ok) throw apiFailure(res, "/user/repos");
+  const list = (await res.json().catch(() => null)) as ApiRepo[] | null;
+  return (Array.isArray(list) ? list : []).map(toRepoInfo).filter((r) => r.fullName);
+}
+
+const REPO_NAME = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/;
+const README_MAX_CHARS = 2500;
+const ROOT_MAX_ENTRIES = 60;
+
+/**
+ * What a prompt needs to know about one repository: its metadata, the entries
+ * of its root directory and the start of its README. README and listing are
+ * best effort (an empty repository has neither).
+ */
+export async function githubRepoBrief(fullName: string): Promise<GithubRepoBrief> {
+  if (!REPO_NAME.test(fullName)) throw new GithubError("Ungültiger Repository-Name.", 400, "INVALID_REPO");
+  const { token } = await requireToken();
+  const res = await apiGet(`/repos/${fullName}`, token);
+  if (res.status === 404) throw new GithubError(`Repository ${fullName} nicht gefunden oder kein Zugriff.`, 404, "REPO_NOT_FOUND");
+  if (!res.ok) throw apiFailure(res, `/repos/${fullName}`);
+  const info = toRepoInfo(((await res.json().catch(() => null)) ?? {}) as ApiRepo);
+  const [rootRes, readmeRes] = await Promise.all([
+    apiGet(`/repos/${fullName}/contents`, token).catch(() => null),
+    apiGet(`/repos/${fullName}/readme`, token).catch(() => null),
+  ]);
+  const root = rootRes?.ok ? ((await rootRes.json().catch(() => null)) as Array<{ name?: string; type?: string }> | null) : null;
+  const readme = readmeRes?.ok ? ((await readmeRes.json().catch(() => null)) as { content?: string; encoding?: string } | null) : null;
+  const text = readme?.encoding === "base64" && typeof readme.content === "string" ? Buffer.from(readme.content, "base64").toString("utf8") : "";
+  return {
+    ...info,
+    fullName: info.fullName || fullName,
+    rootEntries: (Array.isArray(root) ? root : [])
+      .filter((e) => typeof e.name === "string")
+      .map((e) => (e.type === "dir" ? `${e.name}/` : e.name!))
+      .slice(0, ROOT_MAX_ENTRIES),
+    readme: text.length > README_MAX_CHARS ? `${text.slice(0, README_MAX_CHARS).trimEnd()}\n…` : text.trim(),
   };
 }
 

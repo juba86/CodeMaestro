@@ -33,6 +33,8 @@ import {
   githubErrorInfo,
   pollDeviceFlow,
   startDeviceFlow,
+  githubRepoBrief,
+  listGithubRepos,
   testGithubConnection,
   updateGithubOptions,
 } from "./github";
@@ -191,6 +193,26 @@ describe("github connection", () => {
     expect(status.avatarUrl).toBeNull();
     const test = await testGithubConnection();
     expect(test.repos[0].url).toBe("https://github.com/octo/r");
+  });
+
+  it("lists repositories and reads one as prompt context", async () => {
+    const api = { full_name: "octo/r", private: true, html_url: "https://github.com/octo/r", description: "Demo", default_branch: "main", language: "Go", pushed_at: null, permissions: { push: true } };
+    stubFetch({
+      "https://api.github.com/user/repos": () => jsonResponse([api]),
+      "https://api.github.com/repos/octo/r/contents": () => jsonResponse([{ name: "src", type: "dir" }, { name: "go.mod", type: "file" }]),
+      "https://api.github.com/repos/octo/r/readme": () => jsonResponse({ encoding: "base64", content: Buffer.from("# R\n" + "x".repeat(4000)).toString("base64") }),
+      "https://api.github.com/repos/octo/r": () => jsonResponse(api),
+      "https://api.github.com/user": profileRoute,
+    });
+    await connectWithToken(TOKEN);
+    expect(await listGithubRepos()).toEqual([
+      { fullName: "octo/r", private: true, push: true, url: "https://github.com/octo/r", description: "Demo", defaultBranch: "main", language: "Go", pushedAt: null },
+    ]);
+    const brief = await githubRepoBrief("octo/r");
+    expect(brief.rootEntries).toEqual(["src/", "go.mod"]);
+    expect(brief.readme.startsWith("# R")).toBe(true);
+    expect(brief.readme.length).toBeLessThan(2600); // clipped
+    await expect(githubRepoBrief("../../user")).rejects.toMatchObject({ code: "INVALID_REPO" });
   });
 
   it("hides unexpected error details from the browser", () => {
