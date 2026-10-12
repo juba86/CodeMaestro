@@ -32,6 +32,7 @@ import { NoModelsState } from "./model-palette";
 import { COLUMN_ICON } from "./org-canvas";
 import { LiveBadge } from "./orchestra-live-list";
 import { problemsFor } from "./problems";
+import { ProfilesMenu } from "./profiles-menu";
 import { PresetControl, PresetNote, PresetWarnings, ProblemsBadge, SaveButton } from "./toolbar";
 
 export const mobileRowId = (target: string) => `orchestra-row-${target === CONDUCTOR_TARGET ? "dirigent" : target}`;
@@ -301,6 +302,7 @@ export function MobileOrchestra({
           <div className="-mx-4 overflow-x-auto px-4 scrollbar-none">
             <PresetControl className="w-max" />
           </div>
+          <ProfilesMenu />
           <PresetNote />
           {banner}
           <PresetWarnings />

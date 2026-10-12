@@ -99,6 +99,33 @@ export async function postOrchestraPreset(
   return { config: d.config, warnings: Array.isArray(d.warnings) ? d.warnings : [] };
 }
 
+/** A named snapshot of the orchestra configuration. */
+export interface OrchestraProfile {
+  id: string;
+  name: string;
+  config: OrchestraConfig;
+  savedAt: string;
+}
+
+const PROFILES_URL = "/api/orchestra/profiles";
+const profilesOf = (d: { profiles?: OrchestraProfile[] }) => (Array.isArray(d.profiles) ? d.profiles : []);
+
+/** GET /api/orchestra/profiles → the saved profiles, by name. */
+export async function fetchOrchestraProfiles(): Promise<OrchestraProfile[]> {
+  return profilesOf(await request(PROFILES_URL, {}, "Profile konnten nicht geladen werden."));
+}
+
+/** POST → saves the configuration under `name` (replacing a profile of the same name). */
+export async function postOrchestraProfile(name: string, config: OrchestraConfig): Promise<OrchestraProfile[]> {
+  return profilesOf(
+    await request(PROFILES_URL, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ name, config }) }, "Profil konnte nicht gespeichert werden.")
+  );
+}
+
+export async function deleteOrchestraProfile(id: string): Promise<OrchestraProfile[]> {
+  return profilesOf(await request(`${PROFILES_URL}?id=${encodeURIComponent(id)}`, { method: "DELETE" }, "Profil konnte nicht gelöscht werden."));
+}
+
 export function errorMessage(err: unknown, fallback: string): string {
   if (err instanceof Error && err.message) return err.message;
   return fallback;

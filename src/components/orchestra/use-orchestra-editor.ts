@@ -118,6 +118,8 @@ export interface OrchestraEditor {
   toggleEnabled: (roleId: string) => void;
   applyFix: (fix: OrchestraProblemFix) => void;
   applyPreset: (id: OrchestraPresetId) => Promise<void>;
+  /** Loads a saved profile into the draft (not saved; asks before replacing unsaved changes). */
+  loadProfile: (name: string, config: OrchestraConfig) => Promise<void>;
   save: () => Promise<void>;
   discard: (opts?: { confirmFirst?: boolean }) => Promise<void>;
   /** Label of a worker id for messages („Automatisch" for ""). */
@@ -499,6 +501,26 @@ export function useOrchestraEditor(): OrchestraEditor {
     [saved, applyingPreset, store, commit, announce]
   );
 
+  const loadProfile = useCallback(
+    async (name: string, config: OrchestraConfig) => {
+      const cur = latest.current;
+      if (!cur || !saved) return;
+      if (
+        !configsEqual(cur, saved) &&
+        !(await confirm({
+          title: `Profil ‚${name}‘ laden?`,
+          description: "Deine ungespeicherten Änderungen am Orchester werden ersetzt.",
+          confirmLabel: "Laden",
+        }))
+      ) {
+        return;
+      }
+      reset(config);
+      announce(configsEqual(config, saved) ? `Profil ‚${name}‘ geladen.` : `Profil ‚${name}‘ geladen – noch nicht gespeichert.`);
+    },
+    [saved, reset, announce]
+  );
+
   return {
     ready: !!draft && !!saved,
     saved,
@@ -532,6 +554,7 @@ export function useOrchestraEditor(): OrchestraEditor {
     toggleEnabled,
     applyFix,
     applyPreset,
+    loadProfile,
     save,
     discard,
     labelOf,

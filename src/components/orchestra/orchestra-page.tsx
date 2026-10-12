@@ -21,6 +21,7 @@ import { pickerItems } from "./model-items";
 import { ModelPalette, NoModelsState, PROVIDERS_HREF } from "./model-palette";
 import { CONDUCTOR_MAIN_ID, CanvasSkeleton, OrgCanvas, roleCardId, roleMainId } from "./org-canvas";
 import type { OrchestraProblem, OrchestraProblemFix } from "./problems";
+import { ProfilesMenu } from "./profiles-menu";
 import { LiveBanner, PresetControl, PresetNote, PresetWarnings, ProblemsBadge, SaveButton } from "./toolbar";
 import { useDragAssign, type DragPayload, type DropVerdict } from "./use-drag-assign";
 import { useOrchestraEditor } from "./use-orchestra-editor";
@@ -277,6 +278,7 @@ export function OrchestraPage() {
           </header>
           <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-b border-border bg-surface px-4 py-2.5">
             <PresetControl />
+            <ProfilesMenu />
             <PresetNote className="max-w-[28rem]" />
             <div className="ml-auto flex min-w-0 max-w-full justify-end">{banner}</div>
           </div>
