@@ -19,7 +19,7 @@ export const ORCHESTRA_PRESET_LABELS: Record<OrchestraPreset, string> = {
 
 /** Limits shared with the zod schemas (validation/schemas.ts). */
 export const ORCHESTRA_LIMITS = {
-  roles: 12,
+  roles: 16,
   roleId: 40,
   name: 60,
   description: 1000,
@@ -69,6 +69,16 @@ export interface OrchestraConfig {
   roles: OrchestraRole[];
   /** Which preset the assignments came from; "custom" once edited by hand. */
   preset: OrchestraPreset;
+  /**
+   * Rules every role works under (e.g. the team's Git protocol): added to
+   * every subtask, review and fix prompt. "" / absent = none.
+   */
+  teamRules?: string;
+  /**
+   * The role that takes over a subtask a local model failed twice
+   * ("" / absent = no fallback: a failed subtask stays failed).
+   */
+  fallbackRoleId?: string;
 }
 
 /** Client-visible capabilities of a worker (POST /api/assistant/orchestrate/workers). */
@@ -170,6 +180,8 @@ export function defaultOrchestraConfig(): OrchestraConfig {
     conductor: { workerId: "", instructions: "" },
     roles: DEFAULT_ROLES.map(cloneRole),
     preset: "custom",
+    teamRules: "",
+    fallbackRoleId: "",
   };
 }
 
@@ -545,6 +557,8 @@ export function buildPreset(
     conductor: { ...base.conductor, workerId: conductor?.id ?? "" },
     roles,
     preset,
+    teamRules: base.teamRules ?? "",
+    fallbackRoleId: base.fallbackRoleId ?? "",
   };
   const editingRole = roles.some((r) => r.enabled && r.editsFiles);
   if (preset === "local" && editingRole && localText.length && !localFiles.length) warnings.push(NO_LOCAL_AGENT_HINT);

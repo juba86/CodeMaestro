@@ -392,6 +392,78 @@ describe("Claude Code pinned to a model", () => {
   });
 });
 
+describe("team rules and the fallback role", () => {
+  const setup = () => {
+    const orchestra = defaultOrchestraConfig();
+    orchestra.teamRules = "Never push to main.";
+    orchestra.fallbackRoleId = "fallback";
+    orchestra.roles = [
+      ...orchestra.roles.map((r) => (r.id === "recherche" ? { ...r, workerId: "ollama:qwen3:14b" } : r)),
+      { ...orchestra.roles[0], id: "fallback", name: "Fallback", workerId: "claude:sonnet", instructions: "Take over." },
+    ];
+    state.ollama = [{ id: "qwen3:14b", name: "qwen3:14b" }];
+    state.turnImpl = async (_row, prompt, emit) => {
+      if (isPlanner(prompt)) {
+        emit({ type: "text", content: JSON.stringify({ subtasks: [{ id: "s1", title: "Lesen", roleId: "recherche", description: "Code lesen", dependsOn: [] }] }) });
+      } else if (!isSynthesis(prompt)) {
+        emit({ type: "text", content: "Befund." });
+      }
+      return ok;
+    };
+    return orchestra;
+  };
+
+  it("a local model that fails twice hands the subtask to the fallback role, with the team rules", async () => {
+    const o = await loadOrchestrator(["claude"]);
+    const orchestra = setup();
+    let chats = 0;
+    state.chatImpl = () => {
+      chats++;
+      throw new Error("model crashed");
+    };
+    const res = await o.planSubtasks(session, "t", { orchestra });
+    const c = collector();
+    const out = await o.executePlan(session, "t", res.subtasks, c.io, { orchestra });
+
+    expect(chats).toBe(2);
+    const takeover = state.turns.find((t) => t.row.model === "sonnet")!;
+    expect(takeover.prompt).toContain("failed twice");
+    expect(takeover.prompt).toContain("model crashed");
+    expect(takeover.prompt).toContain("Never push to main.");
+    expect(c.events.find((e) => e.type === "subtask_end")).toMatchObject({ workerLabel: "Claude Code · Sonnet (neueste)" });
+    // The failed local tries do not fail the run.
+    expect(c.events.some((e) => e.type === "error")).toBe(false);
+    expect(out.isError).toBe(false);
+  });
+
+  it("a local model that works runs once, and without a fallback role a failure stays a failure", async () => {
+    const o = await loadOrchestrator(["claude"]);
+    const orchestra = setup();
+    let chats = 0;
+    state.chatImpl = (prompt) => {
+      chats++;
+      expect(prompt).toContain("Never push to main.");
+      return "Befund lokal.";
+    };
+    const res = await o.planSubtasks(session, "t", { orchestra });
+    await o.executePlan(session, "t", res.subtasks, collector().io, { orchestra });
+    expect(chats).toBe(1);
+    expect(state.turns.some((t) => t.row.model === "sonnet")).toBe(false);
+
+    chats = 0;
+    orchestra.fallbackRoleId = "";
+    state.chatImpl = () => {
+      chats++;
+      throw new Error("model crashed");
+    };
+    const c = collector();
+    const out = await o.executePlan(session, "t", res.subtasks, c.io, { orchestra });
+    expect(chats).toBe(1);
+    expect(c.events.some((e) => e.type === "error")).toBe(true);
+    expect(out.isError).toBe(true);
+  });
+});
+
 // --- The session's conversation ---------------------------------------------------
 
 describe("continuing the session's conversation", () => {

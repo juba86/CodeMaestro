@@ -992,6 +992,14 @@ function teamContext(opts: OrchestrationOptions, sharesThread: boolean, lead: st
   return parts.length ? `${lead}${clip(parts.join("\n\n"), 8000)}${lead === "\n" ? "\n" : ""}` : "";
 }
 
+/** The rules every role works under (see OrchestraConfig.teamRules), as a prompt block ("" without any). */
+function teamRulesBlock(orchestra?: OrchestraConfig | null): string {
+  const rules = orchestra?.teamRules?.trim();
+  return rules
+    ? `\n\n<team_rules>\nRules of this team that apply to every role. Your instructions may refer to them as the team's protocol or as CLAUDE.md:\n${rules}\n</team_rules>`
+    : "";
+}
+
 function conductorGuidance(orchestra?: OrchestraConfig | null): string {
   const instructions = orchestra?.conductor.instructions.trim();
   return instructions ? `\nAdditional instructions from the user for you as the conductor:\n${instructions}\n` : "";
@@ -1277,6 +1285,8 @@ interface ReviewContext {
   cwd: string;
   /** The author changed files in the working directory. */
   authorEdits: boolean;
+  /** The team's rules as a prompt block ("" without any). */
+  rules: string;
 }
 
 // Fresh-context review of one subtask. CLI reviewers run read-only (plan mode)
@@ -1287,7 +1297,7 @@ function reviewPrompt(c: ReviewContext, report: string, round: number, maxRounds
       ? `The changes are in the working directory ${c.cwd}. Read the affected files (and their callers where relevant) to check the actual code rather than relying on the report. Your access is read-only here, so leave the files as they are.`
       : `You can read the project in ${c.cwd} to verify the claims in the report. Your access is read-only here, so leave the files as they are.`
     : "You can't open the project files here, so judge the report and any code it contains.";
-  return `${roleFraming(c.reviewer)}Review round ${round} of ${maxRounds}. Look at the result with fresh eyes and judge it on its own merits against the requirements below.
+  return `${roleFraming(c.reviewer)}Review round ${round} of ${maxRounds}. Look at the result with fresh eyes and judge it on its own merits against the requirements below.${c.rules}
 
 <task>
 ${clip(c.task, 4000)}
@@ -1320,7 +1330,7 @@ function fixPrompt(c: ReviewContext, findings: string, previous: string, round: 
   const how = c.authorEdits
     ? `Fix each finding in the working directory ${c.cwd} and verify the fix (type check, linter or tests where available).`
     : "Return the corrected, complete result.";
-  return `${roleFraming(c.author)}The ${c.reviewer.name} reviewed your work on this subtask (review round ${round}) and found gaps to fix.
+  return `${roleFraming(c.author)}The ${c.reviewer.name} reviewed your work on this subtask (review round ${round}) and found gaps to fix.${c.rules}
 
 <task>
 ${clip(c.task, 4000)}
@@ -1450,6 +1460,7 @@ export async function executePlan(
     const c: ReviewContext = {
       task, st, author: role, authorWorker: author, reviewer, reviewerWorker, cwd: session.cwd,
       authorEdits: st.editsFiles && canEditFiles(author, session),
+      rules: teamRulesBlock(orchestra),
     };
     const maxRounds = clampRounds(role.reviewLoop.maxRounds);
     let output = authorText;
@@ -1548,6 +1559,8 @@ export async function executePlan(
   };
 
   const results = new Map<string, string>();
+  // The worker that finally ran each subtask (the fallback role's, when it took over).
+  const ranBy = new Map<string, Worker>();
   const reviews = new Map<string, { reviewer: string; verdict: ReviewVerdict; rounds: number }>();
   // Earlier orchestrations the forked conversation does not know about.
   const history = opts.history?.trim() ? `\n\n${clip(opts.history.trim(), 4000)}` : "";
@@ -1558,48 +1571,87 @@ export async function executePlan(
     // very same model as an agent, the subtask runs there instead (read-only
     // unless it may edit) — same model, so nothing is reloaded.
     const agent = assignedWorker.kind === "ollama" ? workers.find((w) => w.kind === "pi" && w.model === assignedWorker.model) : undefined;
-    const worker = agent ?? assignedWorker;
+    let worker = agent ?? assignedWorker;
     if (agent) log(`„${st.title}“: ${assignedWorker.label} hat keinen Projektzugriff — läuft als Agent (${agent.label}), ${st.editsFiles && canEditFiles(agent, session) ? "mit Schreibzugriff" : "nur lesend"}.`);
     const role = st.roleId ? roles.get(st.roleId) : undefined;
     const roleInfo = role ? { roleId: role.id, roleName: role.name } : {};
     emit({ type: "subtask_start", subtaskId: st.id, title: st.title, workerId: worker.id, workerLabel: worker.label, ...roleInfo });
 
-    // Every earlier subtask is handed over (who, measured file changes, the
-    // agent's own handoff section) — the ones this subtask depends on in
-    // detail, the others briefly — sized to the worker's context window.
-    const previous = buildHandoffContext(handoffs, st.dependsOn, handoffBudget(worker.contextWindow));
-    const context = previous ? `\n\n${previous}` : "";
     const body = st.description.trim() || st.title;
-    // Same condition as runWork → cliAccess: write access only for a subtask
-    // that changes files on a worker that may do so in this session.
-    const mayEdit = st.editsFiles && canEditFiles(worker, session);
-    const where = workingIn(session.cwd, worker, mayEdit);
     // The last subtask reports to the conductor's summary, not to an agent.
     const handoffAsk = st === assigned[assigned.length - 1].st ? "" : `\n\n${HANDOFF_INSTRUCTION}`;
-    const team = teamContext(opts, !!sessionThread(session, worker), "\n\n");
-    const prompt = `${role ? `${roleFraming(role)}Your subtask:\n${body}` : body}${context}${history}${team}${handoffAsk}\n\n${where}`;
-    const before = mayEdit ? await snapshotWorkdir(session.cwd) : null;
-
-    const errors: string[] = [];
-    const fail = (msg: string) => {
-      if (signal?.aborted) return; // the stop itself is reported once
-      errors.push(msg);
-      emit({ type: "error", content: msg, subtaskId: st.id });
+    const rules = teamRulesBlock(orchestra);
+    // Same condition as runWork → cliAccess: write access only for a subtask
+    // that changes files on a worker that may do so in this session.
+    const mayEditOn = (w: Worker) => st.editsFiles && canEditFiles(w, session);
+    // The prompt for a worker. Every earlier subtask is handed over (who,
+    // measured file changes, the agent's own handoff section) — the ones this
+    // subtask depends on in detail, the others briefly — sized to the
+    // worker's context window.
+    const promptFor = (w: Worker, brief: string): string => {
+      const previous = buildHandoffContext(handoffs, st.dependsOn, handoffBudget(w.contextWindow));
+      const context = previous ? `\n\n${previous}` : "";
+      const team = teamContext(opts, !!sessionThread(session, w), "\n\n");
+      return `${brief}${context}${history}${team}${rules}${handoffAsk}\n\n${workingIn(session.cwd, w, mayEditOn(w))}`;
     };
-    // Collected from the live chunks, so partial output survives a failed or
-    // stopped stream and is persisted exactly as the UI showed it.
-    let text = "";
-    await runWork(st, worker, prompt, {
-      signal,
-      onChunk: (c) => {
-        text += c;
-        emit({ type: "subtask_text", subtaskId: st.id, content: c });
-      },
-      onError: fail,
-      onLog: (m) => log(m),
-      onNotice: (m) => log(`„${st.title}“ — ${m}`, true),
-    });
+    let before = mayEditOn(worker) ? await snapshotWorkdir(session.cwd) : null;
+
+    // One run of the subtask on a worker. The text is collected from the live
+    // chunks, so partial output survives a failed or stopped stream and is
+    // persisted exactly as the UI showed it.
+    const attempt = async (w: Worker, prompt: string) => {
+      const errorBefore = isError;
+      const errs: string[] = [];
+      let out = "";
+      await runWork(st, w, prompt, {
+        signal,
+        onChunk: (c) => {
+          out += c;
+          emit({ type: "subtask_text", subtaskId: st.id, content: c });
+        },
+        onError: (m) => {
+          if (!signal?.aborted) errs.push(m); // the stop itself is reported once
+        },
+        onLog: (m) => log(m),
+        onNotice: (m) => log(`„${st.title}“ — ${m}`, true),
+      });
+      return { out, errs, errorBefore, failed: errs.length > 0 || (isError && !errorBefore) };
+    };
+    const ownBrief = role ? `${roleFraming(role)}Your subtask:\n${body}` : body;
+    let run = await attempt(worker, promptFor(worker, ownBrief));
+
+    // Fallback: a local model that fails gets one more try, then the
+    // fallback role takes the subtask over. The failed tries do not count
+    // against the run when a later one succeeds.
+    const fallbackRole = orchestra?.fallbackRoleId ? roles.get(orchestra.fallbackRoleId) : undefined;
+    const standIn = scope && fallbackRole?.enabled && fallbackRole.id !== role?.id && isLocalWorker(worker) ? fallbackRole : null;
+    if (standIn && scope && run.failed && !signal?.aborted) {
+      const why = () => run.errs[0] ?? "kein verwertbares Ergebnis";
+      const again = () => {
+        isError = run.errorBefore;
+        emit({ type: "subtask_text", subtaskId: st.id, content: "\n\n---\n\n" });
+      };
+      log(`„${st.title}“: ${worker.label} ist gescheitert (${why()}) — zweiter Versuch.`, true);
+      again();
+      run = await attempt(worker, promptFor(worker, ownBrief));
+      if (run.failed && !signal?.aborted) {
+        const takeover = roleWorker(standIn, scope).worker;
+        log(`„${st.title}“: ${worker.label} ist zweimal gescheitert (${why()}) — ${standIn.name} (${takeover.label}) übernimmt.`, true);
+        again();
+        const stoodInFor = role?.instructions.trim()
+          ? `The role you stand in for works under these instructions:\n<role_instructions>\n${role.instructions.trim()}\n</role_instructions>\n\n`
+          : "";
+        const brief = `${roleFraming(standIn)}You take over a subtask that the ${role?.name ?? "assigned worker"} (${worker.label}) failed twice. What went wrong last: ${why()}\n\n${stoodInFor}Your subtask:\n${body}`;
+        if (!before && mayEditOn(takeover)) before = await snapshotWorkdir(session.cwd);
+        worker = takeover;
+        run = await attempt(takeover, promptFor(takeover, brief));
+      }
+    }
+    const text = run.out;
+    const errors = run.errs;
+    for (const m of errors) emit({ type: "error", content: m, subtaskId: st.id });
     if (errors.length) isError = true;
+    ranBy.set(st.id, worker);
 
     if (text.trim() || (!errors.length && !signal?.aborted)) {
       record({
@@ -1653,7 +1705,7 @@ export async function executePlan(
       const reviewLine = rv ? `\nReview by ${rv.reviewer}: ${rv.verdict} after ${rv.rounds} round(s)` : "";
       const files = handoffs.find((h) => h.id === st.id)?.files;
       const fileLine = files?.length ? `\nFiles changed: ${files.slice(0, 40).join(", ")}` : "";
-      return `### ${st.title} (${role ? `${role.name}, ` : ""}${worker.label})${reviewLine}${fileLine}\n${handoffNote(String(results.get(st.id) || ""), 2500)}`;
+      return `### ${st.title} (${role ? `${role.name}, ` : ""}${(ranBy.get(st.id) ?? worker).label})${reviewLine}${fileLine}\n${handoffNote(String(results.get(st.id) || ""), 2500)}`;
     })
     .join("\n\n");
   const caveats = reviews.size ? "any follow-ups or caveats (including review findings that remain open)" : "any follow-ups or caveats";

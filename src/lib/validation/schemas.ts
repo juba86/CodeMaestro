@@ -217,6 +217,8 @@ export const orchestraConfigSchema = z
       .default({ workerId: "", instructions: "" }),
     roles: z.array(orchestraRoleSchema).max(ORCHESTRA_LIMITS.roles),
     preset: z.enum(ORCHESTRA_PRESET_VALUES).optional().default("custom"),
+    teamRules: z.string().max(ORCHESTRA_LIMITS.instructions).optional().default(""),
+    fallbackRoleId: z.string().trim().max(ORCHESTRA_LIMITS.roleId).optional().default(""),
   })
   .superRefine((config, ctx) => {
     const seen = new Set<string>();

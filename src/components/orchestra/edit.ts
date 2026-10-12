@@ -276,6 +276,8 @@ export function canonicalConfig(config: OrchestraConfig): string {
     conductor: { workerId: config.conductor.workerId, instructions: config.conductor.instructions },
     roles: config.roles.map(canonicalRole),
     preset: config.preset,
+    teamRules: config.teamRules ?? "",
+    fallbackRoleId: config.fallbackRoleId ?? "",
   });
 }
 
@@ -299,6 +301,8 @@ export function changedRoleNames(baseline: OrchestraConfig, draft: OrchestraConf
   ) {
     out.push("Dirigent");
   }
+  if ((baseline.teamRules ?? "") !== (draft.teamRules ?? "")) out.push("Team-Regeln");
+  if ((baseline.fallbackRoleId ?? "") !== (draft.fallbackRoleId ?? "")) out.push("Fallback");
   const before = new Map(baseline.roles.map((r) => [r.id, JSON.stringify(canonicalRole(r))]));
   for (const r of draft.roles) {
     if (before.get(r.id) !== JSON.stringify(canonicalRole(r))) out.push(r.name.trim() || r.id);
@@ -350,5 +354,7 @@ export function parseConfig(v: unknown): OrchestraConfig | null {
     conductor: { workerId: v.conductor.workerId, instructions: v.conductor.instructions },
     roles,
     preset,
+    teamRules: str(v.teamRules) ? v.teamRules : "",
+    fallbackRoleId: str(v.fallbackRoleId) ? v.fallbackRoleId : "",
   };
 }

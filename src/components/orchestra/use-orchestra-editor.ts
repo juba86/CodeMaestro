@@ -108,6 +108,8 @@ export interface OrchestraEditor {
   assign: (target: string, workerId: string) => void;
   updateRole: (roleId: string, patch: Parameters<typeof updateRole>[2]) => void;
   updateConductorInstructions: (instructions: string) => void;
+  /** Rules for every role and the role that takes over failed local subtasks. */
+  updateTeam: (patch: { teamRules?: string; fallbackRoleId?: string }) => void;
   /** Replaces the draft (fix actions, inspector edits that need edit.ts helpers). */
   apply: (fn: (c: OrchestraConfig) => OrchestraConfig, announce?: string) => void;
   rename: (roleId: string, name: string) => void;
@@ -364,6 +366,11 @@ export function useOrchestraEditor(): OrchestraEditor {
     [apply]
   );
 
+  const updateTeam = useCallback(
+    (patch: { teamRules?: string; fallbackRoleId?: string }) => apply((c) => ({ ...c, ...patch, preset: "custom" })),
+    [apply]
+  );
+
   const applyFix = useCallback(
     (fix: OrchestraProblemFix) => apply(fix.apply, `${fix.label} – erledigt.`),
     [apply]
@@ -545,6 +552,7 @@ export function useOrchestraEditor(): OrchestraEditor {
     assign,
     updateRole: updateRoleCb,
     updateConductorInstructions,
+    updateTeam,
     apply,
     rename,
     addRole,

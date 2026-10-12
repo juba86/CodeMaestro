@@ -126,6 +126,8 @@ describe("defaults", () => {
         reviewLoop: { enabled: false, reviewerRoleId: "", maxRounds: 1 },
       }],
       preset: "custom",
+      teamRules: "",
+      fallbackRoleId: "",
     });
     const dup = orchestraConfigSchema.safeParse({ roles: [{ id: "a", name: "A" }, { id: "a", name: "B" }] });
     expect(dup.success).toBe(false);

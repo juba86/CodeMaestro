@@ -384,6 +384,31 @@ export function ConductorFields() {
         />
         <FieldHint>Zusatz-Anweisung für Planung und Zusammenfassung</FieldHint>
       </Field>
+      <Field>
+        <FieldLabel optional="optional">Team-Regeln</FieldLabel>
+        <Textarea
+          autosize={{ min: 3, max: 12 }}
+          maxLength={ORCHESTRA_LIMITS.instructions}
+          value={draft.teamRules ?? ""}
+          disabled={readOnly}
+          onChange={(e) => editor.updateTeam({ teamRules: e.target.value })}
+        />
+        <FieldHint>Gelten für alle Rollen, z. B. das Git-Protokoll. Jede Teilaufgabe, Prüfung und Nachbesserung bekommt sie mit.</FieldHint>
+      </Field>
+      <Field>
+        <FieldLabel>Fallback-Rolle</FieldLabel>
+        <SimpleSelect
+          aria-label="Fallback-Rolle"
+          options={[
+            { value: "none", label: "Keine" },
+            ...draft.roles.filter((r) => r.enabled).map((r) => ({ value: r.id, label: r.name.trim() || r.id })),
+          ]}
+          value={draft.roles.some((r) => r.enabled && r.id === draft.fallbackRoleId) ? draft.fallbackRoleId! : "none"}
+          onValueChange={(v) => editor.updateTeam({ fallbackRoleId: v === "none" ? "" : v })}
+          disabled={readOnly}
+        />
+        <FieldHint>Scheitert eine Teilaufgabe auf einem lokalen Modell zweimal, übernimmt diese Rolle sie.</FieldHint>
+      </Field>
       <section className="space-y-1 rounded-md border border-border bg-card p-3">
         <h3 className="text-ui font-medium text-foreground">Wie der Dirigent plant</h3>
         <p className="text-ui text-muted-foreground">
