@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
-import { activeSessionIds, getActiveRun } from "@/lib/assistant/run-hub";
+import { activeSessionIds, getActiveRun, planningCount } from "@/lib/assistant/run-hub";
 import { listPending, pendingSessionIds } from "@/lib/assistant/approvals";
 import { buildActivity } from "@/lib/activity";
 
@@ -25,7 +25,8 @@ export async function GET() {
           select: { id: true, title: true, cwd: true, provider: true, model: true },
         })
       : [];
-    return NextResponse.json(buildActivity(sessions, getActiveRun, listPending, Date.now()), { headers: NO_STORE });
+    // `planning`: plans being drafted right now (not runs, but the server is busy).
+    return NextResponse.json({ ...buildActivity(sessions, getActiveRun, listPending, Date.now()), planning: planningCount() }, { headers: NO_STORE });
   } catch (err) {
     console.error("[GET /api/assistant/activity]", err);
     return NextResponse.json(

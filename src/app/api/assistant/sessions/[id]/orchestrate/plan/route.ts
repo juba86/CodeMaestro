@@ -4,7 +4,7 @@ import { orchestrateSchema, formatZodError } from "@/lib/validation/schemas";
 import { planSubtasks, discoverAllWorkers, canEditFiles, toWorkerInfo } from "@/lib/assistant/orchestrator";
 import { resolveOrchestra } from "@/lib/assistant/orchestra";
 import { resolveWorkdir } from "@/lib/assistant/security";
-import { SessionBusyError, isSessionBusy } from "@/lib/assistant/run-hub";
+import { SessionBusyError, beginPlanning, isSessionBusy } from "@/lib/assistant/run-hub";
 import { pendingHandoffContext, toSessionRow } from "@/lib/assistant/session-run";
 
 export const runtime = "nodejs";
@@ -50,6 +50,7 @@ export async function POST(
     );
   }
 
+  const endPlanning = beginPlanning();
   try {
     // The planner is a tool-less, read-only text run; abort it when the
     // client goes away so no orphaned CLI keeps running.
@@ -86,5 +87,7 @@ export async function POST(
       { error: err instanceof Error ? err.message : "Planung fehlgeschlagen", code: "PLAN_FAILED" },
       { status: 502 }
     );
+  } finally {
+    endPlanning();
   }
 }

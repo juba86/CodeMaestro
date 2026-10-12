@@ -113,6 +113,26 @@ export function isSessionBusy(sessionId: string): boolean {
   return getActiveRun(sessionId) !== null;
 }
 
+// Plans being drafted (POST …/orchestrate/plan): a synchronous request, not a
+// run — counted so the activity snapshot shows the server is not idle (a
+// restart would fail the plan).
+const planning = globalThis as typeof globalThis & { __cmPlanning?: number };
+
+/** Marks a plan as being drafted; call the returned function when it is done. */
+export function beginPlanning(): () => void {
+  planning.__cmPlanning = (planning.__cmPlanning ?? 0) + 1;
+  let ended = false;
+  return () => {
+    if (ended) return;
+    ended = true;
+    planning.__cmPlanning = Math.max(0, (planning.__cmPlanning ?? 1) - 1);
+  };
+}
+
+export function planningCount(): number {
+  return planning.__cmPlanning ?? 0;
+}
+
 /** Ids of every session with an active (not yet finished) run. */
 export function activeSessionIds(): string[] {
   const out: string[] = [];
