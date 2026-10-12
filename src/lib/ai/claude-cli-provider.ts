@@ -1,22 +1,11 @@
 import { spawn } from "child_process";
 import { tmpdir } from "os";
+import { CLAUDE_CLI_MODELS } from "./claude-cli-models";
 import type { AIProvider, SendMessageParams, StreamChunk, ModelInfo } from "./types";
 
-// Curated model list for login/CLI mode. Empty id = Claude Code's default model.
-// The CLI accepts the short aliases (always the latest model of that line) as
-// well as full model ids — the pinned ids below are the current generation.
+/** Curated model list for login/CLI mode (see claude-cli-models.ts). */
 export function claudeCliModels(): ModelInfo[] {
-  return [
-    { id: "", name: "Standard (CLI-Default)", provider: "claude", maxTokens: 128000 },
-    { id: "opus", name: "Claude Opus (neueste)", provider: "claude", maxTokens: 128000 },
-    { id: "sonnet", name: "Claude Sonnet (neueste)", provider: "claude", maxTokens: 128000 },
-    { id: "haiku", name: "Claude Haiku (neueste)", provider: "claude", maxTokens: 128000 },
-    { id: "fable", name: "Claude Fable (neueste)", provider: "claude", maxTokens: 128000 },
-    { id: "claude-opus-5-5", name: "Claude Opus 5.5", provider: "claude", maxTokens: 128000 },
-    { id: "claude-fable-5-1", name: "Claude Fable 5.1", provider: "claude", maxTokens: 128000 },
-    { id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", provider: "claude", maxTokens: 128000 },
-    { id: "claude-haiku-5-5", name: "Claude Haiku 5.5", provider: "claude", maxTokens: 128000 },
-  ];
+  return CLAUDE_CLI_MODELS.map((m) => ({ ...m, provider: "claude", maxTokens: 128000 }));
 }
 
 function extractJson(s: string): string {

@@ -1,5 +1,6 @@
 "use client";
 
+import { CLAUDE_CLI_MODELS, claudeCliModelsWith } from "@/lib/ai/claude-cli-models";
 import * as React from "react";
 import Link from "next/link";
 import { ArrowRight, Check, CircleDashed, LoaderCircle, ShieldAlert, ShieldCheck, Timer, X } from "lucide-react";
@@ -91,10 +92,6 @@ function IterationTimeline({ loop, state, running }: { loop: LoopTimeline; state
   );
 }
 
-// Claude Code's model aliases ("" = the CLI's own default).
-const CLAUDE_MODELS = ["", "fable", "opus", "sonnet", "haiku"];
-const claudeModelLabel = (m: string) => (m ? m.charAt(0).toUpperCase() + m.slice(1) : "Standard");
-
 /**
  * Model of a Claude Code or pi session as a picker over both agents' models.
  * The choice applies from the next message or loop; picking a model of the
@@ -103,14 +100,14 @@ const claudeModelLabel = (m: string) => (m ? m.charAt(0).toUpperCase() + m.slice
 function SessionModelSelect({ provider, model, disabled, onModel }: { provider: string; model: string; disabled: boolean; onModel: (model: string, provider?: string) => void }) {
   const { status } = usePiStatus(true);
   const piModels = status ? sortPiModels(status.models).filter((m) => m.toolsOk || (provider === "pi" && m.id === model)) : [];
-  const claudeModels = provider === "claude" && !CLAUDE_MODELS.includes(model) ? [...CLAUDE_MODELS, model] : CLAUDE_MODELS;
+  const claudeModels = provider === "claude" ? claudeCliModelsWith(model) : CLAUDE_CLI_MODELS;
   const value = `${provider}:${model}`;
   return (
     <SimpleSelect
       size="sm"
       aria-label="Modell der Session"
       options={[
-        ...claudeModels.map((m) => ({ value: `claude:${m}`, label: `Claude Code · ${claudeModelLabel(m)}` })),
+        ...claudeModels.map((m) => ({ value: `claude:${m.id}`, label: m.id ? m.name : "Claude Code · Standard", description: "Claude Code" })),
         ...piModels.map((m) => ({ value: `pi:${m.id}`, label: m.id, description: `lokal · Kontext ${formatContext(m.contextWindow)}` })),
       ]}
       value={value}

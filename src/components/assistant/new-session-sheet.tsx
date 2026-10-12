@@ -1,5 +1,6 @@
 "use client";
 
+import { claudeCliModelsWith } from "@/lib/ai/claude-cli-models";
 import * as React from "react";
 import { ArrowRight, ChevronRight, History, RefreshCw, Rocket } from "lucide-react";
 import { toast } from "sonner";
@@ -440,6 +441,23 @@ export function NewSessionSheet({ open, onOpenChange, sessions, initialCwd, titl
                     </span>
                   </FieldHint>
                 ) : null}
+              </Field>
+            ) : draft.provider === "claude" ? (
+              <Field>
+                <FieldLabel>Modell</FieldLabel>
+                {/* A select item cannot have an empty value: "default" stands for the CLI default. */}
+                <Select value={draft.model || "default"} onValueChange={(v) => setDraft({ ...draft, model: v === "default" ? "" : v })}>
+                  <SelectTrigger aria-label="Modell">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {claudeCliModelsWith(draft.model).map((m) => (
+                      <SelectItem key={m.id} value={m.id || "default"}>
+                        {m.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </Field>
             ) : (
               <Field>
