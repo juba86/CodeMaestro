@@ -27,7 +27,7 @@ export interface InspectorProps {
   onTab: (t: InspectorTab) => void;
   info: SessionInfo | null;
   /** Switch the session's model (local pi sessions; not while it runs). */
-  onModel: (model: string) => void;
+  onModel: (model: string, provider?: string) => void;
   state: RunState;
   run: RunMeta | null;
   loop: LoopTimeline | null;
@@ -91,18 +91,35 @@ function IterationTimeline({ loop, state, running }: { loop: LoopTimeline; state
   );
 }
 
-/** Model of a local (pi) session as a picker: the choice applies from the next message or loop. */
-function PiModelSelect({ model, disabled, onModel }: { model: string; disabled: boolean; onModel: (model: string) => void }) {
+// Claude Code's model aliases ("" = the CLI's own default).
+const CLAUDE_MODELS = ["", "fable", "opus", "sonnet", "haiku"];
+const claudeModelLabel = (m: string) => (m ? m.charAt(0).toUpperCase() + m.slice(1) : "Standard");
+
+/**
+ * Model of a Claude Code or pi session as a picker over both agents' models.
+ * The choice applies from the next message or loop; picking a model of the
+ * other agent moves the session there.
+ */
+function SessionModelSelect({ provider, model, disabled, onModel }: { provider: string; model: string; disabled: boolean; onModel: (model: string, provider?: string) => void }) {
   const { status } = usePiStatus(true);
-  const models = status ? sortPiModels(status.models).filter((m) => m.toolsOk || m.id === model) : [];
-  if (!models.length) return <>{model || "Standard"}</>;
+  const piModels = status ? sortPiModels(status.models).filter((m) => m.toolsOk || (provider === "pi" && m.id === model)) : [];
+  const claudeModels = provider === "claude" && !CLAUDE_MODELS.includes(model) ? [...CLAUDE_MODELS, model] : CLAUDE_MODELS;
+  const value = `${provider}:${model}`;
   return (
     <SimpleSelect
       size="sm"
       aria-label="Modell der Session"
-      options={models.map((m) => ({ value: m.id, label: m.id, description: `Kontext ${formatContext(m.contextWindow)}` }))}
-      value={model}
-      onValueChange={(v) => { if (v && v !== model) onModel(v); }}
+      options={[
+        ...claudeModels.map((m) => ({ value: `claude:${m}`, label: `Claude Code · ${claudeModelLabel(m)}` })),
+        ...piModels.map((m) => ({ value: `pi:${m.id}`, label: m.id, description: `lokal · Kontext ${formatContext(m.contextWindow)}` })),
+      ]}
+      value={value}
+      onValueChange={(v) => {
+        if (!v || v === value) return;
+        const cut = v.indexOf(":");
+        const next = v.slice(0, cut);
+        onModel(v.slice(cut + 1), next === provider ? undefined : next);
+      }}
       placeholder={model || "Standard"}
       disabled={disabled}
     />
@@ -136,7 +153,11 @@ function RunTab({ info, state, run, loop, now, onModel }: Pick<InspectorProps, "
               <ProviderMark provider={info.provider} label={providerLabel(info.provider)} />
             </Row>
             <Row label="Modell">
-              {info.provider === "pi" ? <PiModelSelect model={info.model} disabled={running} onModel={onModel} /> : info.model || "Standard"}
+              {info.provider === "pi" || info.provider === "claude" ? (
+                <SessionModelSelect provider={info.provider} model={info.model} disabled={running} onModel={onModel} />
+              ) : (
+                info.model || "Standard"
+              )}
             </Row>
             <Row label="Freigaben">{approvalModeLabel(info.approvalMode)}</Row>
             <Row label="Sandbox">

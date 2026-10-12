@@ -4,13 +4,16 @@ import { prisma } from "@/lib/db/client";
 import { stopDev } from "@/lib/assistant/devserver";
 import { getActiveRun, isSessionBusy } from "@/lib/assistant/run-hub";
 import { listPending } from "@/lib/assistant/approvals";
-import { stopRunNow } from "@/lib/assistant/session-run";
+import { noteAgentSwitch, stopRunNow } from "@/lib/assistant/session-run";
+import { supportsSandbox } from "@/lib/assistant/runner";
+import { agentLabel } from "@/lib/assistant/work-journal";
 import { deletePiSessionFiles, isValidPiModelId } from "@/lib/assistant/pi";
 import { formatZodError } from "@/lib/validation/schemas";
 
 export const runtime = "nodejs";
 
-const patchSchema = z.object({ model: z.string().trim().min(1).max(200) });
+// The agents a session can be moved between: the two with a model choice.
+const patchSchema = z.object({ model: z.string().trim().max(200), provider: z.enum(["claude", "pi"]).optional() });
 
 /**
  * Returns the session, its persisted transcript and — when work is running —
@@ -58,9 +61,11 @@ export async function GET(
 }
 
 /**
- * Changes the session's model (body: {model}). It applies from the next
- * message or loop; the conversation so far is kept. Refused while the session
- * runs, so a turn never switches models half way.
+ * Changes the session's model (body: {model}) and optionally its agent
+ * ({provider}: Claude Code or pi). It applies from the next message or loop
+ * and is refused while the session runs, so a turn never switches half way.
+ * A new model continues the conversation. Another agent cannot read it: it
+ * starts its own and is handed the session's work so far with its first turn.
  */
 export async function PATCH(
   req: NextRequest,
@@ -77,17 +82,29 @@ export async function PATCH(
   if (!parsed.success) {
     return NextResponse.json({ error: formatZodError(parsed.error), code: "VALIDATION_ERROR" }, { status: 400 });
   }
-  const session = await prisma.assistantSession.findUnique({ where: { id }, select: { provider: true } });
+  const session = await prisma.assistantSession.findUnique({ where: { id }, select: { provider: true, model: true } });
   if (!session) {
     return NextResponse.json({ error: "Not found", code: "NOT_FOUND" }, { status: 404 });
   }
   if (isSessionBusy(id)) {
     return NextResponse.json({ error: "Die Session läuft gerade – das Modell lässt sich erst danach wechseln.", code: "SESSION_BUSY" }, { status: 409 });
   }
-  if (session.provider === "pi" && !isValidPiModelId(parsed.data.model)) {
-    return NextResponse.json({ error: `Ungültige Modell-ID für pi: ${parsed.data.model}`, code: "VALIDATION_ERROR" }, { status: 400 });
+  const { model } = parsed.data;
+  const provider = parsed.data.provider ?? session.provider;
+  // "" is a CLI's own default model; pi always needs one of its models.
+  if (provider === "pi" && !isValidPiModelId(model)) {
+    return NextResponse.json({ error: `Ungültige Modell-ID für pi: ${model || "(leer)"}`, code: "VALIDATION_ERROR" }, { status: 400 });
   }
-  const updated = await prisma.assistantSession.update({ where: { id }, data: { model: parsed.data.model } });
+  const switched = provider !== session.provider;
+  const updated = await prisma.assistantSession.update({
+    where: { id },
+    data: {
+      model,
+      // The resume id belongs to the old agent's conversation.
+      ...(switched ? { provider, externalId: null, ...(supportsSandbox(provider) ? {} : { sandbox: false }) } : {}),
+    },
+  });
+  if (switched) await noteAgentSwitch(id, agentLabel(session.provider, session.model), agentLabel(provider, model));
   return NextResponse.json({ session: updated });
 }
 

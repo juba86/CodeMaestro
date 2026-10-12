@@ -5,7 +5,7 @@ import { denyAllPending } from "./approvals";
 import { runTurn, stopSession, type AssistantSessionRow, type NormalizedEvent } from "./runner";
 import { HANDOFF_DONE, HANDOFF_PENDING, TranscriptWriter } from "./transcript";
 import { notifySession } from "@/lib/push";
-import { activeElsewhere, agentLabel, markSynced, recordWork, syncBlock, unseenWork } from "./work-journal";
+import { activeElsewhere, agentLabel, markSynced, ownRecentWork, recapBlock, recordWork, syncBlock, unseenWork } from "./work-journal";
 import { changedFiles, snapshotWorkdir } from "./workdir-changes";
 
 export type DbSession = NonNullable<Awaited<ReturnType<typeof prisma.assistantSession.findUnique>>>;
@@ -241,6 +241,33 @@ async function markHandoffsDone(handoffs: Handoff[]): Promise<void> {
   }
 }
 
+// --- Agent switch ------------------------------------------------------------------
+// A session moved to another agent (Claude Code <-> pi) starts a new
+// conversation there. The switch leaves a note in the transcript; while it is
+// pending, the next turn hands the new agent the session's work so far.
+const SWITCH_PENDING = `"agentSwitch":"pending"`;
+
+/** Records that the session's agent changed (best effort). */
+export async function noteAgentSwitch(sessionId: string, from: string, to: string): Promise<void> {
+  await prisma.assistantMessage
+    .create({
+      data: {
+        sessionId,
+        role: "system",
+        content: `Agent gewechselt: ${from} → ${to}. Der neue Agent beginnt eine eigene Unterhaltung und bekommt den bisherigen Arbeitsstand übergeben.`,
+        meta: JSON.stringify({ notice: true, agentSwitch: "pending" }),
+      },
+    })
+    .catch((err) => console.error("[noteAgentSwitch] note not stored", err));
+}
+
+async function pendingAgentSwitches(sessionId: string): Promise<string[]> {
+  const rows = await prisma.assistantMessage
+    .findMany({ where: { sessionId, role: "system", meta: { contains: SWITCH_PENDING } }, select: { id: true } })
+    .catch(() => []);
+  return rows.map((r) => r.id);
+}
+
 /**
  * Runs one CLI turn inside a run context: optional RAG augmentation, pending
  * orchestration summaries, live events into the hub, progressive transcript
@@ -281,6 +308,16 @@ export async function executeTurn(ctx: RunContext, prompt: string, opts: TurnOpt
     emit({ type: "notice", content: handoffs.length === 1 ? "Zusammenfassung der Orchestrierung an den Agenten übergeben." : `${handoffs.length} Orchestrierungs-Zusammenfassungen an den Agenten übergeben.` });
   }
 
+  // The session was moved to this agent: it has not seen the work so far.
+  const switches = await pendingAgentSwitches(ctx.sessionId);
+  if (switches.length) {
+    const recap = recapBlock(await ownRecentWork(session.id, 5));
+    if (recap) {
+      effectivePrompt = `${recap}\n\n${effectivePrompt}`;
+      emit({ type: "notice", content: "Bisherigen Arbeitsstand der Session an den neuen Agenten übergeben." });
+    }
+  }
+
   // Team sync: what other sessions' agents did in this directory since this
   // agent last looked, and who works here right now (work-journal.ts).
   const [unseen, active] = await Promise.all([unseenWork(session.id, session.cwd), activeElsewhere(session.id, session.cwd)]);
@@ -301,6 +338,11 @@ export async function executeTurn(ctx: RunContext, prompt: string, opts: TurnOpt
   // A turn that failed may not have reached the agent: hand over again next time.
   if (handoffs.length && !result.isError) await markHandoffsDone(handoffs);
   if (unseen.entries.length && !result.isError) await markSynced(session.id, unseen.readAt);
+  if (switches.length && !result.isError) {
+    await prisma.assistantMessage
+      .updateMany({ where: { id: { in: switches } }, data: { meta: JSON.stringify({ notice: true, agentSwitch: "done" }) } })
+      .catch((err) => console.error("[executeTurn] agent switch bookkeeping failed", err));
+  }
 
   // Leave a journal entry for the other agents — when this turn changed files
   // (measured), or, outside a git repository where that cannot be measured,

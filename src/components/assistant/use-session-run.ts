@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { toast } from "sonner";
+import { providerLabel } from "@/lib/labels";
 import { noteServerEvent } from "@/lib/server-clock";
 import { EMPTY_LIVE, liveReducer } from "./run-events";
 import type { ApprovalEvent, Msg, RunEvent, SessionInfo, SessionPayload } from "./types";
@@ -592,20 +593,21 @@ export function useSessionRun(onSessionsChanged: () => void) {
 
   const connection: ConnectionInfo = { attached, reconnecting, attempt, stale, recoveredAt };
 
-  /** Switches the open session's model (from its next message or loop on). */
-  const changeModel = useCallback(async (model: string) => {
+  /** Switches the open session's model, and its agent when `provider` is given (from its next message or loop on). */
+  const changeModel = useCallback(async (model: string, provider?: string) => {
     const sid = activeRef.current;
     if (!sid) return;
     try {
       const res = await fetch(`/api/assistant/sessions/${encodeURIComponent(sid)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model }),
+        body: JSON.stringify({ model, ...(provider ? { provider } : {}) }),
       });
       const d = (await res.json().catch(() => null)) as { session?: SessionInfo; error?: string } | null;
       if (!res.ok || !d?.session) throw new Error(d?.error || `Fehler ${res.status}`);
-      if (activeRef.current === sid) setInfo((cur) => (cur ? { ...cur, model: d.session!.model } : cur));
-      toast.success(`Modell gewechselt: ${d.session.model}`);
+      const next = d.session;
+      if (activeRef.current === sid) setInfo((cur) => (cur ? { ...cur, provider: next.provider, model: next.model, sandbox: next.sandbox } : cur));
+      toast.success(`Modell gewechselt: ${[providerLabel(next.provider).split(" · ")[0], next.model || "Standard"].join(" · ")}`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Modell konnte nicht gewechselt werden.");
     }
