@@ -1,3 +1,4 @@
+import { CLAUDE_CLI_MODELS } from "@/lib/ai/claude-cli-models";
 import { promises as fs, constants as fsConstants } from "fs";
 import path from "path";
 import os from "node:os";
@@ -276,17 +277,29 @@ function localPool(): Promise<LocalPool> {
 
 // --- Workers --------------------------------------------------------------------
 
-function claudeWorker(): Worker {
+const CLAUDE_PREFIX = "claude:";
+
+/** Claude Code on its default model, or pinned to one of the offered models ("claude:<model>"). */
+function claudeWorker(model = ""): Worker {
+  const name = CLAUDE_CLI_MODELS.find((m) => m.id === model)?.name ?? model;
+  const strengths = /haiku/.test(model)
+    ? "Claude Code on the small, fast Claude model: agentic file edits for simple, well-scoped subtasks at low cost. Weaker than the larger Claude models on hard reasoning."
+    : /sonnet/.test(model)
+      ? "Claude Code on the balanced Claude model: solid reasoning and agentic file edits for everyday coding subtasks at moderate cost."
+      : "Strongest at complex reasoning, software architecture, multi-file refactors, careful debugging and agentic file edits. Best for the hardest or most safety-critical coding subtasks. Higher cost.";
   return {
-    id: "claude",
+    id: model ? `${CLAUDE_PREFIX}${model}` : "claude",
     kind: "claude-cli",
-    model: "",
-    label: "Claude Code",
-    strengths: "Strongest at complex reasoning, software architecture, multi-file refactors, careful debugging and agentic file edits. Best for the hardest or most safety-critical coding subtasks. Higher cost.",
+    model,
+    label: model ? `Claude Code · ${name.replace(/^Claude /, "")}` : "Claude Code",
+    strengths,
     editsFiles: true,
     local: false,
   };
 }
+
+/** Claude Code pinned to each offered model, for the editor (the planner's own pool keeps the default only). */
+const claudeModelWorkers = (): Worker[] => CLAUDE_CLI_MODELS.filter((m) => m.id).map((m) => claudeWorker(m.id));
 
 function geminiWorker(): Worker {
   return {
@@ -398,6 +411,8 @@ export async function discoverWorkers(clientProviders: ClientProvider[] = []): P
 export async function discoverAllWorkers(clientProviders: ClientProvider[] = []): Promise<Worker[]> {
   const [curated, pool] = await Promise.all([discoverWorkers(clientProviders), localPool()]);
   const out = curated.filter((w) => w.kind !== "ollama" && w.kind !== "pi");
+  const claudeAt = out.findIndex((w) => w.kind === "claude-cli");
+  if (claudeAt >= 0) out.splice(claudeAt + 1, 0, ...claudeModelWorkers());
   const ids = new Set(out.map((w) => w.id));
   for (const w of [...pool.ollama.map((m) => ollamaWorker(m.id)), ...curated.filter((x) => x.kind === "pi")]) {
     if (!ids.has(w.id)) { ids.add(w.id); out.push(w); }
@@ -406,7 +421,8 @@ export async function discoverAllWorkers(clientProviders: ClientProvider[] = [])
 }
 
 // Resolve a worker id against a pool, building an Ollama worker on the fly for
-// any ollama:<model> id (so manually-assigned local models always run). pi
+// any ollama:<model> id (so manually-assigned local models always run), and a
+// Claude Code worker for a claude:<model> id of the offered models. pi
 // workers are never built on the fly: only discovery knows that pi is
 // installed and the model can call tools — an unknown pi:<model> id falls
 // back to Auto like any other unavailable worker.
@@ -414,6 +430,10 @@ function findWorker(workers: Worker[], id: string): Worker | null {
   const found = workers.find((w) => w.id === id);
   if (found) return found;
   if (id.startsWith("ollama:") && id.length > "ollama:".length) return ollamaWorker(id.slice("ollama:".length));
+  // A role pinned to one of Claude Code's models, when Claude Code is available.
+  if (id.startsWith(CLAUDE_PREFIX) && workers.some((w) => w.kind === "claude-cli")) {
+    return claudeModelWorkers().find((w) => w.id === id) ?? null;
+  }
   return null;
 }
 

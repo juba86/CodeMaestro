@@ -363,6 +363,35 @@ describe("planner limits", () => {
   });
 });
 
+describe("Claude Code pinned to a model", () => {
+  it("a conductor and a role set to claude:<model> plan and work on that model", async () => {
+    const o = await loadOrchestrator(["claude"]);
+    const orchestra = defaultOrchestraConfig();
+    orchestra.conductor.workerId = "claude:opus";
+    orchestra.roles = orchestra.roles.map((r) => (r.id === "coder" ? { ...r, workerId: "claude:claude-haiku-5-5" } : r));
+    state.turnImpl = async (_row, prompt, emit) => {
+      if (isPlanner(prompt)) {
+        emit({ type: "text", content: JSON.stringify({ subtasks: [{ id: "s1", title: "Umsetzen", roleId: "coder", description: "bauen", dependsOn: [] }] }) });
+      }
+      return ok;
+    };
+    const logs: string[] = [];
+    const res = await o.planSubtasks(session, "t", { orchestra, onLog: (m) => logs.push(m) });
+    expect(logs.some((m) => m.includes("nicht verfügbar"))).toBe(false);
+    expect(state.turns.at(-1)!.row.model).toBe("opus");
+    expect(res.subtasks[0].workerId).toBe("claude:claude-haiku-5-5");
+
+    const c = collector();
+    await o.executePlan(session, "t", res.subtasks, c.io, { orchestra });
+    expect(c.events.find((e) => e.type === "subtask_start")).toMatchObject({ workerId: "claude:claude-haiku-5-5", workerLabel: "Claude Code · Haiku 5.5" });
+    expect(state.turns.some((t) => t.row.model === "claude-haiku-5-5")).toBe(true);
+    // An id outside the offered models is not built on the fly.
+    orchestra.conductor.workerId = "claude:nope";
+    await o.planSubtasks(session, "t", { orchestra, onLog: (m) => logs.push(m) });
+    expect(logs.some((m) => m.includes("nicht verfügbar"))).toBe(true);
+  });
+});
+
 // --- The session's conversation ---------------------------------------------------
 
 describe("continuing the session's conversation", () => {

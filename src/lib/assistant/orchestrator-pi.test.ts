@@ -125,7 +125,8 @@ function collector() {
   };
 }
 
-const ids = (ws: Worker[]) => ws.map((w) => w.id);
+// Claude Code's pinned-model variants ("claude:opus", …) are not what these tests are about.
+const ids = (ws: Worker[]) => ws.map((w) => w.id).filter((id) => !id.startsWith("claude:"));
 const workerOf = (c: OrchestraConfig, id: string) => c.roles.find((r) => r.id === id)?.workerId;
 const isPlanner = (p: string) => p.includes("orchestration planner");
 const isReview = (p: string) => p.includes("Review round");
@@ -153,6 +154,13 @@ describe("pi worker discovery", () => {
   it("adds a file-editing pi agent per tool-capable model; the others stay text-only Ollama workers", async () => {
     const o = await loadOrchestrator(["claude"]);
     const all = await o.discoverAllWorkers();
+    // The editor's pool also offers Claude Code pinned to each of its models, right after the default.
+    expect(all.slice(0, 3).map((w) => [w.id, w.model, w.label])).toEqual([
+      ["claude", "", "Claude Code"],
+      ["claude:opus", "opus", "Claude Code · Opus (neueste)"],
+      ["claude:sonnet", "sonnet", "Claude Code · Sonnet (neueste)"],
+    ]);
+    expect(all.some((w) => w.id === "claude:claude-haiku-5-5")).toBe(true);
     expect(ids(all)).toEqual([
       "claude",
       "ollama:qwen3-coder:30b", CHAT_GEMMA, "ollama:llava:7b",

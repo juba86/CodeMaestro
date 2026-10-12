@@ -193,7 +193,7 @@ export function workerParts(worker: OrchestraWorkerInfo): { name: string; detail
   const model = (worker.model ?? "").trim();
   switch (worker.kind) {
     case "claude-cli":
-      return { name: "Claude Code", detail: model };
+      return { name: "Claude Code", detail: worker.label.replace(/^Claude Code(\s*·\s*)?/, "") || model };
     case "gemini-cli":
       return { name: "Gemini CLI", detail: model };
     case "pi":
@@ -226,7 +226,7 @@ export function workerBlurb(worker: OrchestraWorkerInfo): string {
   const model = worker.model || worker.id;
   switch (worker.kind) {
     case "claude-cli":
-      return "Stärkstes Modell · Agent";
+      return /haiku/.test(model) ? "Schnell und günstig · Agent" : /sonnet/.test(model) ? "Ausgewogen · Agent" : "Stärkstes Modell · Agent";
     case "gemini-cli":
       return "Großer Kontext · Agent";
     case "pi":
