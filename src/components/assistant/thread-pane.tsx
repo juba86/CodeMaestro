@@ -42,6 +42,7 @@ export interface ThreadPaneProps {
   onStop: () => void;
   onDenyAll: () => void;
   onDelete: () => void;
+  onSchedule?: () => void;
   onInspector?: (tab: InspectorTab) => void;
   listCollapsed?: boolean;
   onExpandList?: () => void;
@@ -96,6 +97,7 @@ export function ThreadPane(p: ThreadPaneProps) {
     onStop: p.onStop,
     onDenyAll: p.onDenyAll,
     onDelete: p.onDelete,
+    onSchedule: p.onSchedule,
     onInspector: p.onInspector,
     listCollapsed: p.listCollapsed,
     onExpandList: p.onExpandList,

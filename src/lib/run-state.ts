@@ -24,7 +24,7 @@ export type RunState =
 export type ConnectionOverlay = "reconnecting" | "offline" | null;
 
 export type RunKind = "turn" | "orchestrate" | "loop";
-export type RunOrigin = "pwa" | "telegram";
+export type RunOrigin = "pwa" | "telegram" | "schedule" | "webhook";
 
 export interface RunStateInput {
   run?: { kind: RunKind; origin: RunOrigin; startedAt: number } | null;

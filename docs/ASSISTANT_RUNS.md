@@ -1,13 +1,14 @@
 # Assistant runs — how work survives a closed window
 
-Every piece of assistant work — a single turn, an orchestration, a loop, or a
-turn started from Telegram — is a **run** that lives on the server, not in an
-HTTP request. Browsers only *watch* runs. Closing the window, mobile standby, a
+Every piece of assistant work — a single turn, an orchestration, a loop, a
+turn started from Telegram, or a job a schedule starts by itself — is a
+**run** that lives on the server, not in an HTTP request. Browsers only *watch* runs. Closing the window, mobile standby, a
 reload or a flaky network never interrupts the work and never loses events,
 pending approvals or questions.
 
 ```
 POST /message | /orchestrate | /orchestrate/run | /loop   → 202 { runId }
+scheduler tick | POST /schedules/[id]/run | /schedules/trigger/[token]   (docs/SCHEDULES.md)
                      │
                      ▼
             launchRun (session-run.ts) ── work(ctx) runs detached
@@ -50,7 +51,9 @@ GET /events?since=N  ◄── SSE: replay buffered events after N, then live, u
 
 ## Guarantees and limits
 
-- One run per session; a second start gets `409 SESSION_BUSY`.
+- One run per session; a second start gets `409 SESSION_BUSY`. Runs carry an
+  origin: `pwa`, `telegram`, `schedule` (timer or „Jetzt ausführen“) or
+  `webhook`.
 - Stop aborts multi-step runs between steps, kills every CLI process of the
   session (including shells they spawned) and denies open approvals.
 - A server restart ends all runs (CLI processes do not survive it); the boot

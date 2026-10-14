@@ -9,7 +9,7 @@
 // module graphs; a plain module-level Map would silently fork per graph.
 
 export type RunKind = "turn" | "orchestrate" | "loop";
-export type RunOrigin = "pwa" | "telegram";
+export type RunOrigin = "pwa" | "telegram" | "schedule" | "webhook";
 export type RunEndStatus = "idle" | "error" | "stopped";
 
 /** Any JSON-serializable event with a `type` discriminator. */

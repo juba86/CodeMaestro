@@ -18,6 +18,8 @@ export interface SessionSummary {
   status: string;
   totalCostUsd: number;
   messageCount: number;
+  /** Enabled schedules of the session (cron / webhook agents). */
+  scheduled?: number;
   updatedAt: string;
 }
 

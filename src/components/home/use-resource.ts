@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { loadProviderSummary } from "@/components/settings/use-provider-setup";
+import type { ScheduleView } from "@/lib/schedule/types";
 import type { HomePrompt, HomeSession } from "./home-logic";
 
 export interface Resource<T> {
@@ -63,6 +64,8 @@ async function getJson<T>(url: string): Promise<T> {
 // Module-level loaders (stable identities for useResource).
 
 export const loadSessions = () => getJson<{ sessions: HomeSession[] }>("/api/assistant/sessions").then((d) => d.sessions ?? []);
+
+export const loadSchedules = () => getJson<{ schedules: ScheduleView[] }>("/api/assistant/schedules").then((d) => d.schedules ?? []);
 
 export const loadPrompts = () => getJson<{ prompts: HomePrompt[] }>("/api/prompts?limit=5").then((d) => d.prompts ?? []);
 

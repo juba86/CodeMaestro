@@ -41,6 +41,7 @@ import { NewSessionSheet } from "./new-session-sheet";
 import { OrchestraPlanCard, type PlanDraft } from "./plan-card";
 import { PLAN_REJECT_REASON, SKIP_QUESTION_REASON } from "./question-logic";
 import { pendingCards } from "./run-events";
+import { ScheduleSheet, useSchedules } from "./schedules";
 import { SessionPane } from "./session-pane";
 import { folderName, neighbourSession } from "./session-list";
 import { ThreadPane } from "./thread-pane";
@@ -49,6 +50,7 @@ import { touchedFiles, type TouchedFile } from "./tool-calls";
 import { useActiveRunState } from "./use-run-state";
 import { storedSessionId, useSessionRun } from "./use-session-run";
 import { DEFAULT_LOOP_OPTIONS, type LoopOptions, type PlannedSubtask, type SessionSummary } from "./types";
+import type { ScheduleInput, ScheduleView } from "@/lib/schedule/types";
 
 const LIST_COLLAPSED_KEY = "cm-assistant-list-collapsed";
 const WIDE_QUERY = "(min-width: 1280px)";
@@ -132,6 +134,12 @@ export function AssistantPage() {
       .catch(() => {});
   }, []);
 
+  // A run ending also refreshes the session's schedules (their last outcome).
+  const schedulesRefreshRef = React.useRef<() => Promise<void>>(async () => {});
+  const onSessionsChanged = React.useCallback(() => {
+    loadSessions();
+    void schedulesRefreshRef.current();
+  }, [loadSessions]);
   const {
     activeId,
     info,
@@ -148,7 +156,10 @@ export function AssistantPage() {
     startRun,
     stop,
     decide,
-  } = useSessionRun(loadSessions);
+  } = useSessionRun(onSessionsChanged);
+  const schedules = useSchedules(activeId);
+  schedulesRefreshRef.current = schedules.refresh;
+  const [scheduleEditor, setScheduleEditor] = React.useState<{ open: boolean; editing: ScheduleView | null; initial?: Partial<ScheduleInput> }>({ open: false, editing: null });
   const activeRef = React.useRef(activeId);
   React.useEffect(() => {
     activeRef.current = activeId;
@@ -321,6 +332,18 @@ export function AssistantPage() {
   React.useEffect(() => {
     inputRef.current = input;
   }, [input]);
+  /** „Zeitplan anlegen": the composer text (and loop settings) become the schedule's task. */
+  const openScheduleEditor = React.useCallback(
+    (editing: ScheduleView | null = null) => {
+      const text = inputRef.current.trim();
+      setScheduleEditor({
+        open: true,
+        editing,
+        initial: editing ? undefined : { prompt: text, mode: mode === "loop" ? "loop" : mode === "orchestrate" ? "orchestrate" : "turn", loop: loopBody(loopOpts) },
+      });
+    },
+    [mode, loopOpts],
+  );
   React.useEffect(() => {
     const save = () => {
       const text = inputRef.current;
@@ -678,8 +701,28 @@ export function AssistantPage() {
     onFile,
     onSelectSubtask,
     dev,
+    schedules,
+    onNewSchedule: () => openScheduleEditor(null),
+    onEditSchedule: (s: ScheduleView) => openScheduleEditor(s),
     now,
   };
+
+  const scheduleSheet = (
+    <ScheduleSheet
+      open={scheduleEditor.open}
+      onOpenChange={(o) => setScheduleEditor((e) => ({ ...e, open: o }))}
+      sessionId={activeId}
+      info={info}
+      editing={scheduleEditor.editing}
+      initial={scheduleEditor.initial}
+      onSaved={() => {
+        void schedules.refresh();
+        loadSessions();
+        if (!isMobile && wide) setInspectorTab("schedules");
+        else openInspector("schedules");
+      }}
+    />
+  );
 
   const planCard = activePlan ? (
     <OrchestraPlanCard
@@ -715,6 +758,7 @@ export function AssistantPage() {
       onStop={stopActive}
       onDenyAll={() => void denyAll()}
       onDelete={() => void deleteSession({ id: activeId })}
+      onSchedule={() => openScheduleEditor(null)}
       onInspector={isMobile || !wide ? openInspector : undefined}
       listCollapsed={!isMobile && listCollapsed}
       onExpandList={toggleList}
@@ -741,6 +785,7 @@ export function AssistantPage() {
         <div className="flex min-h-0 flex-1 flex-col bg-background">
           {threadPane ?? <MobileThreadLoading />}
           {inspectorSheet}
+          {scheduleSheet}
           {newSheet}
         </div>
       );
@@ -849,6 +894,7 @@ export function AssistantPage() {
         </aside>
       ) : null}
       {inspectorSheet}
+      {scheduleSheet}
       {newSheet}
     </div>
   );

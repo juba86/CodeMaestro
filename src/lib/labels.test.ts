@@ -53,7 +53,7 @@ describe("label maps cover every value the app stores", () => {
 
   it("run kinds, origins and navigation", () => {
     expect(Object.keys(RUN_KIND_LABEL)).toEqual(["turn", "orchestrate", "loop"]);
-    expect(Object.keys(RUN_ORIGIN_LABEL)).toEqual(["pwa", "telegram"]);
+    expect(Object.keys(RUN_ORIGIN_LABEL)).toEqual(["pwa", "telegram", "schedule", "webhook"]);
     for (const path of ["/", "/assistant", "/orchestra", "/builder", "/library", "/templates", "/playground", "/knowledge", "/settings"]) {
       expect(NAV_LABEL[path], path).toBeTruthy();
     }
@@ -72,6 +72,7 @@ describe("label functions", () => {
     expect(toolLabel("MultiEdit")).toBe("Bearbeiten");
     expect(runKindLabel("orchestrate")).toBe("Orchester");
     expect(runOriginLabel("telegram")).toBe("via Telegram");
+    expect(runOriginLabel("schedule")).toBe("per Zeitplan");
   });
 
   it("maps pi's lower-case tool names", () => {

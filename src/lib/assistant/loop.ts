@@ -189,7 +189,17 @@ async function runLoop(ctx: RunContext, cfg: LoopConfig, resumable: boolean): Pr
  * Starts a loop as a detached server-side run (PWA or Telegram). Throws
  * SessionBusyError when the session already runs something.
  */
-export async function startLoopRun(sessionId: string, cfg: LoopInput, origin: RunOrigin): Promise<RunHandle> {
+export async function startLoopRun(
+  sessionId: string,
+  cfg: LoopInput,
+  origin: RunOrigin,
+  opts: {
+    /** What the transcript shows as the task (default: the prompt itself; a scheduled run shows its task without the schedule block). */
+    display?: string;
+    /** Extra fields of the user row's meta (e.g. which schedule started the loop). */
+    meta?: Record<string, unknown>;
+  } = {}
+): Promise<RunHandle> {
   // Re-validate (Telegram calls this directly) so the caps always hold.
   const loop = assistantLoopSchema.parse(cfg);
   const session = await prisma.assistantSession.findUnique({ where: { id: sessionId }, select: { provider: true } });
@@ -203,10 +213,10 @@ export async function startLoopRun(sessionId: string, cfg: LoopInput, origin: Ru
     sessionId,
     kind: "loop",
     origin,
-    title: `[loop] ${loop.prompt}`,
+    title: `[loop] ${opts.display ?? loop.prompt}`,
     // Persisted only once the session is claimed (SessionBusyError otherwise),
     // so a concurrent start leaves no orphaned message.
-    userMessage: { content: `🔁 Loop: ${loop.prompt}`, meta: JSON.stringify({ loop: settings }) },
+    userMessage: { content: `🔁 Loop: ${opts.display ?? loop.prompt}`, meta: JSON.stringify({ ...opts.meta, loop: settings }) },
     work: (ctx) => runLoop(ctx, loop, RESUMING_PROVIDERS.has(session.provider)),
   });
 }

@@ -26,7 +26,7 @@ export async function GET() {
       status: true,
       totalCostUsd: true,
       updatedAt: true,
-      _count: { select: { messages: true } },
+      _count: { select: { messages: true, schedules: { where: { enabled: true } } } },
     },
   });
   return NextResponse.json({
@@ -40,6 +40,8 @@ export async function GET() {
       status: s.status === "running" && !isSessionBusy(s.id) ? "idle" : s.status,
       totalCostUsd: s.totalCostUsd,
       messageCount: s._count.messages,
+      // Enabled schedules (cron / webhook agents) of the session.
+      scheduled: s._count.schedules,
       updatedAt: s.updatedAt,
     })),
   });

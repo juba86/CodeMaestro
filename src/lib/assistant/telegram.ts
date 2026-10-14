@@ -1560,6 +1560,26 @@ export function stopBridge(): void {
   s.abort = null;
 }
 
+/**
+ * Sends a plain text to every allowed chat of the configured bot (schedules
+ * report their outcome this way). Needs the bridge to be enabled with a token;
+ * returns how many chats got it. Never throws.
+ */
+export async function notifyTelegramChats(text: string): Promise<number> {
+  try {
+    const cfg = await getTelegramConfig();
+    if (!cfg.enabled || !cfg.token || !cfg.allowedChatIds.length) return 0;
+    let sent = 0;
+    for (const chatId of cfg.allowedChatIds) {
+      if ((await sendMessage(cfg.token, chatId, text)) !== null) sent++;
+    }
+    return sent;
+  } catch (err) {
+    console.warn("[telegram] notifyTelegramChats failed", err);
+    return 0;
+  }
+}
+
 /** Validates a token against Telegram without starting the loop. */
 export async function testToken(token: string): Promise<{ ok: boolean; username?: string }> {
   const me = await tg<{ username?: string }>(token, "getMe");

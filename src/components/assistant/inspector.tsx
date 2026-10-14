@@ -19,9 +19,11 @@ import { DevServerPanel, type DevServer } from "./dev-server-panel";
 import { formatContext, sortPiModels, usePiStatus } from "./pi-status";
 import type { LoopTimeline } from "./thread-model";
 import type { TouchedFile } from "./tool-calls";
+import { SchedulePanel, type SchedulesState } from "./schedules";
+import type { ScheduleView } from "@/lib/schedule/types";
 import type { RunMeta, SessionInfo } from "./types";
 
-export type InspectorTab = "run" | "orchestra" | "files" | "dev";
+export type InspectorTab = "run" | "orchestra" | "files" | "dev" | "schedules";
 
 export interface InspectorProps {
   tab: InspectorTab;
@@ -38,6 +40,10 @@ export interface InspectorProps {
   onFile: (f: TouchedFile) => void;
   onSelectSubtask: (subtaskId: string) => void;
   dev: DevServer;
+  /** The session's schedules (cron / webhook agents). */
+  schedules: SchedulesState;
+  onNewSchedule: () => void;
+  onEditSchedule: (s: ScheduleView) => void;
   now: number;
   className?: string;
 }
@@ -237,6 +243,13 @@ export function Inspector(props: InspectorProps) {
           Dateien
         </TabsTrigger>
         <TabsTrigger value="dev">Dev-Server</TabsTrigger>
+        <TabsTrigger
+          value="schedules"
+          count={props.schedules.schedules.length || undefined}
+          countLabel={props.schedules.schedules.length ? `${props.schedules.schedules.length} Zeitpläne` : undefined}
+        >
+          Zeitpläne
+        </TabsTrigger>
       </TabsList>
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
         <TabsContent value="run">
@@ -256,6 +269,17 @@ export function Inspector(props: InspectorProps) {
         </TabsContent>
         <TabsContent value="dev">
           <DevServerPanel dev={dev} />
+        </TabsContent>
+        <TabsContent value="schedules">
+          <SchedulePanel
+            sessionId={props.info?.id ?? null}
+            schedules={props.schedules.schedules}
+            loading={props.schedules.loading}
+            now={props.now}
+            onNew={props.onNewSchedule}
+            onEdit={props.onEditSchedule}
+            onChanged={() => void props.schedules.refresh()}
+          />
         </TabsContent>
       </div>
     </Tabs>

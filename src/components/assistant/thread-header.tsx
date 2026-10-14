@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { FileText, MoreHorizontal, PanelLeftOpen, PanelRight, Server, ShieldX, Square, Trash2 } from "lucide-react";
+import { CalendarClock, CalendarPlus, FileText, MoreHorizontal, PanelLeftOpen, PanelRight, Server, ShieldX, Square, Trash2 } from "lucide-react";
 import { AppBar } from "@/components/ui/app-bar";
 import { Button, IconButton } from "@/components/ui/button";
 import {
@@ -31,6 +31,8 @@ export interface ThreadHeaderProps {
   onStop: () => void;
   onDenyAll: () => void;
   onDelete: () => void;
+  /** Opens the schedule editor (prefilled with the composer text). */
+  onSchedule?: () => void;
   /** Opens the inspector (sheet) at a tab; undefined when the inspector is a column. */
   onInspector?: (tab: InspectorTab) => void;
   listCollapsed?: boolean;
@@ -42,8 +44,9 @@ function MoreMenu({
   onDenyAll,
   onDelete,
   onInspector,
+  onSchedule,
   mobile,
-}: Pick<ThreadHeaderProps, "pendingCount" | "onDenyAll" | "onDelete" | "onInspector"> & { mobile?: boolean }) {
+}: Pick<ThreadHeaderProps, "pendingCount" | "onDenyAll" | "onDelete" | "onInspector" | "onSchedule"> & { mobile?: boolean }) {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -68,10 +71,20 @@ function MoreMenu({
                   <Server />
                   Dev-Server
                 </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => onInspector("schedules")}>
+                  <CalendarClock />
+                  Zeitpläne
+                </DropdownMenuItem>
               </>
             ) : null}
             <DropdownMenuSeparator />
           </>
+        ) : null}
+        {onSchedule ? (
+          <DropdownMenuItem onSelect={onSchedule}>
+            <CalendarPlus />
+            Zeitplan anlegen
+          </DropdownMenuItem>
         ) : null}
         {pendingCount > 0 ? (
           <DropdownMenuItem onSelect={onDenyAll}>

@@ -78,6 +78,8 @@ export const RUN_KIND_LABEL: Record<string, string> = {
 export const RUN_ORIGIN_LABEL: Record<string, string> = {
   pwa: "in der App",
   telegram: "via Telegram",
+  schedule: "per Zeitplan",
+  webhook: "per Webhook",
 };
 
 /** Navigation labels keyed by route (plus the two mobile-only tabs). */

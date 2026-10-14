@@ -54,6 +54,7 @@ CodeMaestro turns AI coding from a single-terminal habit into an operable system
 - **Close the window, keep working** — every turn, loop and orchestration runs on the server; the UI re-attaches when you come back and restores pending approvals and questions. Push notifications tell you when a decision is needed.
 - **Orchestrate by roles** — an interactive **org chart** decides which model plays which role (conductor, architect, coder, reviewer, tester, …), with presets and an automatic review loop.
 - **Loops that know when to stop** — repeat a task until the agent prints a completion promise, hits an iteration cap, or reports it's blocked.
+- **Sessions become agents** — give a session a cron rhythm or a webhook and it runs its job on its own (only when the code changed, if you like) and reports the outcome by push or Telegram.
 - **You stay in command** — approval gate with diffs (or the shell command) before Edit/Write/Bash, deny-with-reason steering, sandbox, CSRF protection and an optional Tailscale identity allowlist.
 - **Private-first** — self-hosted, SQLite storage, local embeddings, secrets encrypted at rest. Your prompts, keys and code stay on your machines.
 
@@ -90,6 +91,12 @@ CodeMaestro turns AI coding from a single-terminal habit into an operable system
 - **Projekt fortsetzen**: every turn resumes the session's Claude Code conversation (`--resume`); a new session can pick up any earlier Claude Code conversation of the folder (newest preselected); orchestrations run on a fork of it and hand their summary back to the next turn.
 - **Loop mode**: repeat a task until the agent prints `<promise>DONE</promise>`, hits the iteration cap, or reports `<promise>BLOCKED</promise>`; optional pause between iterations; fresh context per iteration with a progress file ("Ralph") or a continued conversation.
 - Permission modes incl. `auto` and `dontAsk`, tool presets (incl. `Git` / `GitHub CLI` only), sandbox, file upload, dev-server launcher (optionally exposed over HTTPS via `tailscale serve`).
+
+### ⏰ Schedules — sessions that work on their own
+- Attach **cron jobs to any session** and it becomes an unattended agent: a nightly test run, an hourly review of new commits, a weekly dependency audit, a docs sync — as a single turn, a loop or an orchestration, with the session's permissions, approval gate and sandbox.
+- **Webhook trigger** per schedule: a POST on its secret URL starts the run and hands the body (a GitHub event, a CI failure, an alert) to the agent as context.
+- **Only when something changed**: a run can be skipped while the working tree (commits and dirty files, measured with git) is the same as after the last run. Busy session: skip or wait. Three failures in a row pause the schedule; an optional run cap switches it off.
+- Every run ends with a one-line headline that reaches you by **push or Telegram**; last outcome, next run and the agent's report sit in the session's inspector, the upcoming runs on the home screen. Ready-made templates and German cron descriptions in the editor. Details: [docs/SCHEDULES.md](./docs/SCHEDULES.md).
 
 ### 🧩 Orchestra — role-based multi-model orchestration
 - An **interactive org chart** (`/orchestra`): the conductor plans and summarizes; roles — Architekt, Coder, Reviewer, Tester, Recherche, Doku, or your own — each get a model by drag & drop or tap, with instructions and a file-edit capability.
@@ -243,19 +250,20 @@ Next.js App (App Router, React 19, Tailwind v4)
 ├─ src/proxy.ts                  CSRF guard + optional Tailscale identity allowlist for /api
 ├─ API routes
 │  ├─ /api/ai/*                  chat · models · validate
-│  ├─ /api/assistant/*           sessions · message/loop/orchestrate (202 + runId) · events (SSE) · approvals · pi · activity
+│  ├─ /api/assistant/*           sessions · message/loop/orchestrate (202 + runId) · events (SSE) · approvals · pi · activity · schedules (+ webhook trigger)
 │  ├─ /api/orchestra             org chart config + presets
 │  ├─ /api/github · /api/push    account connection · Web Push
 │  └─ /api/prompts, /templates, /test-results, /knowledge
 ├─ lib
 │  ├─ assistant/                 run hub (resumable runs) · runner (Claude/Gemini/pi/…) · approvals · loop · orchestrator + orchestra · telegram
+│  ├─ schedule/                  cron parser · schedules (fire, outcome, notifications) · 30 s scheduler · templates
 │  ├─ prompt-engine/             techniques · model profiles · linter · XML build/parse · generator/refiner prompts
 │  ├─ ai/                        provider factory, model discovery, pricing, embeddings
 │  └─ knowledge/                 shared RAG retrieval
 └─ Prisma + SQLite               prompts, versions, tests, knowledge, sessions, settings
 ```
 
-Assistant work runs detached from HTTP requests in a process-wide **run hub**: browsers attach over SSE (`EventSource`, resumable via `Last-Event-ID`), the transcript is persisted progressively, and approvals are published into the run so any client — or Telegram — can answer them. Details: [docs/ASSISTANT_RUNS.md](./docs/ASSISTANT_RUNS.md).
+Assistant work runs detached from HTTP requests in a process-wide **run hub**: browsers attach over SSE (`EventSource`, resumable via `Last-Event-ID`), the transcript is persisted progressively, and approvals are published into the run so any client — or Telegram — can answer them. Details: [docs/ASSISTANT_RUNS.md](./docs/ASSISTANT_RUNS.md). Schedules start the same kind of run from a timer or a webhook: [docs/SCHEDULES.md](./docs/SCHEDULES.md).
 
 ---
 

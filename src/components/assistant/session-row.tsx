@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { MoreHorizontal, Square, Trash2 } from "lucide-react";
+import { CalendarClock, MoreHorizontal, Square, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { IconButton } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
@@ -60,6 +60,7 @@ export const SessionRow = React.memo(function SessionRow({
   let extra: React.ReactNode = providerLabel(s.provider);
   if (state === "error") extra = <span className="text-danger">Letzter Lauf mit Fehler</span>;
   else if (run?.origin === "telegram") extra = <span className="text-info">via Telegram</span>;
+  else if (run?.origin === "schedule" || run?.origin === "webhook") extra = <span className="text-info">{run.origin === "webhook" ? "per Webhook" : "per Zeitplan"}</span>;
   else if (run?.kind === "loop") extra = loopLabel ?? "Loop läuft";
   else if (run?.kind === "orchestrate") extra = "Orchester";
   const badge = pendingLabel(pending);
@@ -91,6 +92,12 @@ export const SessionRow = React.memo(function SessionRow({
           </span>
           <span className="truncate text-xs text-muted-foreground">
             {folder} · {extra}
+            {s.scheduled ? (
+              <span className="ml-1.5 inline-flex items-center gap-0.5 align-baseline text-primary-text" title={s.scheduled === 1 ? "1 Zeitplan aktiv" : `${s.scheduled} Zeitpläne aktiv`}>
+                <CalendarClock aria-hidden className="size-3" />
+                <span className="sr-only">{s.scheduled === 1 ? "1 Zeitplan aktiv" : `${s.scheduled} Zeitpläne aktiv`}</span>
+              </span>
+            ) : null}
           </span>
           {badge ? (
             <span>

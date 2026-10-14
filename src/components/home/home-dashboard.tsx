@@ -15,10 +15,11 @@ import { RunningWidget, WaitingWidget } from "./activity-widgets";
 import { isFirstRun, newSessionHref, usageSince, type HomeSession } from "./home-logic";
 import { QuickStart } from "./quick-start";
 import { RecentWidget } from "./recent-widgets";
+import { SchedulesWidget } from "./schedules-widget";
 import { SetupChecklist, type SetupStep } from "./setup-checklist";
 import { StatusList, StatusStrip, type StatusSources } from "./status-overview";
 import {
-  loadGithub, loadKnowledge, loadPrompts, loadProviders, loadSessions, loadTelegram, useResource, type Resource,
+  loadGithub, loadKnowledge, loadPrompts, loadProviders, loadSchedules, loadSessions, loadTelegram, useResource, type Resource,
 } from "./use-resource";
 import { Widget, WidgetError } from "./widget";
 
@@ -101,6 +102,7 @@ export function HomeDashboard() {
   const github = useResource(loadGithub);
   const telegram = useResource(loadTelegram);
   const knowledge = useResource(loadKnowledge);
+  const schedules = useResource(loadSchedules);
   const push = usePushState();
   const standalone = useStandalone();
 
@@ -109,11 +111,15 @@ export function HomeDashboard() {
   const runKey = activity.runs.map((r) => r.sessionId).sort().join(",");
   const lastRunKey = useRef<string | null>(null);
   const retrySessions = sessions.retry;
+  const retrySchedules = schedules.retry;
   useEffect(() => {
     if (activity.loading) return;
-    if (lastRunKey.current !== null && lastRunKey.current !== runKey) retrySessions();
+    if (lastRunKey.current !== null && lastRunKey.current !== runKey) {
+      retrySessions();
+      retrySchedules();
+    }
     lastRunKey.current = runKey;
-  }, [runKey, activity.loading, retrySessions]);
+  }, [runKey, activity.loading, retrySessions, retrySchedules]);
 
   const sources: StatusSources = {
     reachable: activity.reachable,
@@ -207,6 +213,7 @@ export function HomeDashboard() {
 
         <div className="contents md:col-span-4 md:flex md:flex-col md:gap-6">
           <QuickStart sessions={sessions.data} className="order-3" />
+          <SchedulesWidget schedules={schedules} className="order-5" />
           <OrchestraSummaryCard variant="home" className="order-5" />
           <UsageWidget sessions={sessions} className="order-6" />
         </div>

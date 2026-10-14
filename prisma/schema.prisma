@@ -158,10 +158,48 @@ model AssistantSession {
   updatedAt      DateTime @updatedAt
 
   messages       AssistantMessage[]
+  schedules      SessionSchedule[]
 
   @@index([createdAt])
   // The session list and the activity snapshot order by updatedAt.
   @@index([updatedAt])
+}
+
+// A session's schedule: a task the session runs on its own — on a cron
+// rhythm, by webhook, or both — which turns the session into an unattended
+// agent with a recurring job (src/lib/schedule/). Bookkeeping fields hold the
+// last outcome so the UI and the scheduler never need the transcript.
+model SessionSchedule {
+  id              String   @id @default(cuid())
+  sessionId       String
+  name            String   @default("")
+  prompt          String
+  cron            String   @default("") // 5-field cron (server local time); "" = webhook only
+  mode            String   @default("turn") // turn | loop | orchestrate
+  loop            String   @default("{}") // JSON loop options (mode = loop)
+  useKnowledge    Boolean  @default(false)
+  onBusy          String   @default("skip") // skip | wait — when the session runs something at fire time
+  onlyIfChanged   Boolean  @default(false) // cron fires only when the working tree changed since the last run
+  notifyPush      Boolean  @default(true)
+  notifyTelegram  Boolean  @default(false)
+  maxRuns         Int?     // disable after this many runs
+  enabled         Boolean  @default(true)
+  triggerToken    String   @unique // secret of POST /api/assistant/schedules/trigger/[token]
+  runCount        Int      @default(0)
+  failStreak      Int      @default(0) // consecutive failed runs; three pause the schedule
+  lastRunAt       DateTime?
+  lastStatus      String   @default("") // running | done | error | stopped | skipped | unchanged | paused
+  lastSummary     String   @default("")
+  lastFingerprint String   @default("") // working-tree fingerprint after the last run (onlyIfChanged)
+  nextRunAt       DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  session         AssistantSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  // The scheduler polls WHERE enabled AND nextRunAt <= now.
+  @@index([enabled, nextRunAt])
 }
 
 model AssistantMessage {

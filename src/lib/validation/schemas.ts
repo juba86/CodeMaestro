@@ -5,6 +5,7 @@ import {
   ORCHESTRA_PRESET_VALUES,
   ROLE_ID_PATTERN,
 } from "@/lib/assistant/orchestra-types";
+import { isValidCron } from "@/lib/schedule/cron";
 
 // --- Shared enums ---
 
@@ -290,6 +291,41 @@ export const assistantLoopSchema = z.object({
   // Stop the loop when an iteration ends with an error.
   stopOnError: z.boolean().optional().default(true),
 });
+
+// --- Session schedules (src/lib/schedule) ---
+
+const scheduleLoopSchema = z.object({
+  maxIterations: z.number().int().min(1).max(100).optional().default(10),
+  completionPromise: z.string().trim().min(1).max(100).optional().default("DONE"),
+  intervalSec: z.number().int().min(0).max(86400).optional().default(0),
+  freshContext: z.boolean().optional().default(false),
+  stopOnError: z.boolean().optional().default(true),
+});
+
+const scheduleFields = {
+  name: z.string().trim().min(1, "Name fehlt.").max(80),
+  prompt: z.string().trim().min(1, "Aufgabe fehlt.").max(20000),
+  // "" = no time trigger (webhook only); otherwise a valid 5-field cron.
+  cron: z
+    .string()
+    .trim()
+    .max(100)
+    .refine((v) => v === "" || isValidCron(v), "Ungültiger Cron-Ausdruck (Minute Stunde Tag Monat Wochentag).")
+    .optional()
+    .default(""),
+  mode: z.enum(["turn", "loop", "orchestrate"]).optional().default("turn"),
+  loop: scheduleLoopSchema.optional().default({ maxIterations: 10, completionPromise: "DONE", intervalSec: 0, freshContext: false, stopOnError: true }),
+  useKnowledge: z.boolean().optional().default(false),
+  onBusy: z.enum(["skip", "wait"]).optional().default("skip"),
+  onlyIfChanged: z.boolean().optional().default(false),
+  notifyPush: z.boolean().optional().default(true),
+  notifyTelegram: z.boolean().optional().default(false),
+  maxRuns: z.number().int().min(1).max(100000).nullable().optional(),
+  enabled: z.boolean().optional().default(true),
+};
+
+export const scheduleCreateSchema = z.object({ sessionId: z.string().min(1).max(60), ...scheduleFields });
+export const schedulePatchSchema = z.object(scheduleFields).partial();
 
 // --- Telegram bridge ---
 
